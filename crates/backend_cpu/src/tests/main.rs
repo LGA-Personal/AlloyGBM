@@ -1848,11 +1848,12 @@ fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
 
     let backend = CpuBackend;
     let histograms = backend
-        .build_histograms(
+        .build_histograms_with_grad_sq(
             &sample_binned_matrix(),
             &sample_gradients(),
             &sample_node(),
             &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            true,
         )
         .expect("histograms should build");
 

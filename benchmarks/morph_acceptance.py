@@ -64,6 +64,8 @@ class FixtureSpec:
     rounds: int
     variant: str
     query_count: int = 0
+    lambda_l1: float = 0.0
+    leaf_solver: str = "standard"
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,38 @@ def quick_specs() -> tuple[FixtureSpec, ...]:
             )
         )
     return tuple(quick)
+
+
+def regularized_specs() -> tuple[FixtureSpec, ...]:
+    base = full_specs()
+    dro_names = {
+        "reg-small-narrow",
+        "binary-imbalanced",
+        "multiclass-wide",
+        "rank-small-query",
+    }
+    specs: list[FixtureSpec] = []
+    for lambda_l1 in (0.1, 0.5):
+        suffix = str(lambda_l1).replace(".", "")
+        specs.extend(
+            replace(
+                spec,
+                name=f"{spec.name}-l1-{suffix}",
+                lambda_l1=lambda_l1,
+            )
+            for spec in base
+        )
+        specs.extend(
+            replace(
+                spec,
+                name=f"{spec.name}-l1-{suffix}-dro",
+                lambda_l1=lambda_l1,
+                leaf_solver="dro",
+            )
+            for spec in base
+            if spec.name in dro_names
+        )
+    return tuple(specs)
 
 
 def normalized_improvement(control: float, candidate: float, higher_is_better: bool) -> float:
@@ -409,6 +443,9 @@ def _fit_record(
         "seed": seed,
         "deterministic": True,
         "n_jobs": 1,
+        "lambda_l1": spec.lambda_l1,
+        "leaf_solver": spec.leaf_solver,
+        "dro_radius": 0.05,
         **ARMS[arm],
     }
     started = time.perf_counter()
@@ -455,12 +492,26 @@ def _fit_record(
 
 
 def run_matrix(
-    arms: Sequence[str], seeds: Sequence[int], *, quick: bool = False
+    arms: Sequence[str],
+    seeds: Sequence[int],
+    *,
+    quick: bool = False,
+    profile: str = "default",
 ) -> list[MorphBenchmarkRecord]:
     unknown = sorted(set(arms) - ARMS.keys())
     if unknown:
         raise ValueError(f"unknown benchmark arms: {unknown}")
-    specs = quick_specs() if quick else full_specs()
+    if profile == "regularized":
+        specs = regularized_specs()
+        if quick:
+            specs = tuple(
+                replace(spec, rows=min(spec.rows, 768), features=min(spec.features, 48), rounds=12)
+                for spec in specs
+            )
+    elif profile == "default":
+        specs = quick_specs() if quick else full_specs()
+    else:
+        raise ValueError(f"unknown benchmark profile: {profile}")
     records: list[MorphBenchmarkRecord] = []
     for case_index, spec in enumerate(specs):
         for seed in seeds:
@@ -519,9 +570,7 @@ def main() -> None:
     parser.add_argument("--profile", choices=["default", "regularized"], default="default")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    if args.profile != "default":
-        raise SystemExit("regularized profile is enabled by the Task 5 implementation")
-    records = run_matrix(args.arms, args.seeds, quick=args.quick)
+    records = run_matrix(args.arms, args.seeds, quick=args.quick, profile=args.profile)
     write_results(
         args.output,
         records,

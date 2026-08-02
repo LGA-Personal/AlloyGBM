@@ -78,6 +78,17 @@ def test_ranking_fixture_returns_query_sizes() -> None:
     assert sum(group_te) == len(X_te) == len(y_te)
 
 
+def test_regularized_profile_covers_l1_levels_and_dro_families() -> None:
+    specs = ACCEPTANCE.regularized_specs()
+    assert {spec.lambda_l1 for spec in specs} == {0.1, 0.5}
+    assert {spec.task_family for spec in specs if spec.leaf_solver == "dro"} == {
+        "regression",
+        "binary",
+        "multiclass",
+        "ranking",
+    }
+
+
 def test_normalized_improvement_respects_metric_direction() -> None:
     assert ACCEPTANCE.normalized_improvement(2.0, 1.5, False) == pytest.approx(0.25)
     assert ACCEPTANCE.normalized_improvement(0.8, 0.84, True) == pytest.approx(0.05)

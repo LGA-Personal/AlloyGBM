@@ -520,13 +520,13 @@ git commit -m "bench: verify MorphBoost SIMD performance"
 - Uses the split `gain_gradient_sum`/`info_gradient_sum` contract from Task 2.
 - Produces an accepted production change or a documented rejection with production behavior restored.
 
-- [ ] **Step 1: Add a failing separation test**
+- [x] **Step 1: Add a failing separation test**
 
 Construct a post-warmup L1 fixture and require the information channel to receive raw side/parent
 gradient sums while Newton gain receives effective sums. Add a Morph+DRO compatibility case with
 the same separation. Keep ordinary zero-L1 Morph identical because raw and effective sums coincide.
 
-- [ ] **Step 2: Run focused tests before changing call sites**
+- [x] **Step 2: Run focused tests before changing call sites**
 
 ```bash
 cargo test -p alloygbm-backend-cpu information_gradient -- --nocapture
@@ -535,13 +535,13 @@ cargo test -p alloygbm-backend-cpu information_gradient -- --nocapture
 Expected: the new assertion fails because current-control call sites assign effective gradients to
 both channels.
 
-- [ ] **Step 3: Implement the candidate consistently**
+- [x] **Step 3: Implement the candidate consistently**
 
 In scalar numeric/categorical call sites and `morph_scan`, assign raw histogram gradient sums to
 `info_gradient_sum`, including raw parent totals. Keep `gain_gradient_sum` L1/DRO-adjusted. Do not
 change EMA statistics, leaf solving, or standard gain.
 
-- [ ] **Step 4: Run targeted regularization calibration**
+- [x] **Step 4: Run targeted regularization calibration**
 
 Run calibration seeds on cases with `lambda_l1` in `{0.1, 0.5}`, plus Morph+DRO compatibility
 cases, and write the candidate output:
@@ -558,7 +558,11 @@ Call `relabel_arm(candidate_records, "morph_current", "morph_raw_info")`, merge 
 the frozen optimized-control records through `merge_record_sets`, then call `evaluate_candidate`
 with `control_arm="morph_current"` and `candidate_arm="morph_raw_info"`.
 
-- [ ] **Step 5: Apply the promotion decision without leaving an experiment switch**
+- [x] **Step 5: Apply the promotion decision without leaving an experiment switch**
+
+Result: rejected after 78 paired calibration fits. Equal-dataset mean was `-1.529%`, median was
+`-0.295%`, regression-family mean was `-3.168%`, and the worst pair was `-21.987%`. Production was
+restored to effective-gradient information statistics; confirmation seeds were not run.
 
 If calibration passes, run confirmation seeds `3,4` and retain the candidate only if the combined
 gate passes. If rejected, change every `info_gradient_sum` assignment back to its corresponding
@@ -567,7 +571,7 @@ confirm `git diff` contains no production formula change from this task. In both
 mean/median/worst/family/bootstrap results and the decision in
 `pr132_morph_formula_trials.md`.
 
-- [ ] **Step 6: Commit the decision and evidence**
+- [x] **Step 6: Commit the decision and evidence**
 
 If accepted:
 
