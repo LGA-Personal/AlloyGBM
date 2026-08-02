@@ -6,7 +6,7 @@
 
 | Date | Reviewer | Version reviewed | Commit | Status |
 |---|---|---|---|---|
-| 2026-08-02 | OpenAI Codex | `main` after PR #131 | `77dbf6d` | Approved for implementation |
+| 2026-08-02 | OpenAI Codex | `main` after PR #131 | `77dbf6d` | Implemented; ready for review |
 
 **Goal:** Close the MorphBoost scalar-scanner review finding with an exhaustive SIMD scanner,
 repair its quality benchmarks and warmup semantics, and promote formula/default changes only when
@@ -796,28 +796,28 @@ its threshold; the evidence document remains.
 - Produces the final reproducible performance/quality report and closes special-modes review §2.3.
 - Records exact promoted and rejected behavior changes without overstating cross-platform speed.
 
-- [ ] **Step 1: Run the final candidate benchmark ladder**
+- [x] **Step 1: Run the final candidate benchmark ladder**
 
 Rebuild release mode, rerun the seven-repeat scanner benchmark, full five-seed acceptance matrix,
 and public Morph report. Run `perf_at_scale.py --scale medium` for auto/Morph/Morph-cosine. Run the
 large scale and Numerai only when local memory/data permit; record an explicit omission reason
 otherwise.
 
-- [ ] **Step 2: Write the evidence report**
+- [x] **Step 2: Write the evidence report**
 
 `docs/benchmarks/morphboost_pr132.md` must identify hardware, OS, source commits, commands, dataset
 shapes, seeds, medians, scanner speedups, end-to-end changes, quality gate statistics, promoted
 formula/defaults, rejected trials, and conditional secondary decisions. Distinguish scanner,
 native-fit, and total-fit timing.
 
-- [ ] **Step 3: Update user and review documentation**
+- [x] **Step 3: Update user and review documentation**
 
 Update formulas/default tables only for promoted changes. Explain that numeric split search remains
 exhaustive and SIMD-vectorized, list scalar fallback combinations, and avoid claiming Morph always
 beats auto. In the special-modes resolution, mark §2.3 fixed with PR #132 evidence and preserve links
 to PR #111's calibration closure.
 
-- [ ] **Step 4: Run all formatting, lint, test, and documentation gates**
+- [x] **Step 4: Run all formatting, lint, test, and documentation gates**
 
 ```bash
 cargo fmt --all -- --check
@@ -835,7 +835,7 @@ maturin develop --release
 Expected: every command passes. Compare the final verification JSON to the committed final-candidate
 records and require the same gate decision.
 
-- [ ] **Step 5: Inspect the final diff and artifact compatibility**
+- [x] **Step 5: Inspect the final diff and artifact compatibility**
 
 ```bash
 git diff --check main...HEAD
@@ -847,7 +847,7 @@ git diff main...HEAD -- crates/core/src/artifact_format.rs crates/core/src/lib.r
 Expected: no uncommitted files, no artifact-schema changes, no experimental runtime switch, and no
 top-k scanner. Confirm existing model-load tests passed in the full suite.
 
-- [ ] **Step 6: Mark planning documents complete and commit closure**
+- [x] **Step 6: Mark planning documents complete and commit closure**
 
 Set both PR #132 planning-document statuses to `Implemented; ready for review`, then commit:
 

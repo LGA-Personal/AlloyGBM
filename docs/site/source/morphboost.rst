@@ -46,6 +46,19 @@ In addition:
   (``1 - morph_rate * progress``).
 - An optional balance penalty discourages highly imbalanced splits.
 
+Split Search Implementation
+---------------------------
+
+Numeric MorphBoost split search remains exhaustive: every valid threshold and
+both missing-value directions are evaluated. Ordinary post-warmup scans use
+safe eight-lane SIMD, while pure-gradient warmup rounds dispatch to the exact
+standard scanner. MorphBoost combined with DRO leaves or factor split
+penalties remains on the scalar scanner, as do native categorical splits.
+These fallbacks affect performance, not the gain contract.
+
+See ``docs/benchmarks/morphboost_pr132.md`` for the measured scanner and
+fit-time results. Performance and quality remain workload-dependent.
+
 Enabling It
 -----------
 

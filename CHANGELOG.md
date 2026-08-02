@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Vectorized exhaustive MorphBoost numeric split scanning.** Ordinary
+  post-warmup numeric Morph scans now evaluate all thresholds and both missing
+  directions in safe eight-lane SIMD, while warmup dispatches to the exact
+  standard scanner. Morph+DRO, factor-penalized, and native-categorical paths
+  retain scalar fallbacks. The parent L1/DRO gain term is now computed from the
+  independently adjusted parent signal. On Apple M4, 255-bin scanning improved
+  1.92x and the nine-shape paired matrix improved median Morph fit time 30.4%;
+  quality/default trials retained the existing information and balance settings.
+
 - **Closed the sklearn estimator contract.** `GBMRegressor` and
   `GBMClassifier` now pass every applicable scikit-learn 1.8 and 1.9 estimator
   check, with correct semantic mixin order, clone-safe parameter handling,

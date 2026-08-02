@@ -2,7 +2,7 @@
 
 | Date | Reviewer | Version reviewed | Commit | Status |
 |---|---|---|---|---|
-| 2026-08-02 | OpenAI Codex | `main` after PR #131 | `77dbf6d` | Approved for implementation |
+| 2026-08-02 | OpenAI Codex | `main` after PR #131 | `77dbf6d` | Implemented; ready for review |
 
 ## Objective
 
