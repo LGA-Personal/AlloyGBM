@@ -15,6 +15,7 @@ mod backend_ops;
 mod factor_split;
 mod morph;
 pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+mod morph_scan;
 
 mod pl_histogram;
 pub use pl_histogram::build_linear_histograms_cpu;
@@ -1666,7 +1667,9 @@ impl CpuBackend {
 
     /// Morph-mode best split for a single numeric feature.
     ///
-    /// Thin wrapper around `best_split_for_feature_inner` with `GainStrategy::Morph`.
+    /// Ordinary numeric Morph uses the exhaustive SIMD scanner. DRO and
+    /// factor-penalized modes retain the scalar oracle because their candidate
+    /// formulas require additional per-bin state.
     pub(crate) fn best_split_morph_numeric_feature(
         feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
@@ -1674,6 +1677,14 @@ impl CpuBackend {
         morph: &MorphContext,
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
+        if options.dro_config.is_none() && factor_context.is_none() {
+            return morph_scan::best_split_morph_numeric_simd(
+                feature_histogram,
+                node_id,
+                *options,
+                morph,
+            );
+        }
         Self::best_split_for_feature_inner(
             feature_histogram,
             node_id,

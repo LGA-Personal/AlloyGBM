@@ -341,7 +341,7 @@ git commit -m "fix: restore MorphBoost warmup gain semantics"
 - Consumes thread-local prefix buffers through `with_split_scan_scratch`.
 - Keeps `best_split_for_feature_inner(..., GainStrategy::Morph(...), ...)` as scalar oracle/fallback.
 
-- [ ] **Step 1: Add failing deterministic and randomized parity tests**
+- [x] **Step 1: Add failing deterministic and randomized parity tests**
 
 Create a fixed-seed local linear-congruential generator in the Rust test module so no dependency is
 added. Generate valid histograms across 16/64/255 bins, missing mass, L1 values, row/Hessian floors,
@@ -360,7 +360,7 @@ and gain tolerance. If winners differ, recompute scalar gains for both and allow
 when neither materially exceeds the other. Add explicit tests for tail lanes, all-invalid lanes,
 non-finite candidate masking, and a balance ratio immediately below/at 0.1.
 
-- [ ] **Step 2: Run the new scanner tests and observe the missing symbol**
+- [x] **Step 2: Run the new scanner tests and observe the missing symbol**
 
 ```bash
 cargo test -p alloygbm-backend-cpu morph_simd -- --nocapture
@@ -368,14 +368,14 @@ cargo test -p alloygbm-backend-cpu morph_simd -- --nocapture
 
 Expected: compilation fails because `morph_scan` and its SIMD function do not exist.
 
-- [ ] **Step 3: Create the focused SIMD module and prefix preparation**
+- [x] **Step 3: Create the focused SIMD module and prefix preparation**
 
 Declare `mod morph_scan;` in `lib.rs`. In the new module, sum feature totals exactly as the scalar
 path does, extract missing stats, fill the three existing prefix slices, and broadcast totals and
 per-round constants. Return `None` under the same short-feature, low-parent-Hessian, and empty-scan
 conditions as the scalar oracle.
 
-- [ ] **Step 4: Implement eight-lane candidate evaluation**
+- [x] **Step 4: Implement eight-lane candidate evaluation**
 
 For each missing direction, load padded arrays into `f32x8`; derive left/right statistics; apply
 `l1_threshold_f32x8`; compute parent/child Newton terms, curvature normalization, standardized
@@ -383,19 +383,19 @@ information terms with `f32x8::ln`, and balance adjustment with masked `f32x8::e
 Hessian, leaf-magnitude, finite, edge, and tail masks before extracting gains. Use
 `gain_materially_exceeds` in scalar lane order so deterministic tie preference matches the oracle.
 
-- [ ] **Step 5: Reconstruct one winning candidate**
+- [x] **Step 5: Reconstruct one winning candidate**
 
 Store only `(gain, threshold_bin, default_left)` during scanning. Reconstruct raw child
 `NodeStats` from prefix/missing statistics once after reduction. Do not retain lane-sized candidate
 vectors or allocate a shortlist.
 
-- [ ] **Step 6: Route eligible post-warmup scans to SIMD**
+- [x] **Step 6: Route eligible post-warmup scans to SIMD**
 
 In `best_split_morph_numeric_feature`, use SIMD only when `dro_config.is_none()` and
 `factor_context.is_none()`. Keep pure-standard routing from Task 2 ahead of this branch. Leave
 categorical, DRO, and factor paths on their existing scalar scaffolds.
 
-- [ ] **Step 7: Run scanner and backend tests**
+- [x] **Step 7: Run scanner and backend tests**
 
 ```bash
 cargo fmt --all -- --check
@@ -404,7 +404,7 @@ cargo test -p alloygbm-backend-cpu morph -- --nocapture
 cargo clippy -p alloygbm-backend-cpu --all-targets -- -D warnings
 ```
 
-- [ ] **Step 8: Commit exhaustive SIMD scanning**
+- [x] **Step 8: Commit exhaustive SIMD scanning**
 
 ```bash
 git add crates/backend_cpu/src/morph_scan.rs crates/backend_cpu/src/lib.rs \
