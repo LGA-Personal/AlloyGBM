@@ -116,14 +116,12 @@ Classifier targets use sklearn target typing when available and equivalent fallb
 ## Sample-Weight Semantics
 
 Sample weights must be one-dimensional, finite, nonnegative, and length-matched. An all-zero vector
-raises a message stating that the weights sum to zero. Rows with zero weight are removed before
-quantization, categorical encoding, grouping, factor neutralization, or native training so fitting
-with a zero-weight row is equivalent to omitting that row.
-
-The row filter must be applied consistently to `X`, `y`, groups, categorical value columns, time
-indices, and factor exposures. Validation/evaluation weights follow the same nonnegative contract.
-For ranking, groups that become empty after filtering disappear; surviving group IDs retain their
-relative query ordering.
+raises a message stating that the weights sum to zero. Native objectives represent zero-weight rows
+with zero gradient and hessian, and sampling excludes zero-hessian rows, making them equivalent to
+omission. Bounded nonnegative integer weights are expanded as exact frequency weights across `X`,
+`y`, groups, categorical values, time indices, and factor exposures; larger or fractional weights
+retain the native weighted-loss path. Validation/evaluation weights follow the same nonnegative
+contract.
 
 ## Classifier Labels And Outputs
 
@@ -209,7 +207,9 @@ needed, and the 2026-07-02 core review resolution. Documentation will state the 
 versions, delayed parameter-validation timing, fitted-attribute lifecycle, unsupported sparse input,
 classifier label support, and the ranker's mandatory group-aware contract.
 
-Valid trained-model artifacts and native training/prediction math do not change. Existing pickles
-and saved models remain loadable; restored objects gain the corrected public fitted attributes.
+The artifact format and native prediction math do not change. Native weighted objectives now accept
+zero weights, and deterministic equal-gain split comparison uses an f32-scaled tolerance so exact
+frequency-weight fits match row repetition. Existing pickles and saved models remain loadable;
+restored objects gain the corrected public fitted attributes.
 Code that reads fitted attributes before fit or expects invalid known parameters to fail in
 `__init__`/`set_params` will observe the intentional sklearn-conformance behavior change.

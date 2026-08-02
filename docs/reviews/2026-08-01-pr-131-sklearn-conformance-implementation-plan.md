@@ -37,7 +37,8 @@ runtime, pytest, GitHub Actions, Sphinx.
   only in the test harness.
 - Use test-first changes and observe each focused test fail for the intended reason before editing
   production code.
-- Do not change Rust code or the model artifact format in this PR.
+- Keep the model artifact format unchanged. Rust changes are limited to the
+  sample-weight and deterministic equal-gain contracts required by estimator conformance.
 
 ---
 
@@ -600,7 +601,7 @@ Run: `cargo clippy --workspace --exclude alloygbm-python --all-targets -- -D war
 
 Run: `cargo test --workspace`
 
-Expected: all workspace tests and doctests pass; no Rust behavior changed.
+Expected: all workspace tests and doctests pass; the artifact format remains unchanged.
 
 - [ ] **Step 3: Rebuild and run the complete Python suite**
 

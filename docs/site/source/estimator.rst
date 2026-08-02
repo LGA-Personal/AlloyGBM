@@ -3,6 +3,13 @@ GBMRegressor
 
 ``GBMRegressor`` is the main Python estimator for regression in AlloyGBM.
 
+With the optional scikit-learn dependency installed, the estimator contract is
+certified against scikit-learn 1.8 and 1.9. Constructor and ``set_params``
+assignments remain clone-safe and known invalid values are rejected when
+``fit`` begins. Numeric inputs must be dense and two-dimensional. NaN features
+are supported; sparse, complex, infinite, empty, and one-dimensional inputs are
+rejected before native training.
+
 Core parameters
 ---------------
 
@@ -534,12 +541,16 @@ Important ``fit(...)`` rules:
 - ``categorical_time_aware=True`` requires ``time_index`` during training and
   ``eval_time_index`` for validation when ``eval_set`` is used
 - ``sample_weight`` applies per-sample weights to the training loss
+  (zero-weight rows are equivalent to omission; an all-zero vector is rejected)
 
 Post-fit attributes
 -------------------
 
-After fitting, the estimator may expose:
+Learned attributes do not exist before a successful fit or model load. After
+fitting, the estimator exposes:
 
+- ``n_features_in_`` -- number of input features seen during fit
+- ``feature_names_in_`` -- present only for fit inputs with all-string names
 - ``best_iteration_``
 - ``best_score_``
 - ``n_estimators_``

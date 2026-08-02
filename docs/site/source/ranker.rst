@@ -6,9 +6,16 @@ GBMRanker
 Overview
 --------
 
-``GBMRanker`` extends ``GBMRegressor`` with ranking-specific objectives. All
-ranking objectives require query group identifiers to be passed in ``fit()``.
-Data is sorted by group internally.
+``GBMRanker`` is a dedicated estimator shell over AlloyGBM's shared native
+training core and does not claim generic regressor or classifier semantics.
+All ranking objectives require query group identifiers to be passed in
+``fit()``. Data is sorted by group internally.
+
+Generic scikit-learn checks cannot provide mandatory query groups, so the test
+suite uses a test-only adapter that supplies deterministic groups and separately
+tests the public ``fit(X, y, *, group=...)`` contract. Scikit-learn 1.8 and 1.9
+are certified with no AlloyGBM-specific exclusions. Sparse matrices remain
+unsupported.
 
 Quick example
 -------------

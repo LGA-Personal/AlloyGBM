@@ -40,6 +40,14 @@ model behavior and artifact compatibility. There is no artifact format change.
   zero-copy native prediction path. ``GBMRegressor.predict_from_artifact(...)``
   remains a list-returning compatibility helper.
 
+- **Certified scikit-learn estimator conformance.** ``GBMRegressor`` and
+  ``GBMClassifier`` pass every applicable estimator check on scikit-learn 1.8
+  and 1.9. Fitted-state, feature-schema, parameter, dense-input, sample-weight,
+  classifier-label, and prediction-array contracts now follow their semantic
+  estimator mixins. ``GBMRanker`` has equivalent group-aware coverage without
+  relaxing its mandatory ``group=`` argument. Sparse matrices remain
+  unsupported and are rejected explicitly.
+
 - **Vectorized Python evaluation metrics.** Regression, classification,
   ranking, finance, and GLM deviance helpers in ``alloygbm.evaluation`` now
   coerce inputs through NumPy arrays and compute with vector operations while
