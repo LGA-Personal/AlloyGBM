@@ -6,9 +6,12 @@ import math
 import sys
 from collections.abc import Sequence
 
+from .._sklearn_compat import _check_array, _column_or_1d
+
 
 _MAX_SUPPORTED_TRAIN_ROUNDS = 4_096
 _MAX_NATIVE_MIN_ROWS_PER_LEAF = (1 << 32) - 1
+_MAX_FREQUENCY_WEIGHT_EXPANSION_ROWS = 1_000_000
 
 
 def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | None:
@@ -131,6 +134,21 @@ class _ValidationMixin:
     injects ``_validation.GBMRegressor = GBMRegressor`` (a top-level
     ``from ._core import GBMRegressor`` would create a circular import).
     """
+
+    @staticmethod
+    def _validate_numeric_features(X: object) -> object:
+        validated = _check_array(
+            X,
+            accept_sparse=False,
+            dtype="numeric",
+            ensure_all_finite="allow-nan",
+            ensure_2d=True,
+            ensure_min_samples=1,
+            ensure_min_features=1,
+        )
+        if hasattr(X, "columns") and hasattr(X, "to_numpy"):
+            return X
+        return validated
 
     def _prepare_factor_exposures(self, factor_exposures, n_rows: int):
         if self.neutralization == "none":
@@ -582,12 +600,20 @@ class _ValidationMixin:
 
     @staticmethod
     def _validate_targets(y: object) -> list[float]:
-        targets_like = GBMRegressor._coerce_sequence_like(y, "y")
-        if not isinstance(targets_like, Sequence) or isinstance(targets_like, (str, bytes)):
-            raise TypeError("y must be a sequence of numeric values")
+        import numpy as np
+
+        targets_like = _column_or_1d(y, warn=True)
         if len(targets_like) == 0:
-            raise ValueError("y must contain at least one value")
-        return [float(value) for value in targets_like]
+            raise ValueError("Found array with 0 sample(s) in y; a minimum of 1 is required")
+        if np.iscomplexobj(targets_like):
+            raise ValueError("Complex targets are not supported")
+        try:
+            targets = np.asarray(targets_like, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("y must contain numeric values") from exc
+        if not np.isfinite(targets).all():
+            raise ValueError("y must contain only finite values; infinity and NaN are invalid")
+        return targets.tolist()
 
     @staticmethod
     def _validate_categorical_values(
@@ -653,24 +679,57 @@ class _ValidationMixin:
         and produce zero-gradient pairs (effectively excluding the row from
         that training round).
         """
-        values_like = GBMRegressor._coerce_sequence_like(
-            sample_weight, "sample_weight"
-        )
-        if not isinstance(values_like, Sequence) or isinstance(values_like, (str, bytes)):
-            raise TypeError("sample_weight must be a sequence of numeric values")
-        if len(values_like) != row_count:
+        import numpy as np
+
+        try:
+            values = np.asarray(sample_weight)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("sample_weight must be array-like and numeric") from exc
+        if values.ndim != 1:
+            raise ValueError("sample_weight must be one-dimensional")
+        if len(values) != row_count:
             raise ValueError(
                 "sample_weight must have the same number of elements as rows in X"
             )
         weights: list[float] = []
-        for i, w in enumerate(values_like):
-            fw = float(w)
+        for i, w in enumerate(values):
+            try:
+                fw = float(w)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError(f"sample_weight[{i}] must be numeric") from exc
             if not math.isfinite(fw):
                 raise ValueError(f"sample_weight[{i}] must be finite")
             if fw < 0.0:
                 raise ValueError(f"sample_weight[{i}] must be non-negative")
             weights.append(fw)
+        if not any(weight > 0.0 for weight in weights):
+            raise ValueError("sample weights must contain at least one non-zero weight")
         return weights
+
+    @staticmethod
+    def _frequency_weight_repeats(sample_weights: list[float]):
+        import numpy as np
+
+        weights = np.asarray(sample_weights, dtype=np.float64)
+        if not np.equal(weights, np.floor(weights)).all():
+            return None
+        expanded_rows = int(weights.sum())
+        if expanded_rows > _MAX_FREQUENCY_WEIGHT_EXPANSION_ROWS:
+            return None
+        return weights.astype(np.int64)
+
+    @staticmethod
+    def _repeat_arraylike_rows(value: object | None, repeats) -> object | None:
+        if value is None:
+            return None
+        import numpy as np
+
+        indices = np.repeat(np.arange(len(repeats)), repeats)
+        if hasattr(value, "iloc"):
+            repeated = value.iloc[indices]  # type: ignore[attr-defined]
+            reset_index = getattr(repeated, "reset_index", None)
+            return reset_index(drop=True) if callable(reset_index) else repeated
+        return np.asarray(value)[indices]
 
     @staticmethod
     def _validate_group(group: object, row_count: int) -> list[int]:

@@ -34,9 +34,9 @@ impl ObjectiveOps for SquaredErrorObjective {
             let mut weighted_sum = 0.0_f32;
             let mut weight_sum = 0.0_f32;
             for (target, weight) in targets.iter().zip(weights) {
-                if !weight.is_finite() || *weight <= 0.0 {
+                if !weight.is_finite() || *weight < 0.0 {
                     return Err(EngineError::ContractViolation(
-                        "sample weights must be finite and > 0".to_string(),
+                        "sample weights must be finite and non-negative".to_string(),
                     ));
                 }
                 weighted_sum += target * weight;
@@ -80,13 +80,20 @@ impl ObjectiveOps for SquaredErrorObjective {
         let mut gradients = Vec::with_capacity(predictions.len());
         for index in 0..predictions.len() {
             let weight = sample_weights.map_or(1.0, |weights| weights[index]);
-            if !weight.is_finite() || weight <= 0.0 {
+            if !weight.is_finite() || weight < 0.0 {
                 return Err(EngineError::ContractViolation(
-                    "sample weights must be finite and > 0".to_string(),
+                    "sample weights must be finite and non-negative".to_string(),
                 ));
             }
             let residual = predictions[index] - targets[index];
-            gradients.push(GradientPair::new(residual * weight, weight)?);
+            if weight == 0.0 {
+                gradients.push(GradientPair {
+                    grad: 0.0,
+                    hess: 0.0,
+                });
+            } else {
+                gradients.push(GradientPair::new(residual * weight, weight)?);
+            }
         }
         Ok(gradients)
     }

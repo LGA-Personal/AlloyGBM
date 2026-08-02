@@ -107,7 +107,7 @@ class TestFitAndPredictThreeClasses(unittest.TestCase):
         clf = GBMClassifier(n_estimators=20, seed=42)
         clf.fit(X_train, y_train)
         preds = clf.predict(X_train)
-        self.assertIsInstance(preds, list)
+        self.assertIsInstance(preds, np.ndarray)
         self.assertEqual(len(preds), len(y_train))
         valid_labels = set(int(c) for c in np.unique(y_train))
         for p in preds:
@@ -148,7 +148,7 @@ class TestClassesAttributeSetCorrectly(unittest.TestCase):
         clf = GBMClassifier(n_estimators=10, seed=42)
         clf.fit(X_train, y_train)
         expected_classes = sorted(set(int(c) for c in y_train))
-        self.assertEqual(clf.classes_, expected_classes)
+        np.testing.assert_array_equal(clf.classes_, expected_classes)
         self.assertEqual(clf.n_classes_, len(expected_classes))
 
 
@@ -167,7 +167,7 @@ class TestLabelEncodingNonContiguous(unittest.TestCase):
         clf = GBMClassifier(n_estimators=20, seed=42)
         clf.fit(X, y)
 
-        self.assertEqual(clf.classes_, [2, 5, 9])
+        np.testing.assert_array_equal(clf.classes_, [2, 5, 9])
         self.assertEqual(clf.n_classes_, 3)
 
         preds = clf.predict(X)
@@ -232,9 +232,9 @@ class TestPickleRoundtripMulticlass(unittest.TestCase):
         restored_preds = restored.predict(X_train)
         restored_proba = restored.predict_proba(X_train)
 
-        self.assertEqual(original_preds, restored_preds)
+        np.testing.assert_array_equal(original_preds, restored_preds)
         np.testing.assert_allclose(original_proba, restored_proba, atol=1e-5)
-        self.assertEqual(restored.classes_, clf.classes_)
+        np.testing.assert_array_equal(restored.classes_, clf.classes_)
         self.assertEqual(restored.n_classes_, clf.n_classes_)
         self.assertEqual(restored._label_encoder, clf._label_encoder)
         self.assertEqual(restored._label_decoder, clf._label_decoder)
@@ -264,9 +264,9 @@ class TestSaveLoadModelMulticlass(unittest.TestCase):
         restored_preds = restored.predict(X)
         restored_proba = restored.predict_proba(X)
 
-        self.assertEqual(original_preds, restored_preds)
+        np.testing.assert_array_equal(original_preds, restored_preds)
         np.testing.assert_allclose(original_proba, restored_proba, atol=1e-5)
-        self.assertEqual(restored.classes_, clf.classes_)
+        np.testing.assert_array_equal(restored.classes_, clf.classes_)
         self.assertEqual(restored.n_classes_, clf.n_classes_)
 
 
@@ -282,14 +282,14 @@ class TestAutoDetectBinaryVsMulticlass(unittest.TestCase):
         clf_bin = GBMClassifier(n_estimators=5, seed=42)
         clf_bin.fit(X, y_bin)
         self.assertEqual(clf_bin.n_classes_, 2)
-        self.assertEqual(clf_bin.classes_, [0, 1])
+        np.testing.assert_array_equal(clf_bin.classes_, [0, 1])
 
         # Multiclass: labels {0, 1, 2}
         y_mc = np.digitize(X[:, 0], [-0.5, 0.5]).astype(np.int64)
         clf_mc = GBMClassifier(n_estimators=5, seed=42)
         clf_mc.fit(X, y_mc)
         self.assertEqual(clf_mc.n_classes_, 3)
-        self.assertEqual(clf_mc.classes_, [0, 1, 2])
+        np.testing.assert_array_equal(clf_mc.classes_, [0, 1, 2])
 
 
 class TestTwoClassesUsesBinaryPath(unittest.TestCase):
@@ -468,7 +468,7 @@ class TestMulticlassWarmStart(unittest.TestCase):
 
         m.n_estimators = 10
         m.fit(X_train, y_train)
-        assert m.classes_ == classes_first
+        np.testing.assert_array_equal(m.classes_, classes_first)
         assert m.n_classes_ == n_classes_first
 
     def test_warm_start_probas_sum_to_one(self) -> None:

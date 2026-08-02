@@ -331,6 +331,57 @@ fn quantile_cuts_from_sorted_values(sorted_values: &[f32], max_bins: usize) -> V
     cuts
 }
 
+fn quantile_cuts_from_weighted_values(sorted_values: &[(f32, f32)], max_bins: usize) -> Vec<f32> {
+    if sorted_values.len() <= 1 {
+        return Vec::new();
+    }
+    let integer_frequency_weights = sorted_values
+        .iter()
+        .all(|(_, weight)| *weight >= 0.0 && weight.fract() == 0.0);
+    let total_weight = sorted_values
+        .iter()
+        .map(|(_, weight)| f64::from(*weight))
+        .sum::<f64>();
+    if total_weight <= 0.0 {
+        return Vec::new();
+    }
+    let effective_count = if integer_frequency_weights && total_weight <= usize::MAX as f64 {
+        total_weight as usize
+    } else {
+        sorted_values
+            .iter()
+            .filter(|(_, weight)| *weight > 0.0)
+            .count()
+    };
+    let bin_count = max_bins.min(effective_count);
+    if bin_count <= 1 {
+        return Vec::new();
+    }
+
+    let mut cuts = Vec::with_capacity(bin_count - 1);
+    for quantile_index in 1..bin_count {
+        let threshold = if integer_frequency_weights {
+            ((quantile_index as u128 * effective_count as u128) / bin_count as u128) as f64
+        } else {
+            quantile_index as f64 * total_weight / bin_count as f64
+        };
+        let mut cumulative_weight = 0.0_f64;
+        let mut cut_value = sorted_values[sorted_values.len() - 1].0;
+        for (value, weight) in sorted_values {
+            cumulative_weight += f64::from(*weight);
+            if cumulative_weight > threshold {
+                cut_value = *value;
+                break;
+            }
+        }
+        if cuts.last().copied().is_some_and(|last| cut_value <= last) {
+            continue;
+        }
+        cuts.push(cut_value);
+    }
+    cuts
+}
+
 fn evenly_spaced_row_index(sample_index: usize, sample_count: usize, row_count: usize) -> usize {
     if sample_count <= 1 {
         return row_count / 2;
@@ -345,24 +396,43 @@ fn derive_dense_feature_quantile_cuts(
     feature_count: usize,
     max_bins: usize,
     sketch_max_rows: Option<usize>,
+    sample_weights: Option<&[f32]>,
 ) -> (Vec<Vec<f32>>, Vec<String>) {
     let sampled_row_count = sketch_max_rows.filter(|max_rows| row_count > *max_rows);
     let selected_row_count = sampled_row_count.unwrap_or(row_count);
     let derive_feature_cuts = |feature_index: usize| {
-        let mut column = Vec::with_capacity(selected_row_count);
-        for selected_index in 0..selected_row_count {
-            let row_index = if sampled_row_count.is_some() {
-                evenly_spaced_row_index(selected_index, selected_row_count, row_count)
-            } else {
-                selected_index
-            };
-            let value = values[row_index * feature_count + feature_index];
-            if !value.is_nan() {
-                column.push(value);
+        if let Some(weights) = sample_weights {
+            let mut column = Vec::with_capacity(selected_row_count);
+            for selected_index in 0..selected_row_count {
+                let row_index = if sampled_row_count.is_some() {
+                    evenly_spaced_row_index(selected_index, selected_row_count, row_count)
+                } else {
+                    selected_index
+                };
+                let value = values[row_index * feature_count + feature_index];
+                let weight = weights[row_index];
+                if !value.is_nan() && weight > 0.0 {
+                    column.push((value, weight));
+                }
             }
+            column.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
+            quantile_cuts_from_weighted_values(&column, max_bins)
+        } else {
+            let mut column = Vec::with_capacity(selected_row_count);
+            for selected_index in 0..selected_row_count {
+                let row_index = if sampled_row_count.is_some() {
+                    evenly_spaced_row_index(selected_index, selected_row_count, row_count)
+                } else {
+                    selected_index
+                };
+                let value = values[row_index * feature_count + feature_index];
+                if !value.is_nan() {
+                    column.push(value);
+                }
+            }
+            column.sort_unstable_by(f32::total_cmp);
+            quantile_cuts_from_sorted_values(&column, max_bins)
         }
-        column.sort_unstable_by(f32::total_cmp);
-        quantile_cuts_from_sorted_values(&column, max_bins)
     };
 
     const SORT_SCRATCH_BUDGET_BYTES: usize = 20 * 1024 * 1024;
@@ -1342,6 +1412,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                     feature_count,
                     max_bins,
                     quantile_sketch_max_rows,
+                    sample_weights.as_deref(),
                 );
                 ContinuousBinningMetadataInternal {
                     uses_continuous_binning: true,

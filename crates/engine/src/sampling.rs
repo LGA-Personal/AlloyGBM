@@ -172,8 +172,40 @@ pub(crate) fn select_row_indices_for_round(
             }
         }
         BoostingMode::Standard | BoostingMode::Dart { .. } => {
-            let (selected, excluded) =
-                sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+            let active = gradients
+                .iter()
+                .enumerate()
+                .filter_map(|(index, pair)| (pair.hess > 0.0).then_some(index))
+                .collect::<Vec<_>>();
+            if active.len() == row_count {
+                let (selected, excluded) =
+                    sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+                return RoundRowSelection {
+                    selected: selected
+                        .into_iter()
+                        .map(|row_index| row_index as u32)
+                        .collect(),
+                    excluded: excluded
+                        .into_iter()
+                        .map(|row_index| row_index as u32)
+                        .collect(),
+                };
+            }
+            let (selected_positions, _) =
+                sampled_index_partition(active.len(), row_subsample, seed_base, round_index);
+            let selected = selected_positions
+                .into_iter()
+                .map(|position| active[position])
+                .collect::<Vec<_>>();
+            let mut selected_mask = vec![false; row_count];
+            for &row_index in &selected {
+                selected_mask[row_index] = true;
+            }
+            let excluded = selected_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(index, selected)| (!selected).then_some(index))
+                .collect::<Vec<_>>();
             RoundRowSelection {
                 selected: selected
                     .into_iter()
@@ -255,8 +287,42 @@ pub(crate) fn select_row_indices_for_round_multiclass(
             }
         }
         BoostingMode::Standard | BoostingMode::Dart { .. } => {
-            let (selected, excluded) =
-                sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+            let active = (0..row_count)
+                .filter(|&index| {
+                    class_gradient_buffers
+                        .iter()
+                        .any(|gradients| gradients[index].hess > 0.0)
+                })
+                .collect::<Vec<_>>();
+            if active.len() == row_count {
+                let (selected, excluded) =
+                    sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+                return RoundRowSelection {
+                    selected: selected
+                        .into_iter()
+                        .map(|row_index| row_index as u32)
+                        .collect(),
+                    excluded: excluded
+                        .into_iter()
+                        .map(|row_index| row_index as u32)
+                        .collect(),
+                };
+            }
+            let (selected_positions, _) =
+                sampled_index_partition(active.len(), row_subsample, seed_base, round_index);
+            let selected = selected_positions
+                .into_iter()
+                .map(|position| active[position])
+                .collect::<Vec<_>>();
+            let mut selected_mask = vec![false; row_count];
+            for &row_index in &selected {
+                selected_mask[row_index] = true;
+            }
+            let excluded = selected_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(index, selected)| (!selected).then_some(index))
+                .collect::<Vec<_>>();
             RoundRowSelection {
                 selected: selected
                     .into_iter()

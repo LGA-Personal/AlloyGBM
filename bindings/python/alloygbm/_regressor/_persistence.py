@@ -159,11 +159,17 @@ class _PersistenceMixin:
         # Classifier-specific metadata
         from alloygbm.classifier import GBMClassifier
         if isinstance(self, GBMClassifier):
-            metadata["classifier_classes"] = getattr(self, "classes_", None)
+            classes = getattr(self, "classes_", None)
+            metadata["classifier_classes"] = (
+                classes.tolist() if hasattr(classes, "tolist") else classes
+            )
             metadata["classifier_n_classes"] = getattr(self, "n_classes_", None)
             encoder = getattr(self, "_label_encoder", None)
             metadata["classifier_label_encoder"] = (
                 {str(k): v for k, v in encoder.items()} if encoder is not None else None
+            )
+            metadata["classifier_label_encoder_items"] = (
+                list(encoder.items()) if encoder is not None else None
             )
             metadata["classifier_num_classes_for_training"] = getattr(
                 self, "_num_classes_for_training", None
@@ -282,15 +288,25 @@ class _PersistenceMixin:
         from alloygbm.classifier import GBMClassifier
 
         if isinstance(model, GBMClassifier):
+            import numpy as np
+
             saved_classes = metadata.get("classifier_classes")
             if saved_classes is not None:
-                model.classes_ = saved_classes
+                model.classes_ = np.asarray(saved_classes)
                 model.n_classes_ = metadata.get("classifier_n_classes", len(saved_classes))
             else:
-                model.classes_ = [0, 1]
+                model.classes_ = np.asarray([0, 1])
                 model.n_classes_ = 2
+            saved_encoder_items = metadata.get("classifier_label_encoder_items")
             saved_encoder = metadata.get("classifier_label_encoder")
-            if saved_encoder is not None:
+            if saved_encoder_items is not None:
+                model._label_encoder = {
+                    key: int(value) for key, value in saved_encoder_items
+                }
+                model._label_decoder = {
+                    value: key for key, value in model._label_encoder.items()
+                }
+            elif saved_encoder is not None:
                 model._label_encoder = {int(k): v for k, v in saved_encoder.items()}
                 model._label_decoder = {v: int(k) for k, v in saved_encoder.items()}
             else:

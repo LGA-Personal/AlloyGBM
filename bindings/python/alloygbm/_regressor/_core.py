@@ -1605,6 +1605,9 @@ class _GBMEstimatorCore(
             and len(effective_categorical_indices) > 0
         )
 
+        if not has_categorical:
+            X = self._validate_numeric_features(X)
+
         # Backward-compat aliases used by some downstream code paths
         effective_categorical_feature_index: int | None = (
             effective_categorical_indices[0]
@@ -1641,13 +1644,6 @@ class _GBMEstimatorCore(
             feature_count = len(training_rows[0])
         if row_count != len(targets):
             raise ValueError("X and y must contain the same number of rows")
-        (
-            factor_exposure_values,
-            factor_exposure_row_count,
-            factor_exposure_factor_count,
-            transformed_factor_exposures,
-        ) = self._prepare_factor_exposures(factor_exposures, row_count)
-
         if init_model is not None and hasattr(init_model, "_n_features_in"):
             if (
                 init_model._n_features_in is not None
@@ -1671,6 +1667,55 @@ class _GBMEstimatorCore(
                     UserWarning,
                     stacklevel=2,
                 )
+            else:
+                repeats = self._frequency_weight_repeats(validated_sample_weights)
+                if repeats is not None:
+                    X = self._repeat_arraylike_rows(X, repeats)
+                    targets = self._repeat_arraylike_rows(targets, repeats).tolist()
+                    y = targets
+                    group = self._repeat_arraylike_rows(group, repeats)
+                    time_index = self._repeat_arraylike_rows(time_index, repeats)
+                    factor_exposures = self._repeat_arraylike_rows(
+                        factor_exposures, repeats
+                    )
+                    if categorical_values_list is not None:
+                        categorical_values_list = [
+                            self._repeat_arraylike_rows(values, repeats).tolist()
+                            for values in categorical_values_list
+                        ]
+                        categorical_values = (
+                            categorical_values_list[0]
+                            if len(categorical_values_list) == 1
+                            else None
+                        )
+                    row_count = len(targets)
+                    dense_training_bytes_payload = (
+                        self._native_matrix_bytes_payload(X)
+                        if not has_categorical
+                        else None
+                    )
+                    dense_training_payload = (
+                        self._native_matrix_flat_payload(X)
+                        if not has_categorical and dense_training_bytes_payload is None
+                        else None
+                    )
+                    training_rows = (
+                        self._validate_rows(
+                            X,
+                            categorical_feature_indices=effective_categorical_indices,
+                        )
+                        if dense_training_bytes_payload is None
+                        and dense_training_payload is None
+                        else None
+                    )
+                    validated_sample_weights = None
+
+        (
+            factor_exposure_values,
+            factor_exposure_row_count,
+            factor_exposure_factor_count,
+            transformed_factor_exposures,
+        ) = self._prepare_factor_exposures(factor_exposures, row_count)
 
         # Target-domain validation for GLM objectives — applied to training
         # targets here, and again to validation targets after `eval_set` is
@@ -2830,6 +2875,13 @@ class _GBMEstimatorCore(
             return values.reshape(-1)
         return np.asarray(values, dtype=np.float32).reshape(-1)
 
+    def _check_prediction_feature_count(self, feature_count: int) -> None:
+        if feature_count != self.n_features_in_:
+            raise ValueError(
+                f"X has {feature_count} features, but {type(self).__name__} is expecting "
+                f"{self.n_features_in_} features as input"
+            )
+
     def predict(self, X: object) -> np.ndarray:
         """Predict using the fitted native artifact."""
         self._require_fitted()
@@ -2846,6 +2898,7 @@ class _GBMEstimatorCore(
             self._convert_predictor_thresholds_to_float()
         # Convert native categorical columns to integer IDs before prediction.
         X = self._apply_native_cat_mappings_for_predict(X)
+        X = self._validate_numeric_features(X)
         rows: object
         # Fast path: float thresholds + zero-copy numpy — no data copying
         if self._float_thresholds_converted:
@@ -2855,11 +2908,7 @@ class _GBMEstimatorCore(
                 candidate = self._native_matrix_fast_path_candidate(X)
                 if candidate is not None:
                     arr = _np.ascontiguousarray(candidate, dtype=_np.float32)
-                    if arr.shape[1] != self._n_features_in:
-                        raise ValueError(
-                            f"X feature count {arr.shape[1]} does not match fitted "
-                            f"feature count {self._n_features_in}"
-                        )
+                    self._check_prediction_feature_count(arr.shape[1])
                     predict_numpy = getattr(
                         self._native_predictor_handle, "predict_numpy", None
                     )
@@ -2872,11 +2921,7 @@ class _GBMEstimatorCore(
             dense_payload = self._native_matrix_flat_payload(X)
             if dense_payload is not None:
                 flat_values, row_count, feature_count = dense_payload
-                if feature_count != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {feature_count} does not match fitted feature count "
-                        f"{self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(feature_count)
                 # Float threshold fallback (when bytes path unavailable)
                 if self._float_thresholds_converted:
                     predict_dense = getattr(
@@ -3001,37 +3046,21 @@ class _GBMEstimatorCore(
             if self._float_thresholds_converted:
                 # Float thresholds: send raw (unquantized) rows directly
                 validated_rows = self._validate_rows(X)
-                if len(validated_rows[0]) != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {len(validated_rows[0])} does not match fitted "
-                        f"feature count {self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(len(validated_rows[0]))
                 rows = validated_rows
             else:
                 quantized_rows = self._quantize_rows_for_prediction(self._validate_rows(X))
-                if len(quantized_rows[0]) != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {len(quantized_rows[0])} does not match fitted "
-                        f"feature count {self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(len(quantized_rows[0]))
                 rows = quantized_rows
         else:
             dense_payload = self._native_matrix_flat_payload(X)
             if dense_payload is not None:
                 _, _, feature_count = dense_payload
-                if feature_count != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {feature_count} does not match fitted feature count "
-                        f"{self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(feature_count)
                 rows = dense_payload
             else:
                 validated_rows = self._validate_rows(X)
-                if len(validated_rows[0]) != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {len(validated_rows[0])} does not match fitted feature count "
-                        f"{self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(len(validated_rows[0]))
                 rows = validated_rows
         if self._native_predictor_handle is not None:
             if isinstance(rows, tuple):

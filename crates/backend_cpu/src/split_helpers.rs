@@ -38,6 +38,11 @@ pub(crate) fn apply_feature_weight(candidate: &SplitCandidate, feature_weights: 
     }
 }
 
+pub(crate) fn gain_materially_exceeds(candidate: f32, current: f32) -> bool {
+    let tolerance = 1e-6_f32 * candidate.abs().max(current.abs()).max(1.0);
+    candidate > current + tolerance
+}
+
 pub(crate) fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
     if l1_alpha <= 0.0 {
         return grad_sum;

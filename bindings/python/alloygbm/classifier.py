@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ._regressor._core import _GBMEstimatorCore
-from ._sklearn_compat import _ClassifierMixin
+from ._sklearn_compat import _ClassifierMixin, _column_or_1d, _type_of_target
 from .regressor import GBMRegressor
 
 if TYPE_CHECKING:
@@ -32,17 +32,17 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
     """
 
     # -- Fitted attributes ---------------------------------------------------
-    classes_: list[int]
+    classes_: np.ndarray
     """Unique class labels (sorted) after fit."""
 
     n_classes_: int
     """Number of classes after fit."""
 
     # -- Private multi-class state -------------------------------------------
-    _label_encoder: dict[int, int] | None
+    _label_encoder: dict[object, int] | None
     """Maps original label -> 0..K-1 index. None for native {0,1} binary."""
 
-    _label_decoder: dict[int, int] | None
+    _label_decoder: dict[int, object] | None
     """Maps 0..K-1 index -> original label. None for native {0,1} binary."""
 
     _num_classes_for_training: int | None
@@ -188,13 +188,13 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             eval_metric=eval_metric,
             factor_exposures=factor_exposures,
         )
-        self.classes_ = sorted_classes
+        self.classes_ = np.asarray(sorted_classes)
         self.n_classes_ = n_classes
         return self
 
     # -- predict (class labels) -----------------------------------------------
 
-    def predict(self, X: object) -> list[int]:
+    def predict(self, X: object) -> np.ndarray:
         """Predict class labels for samples in X.
 
         For binary: thresholds predicted probabilities at 0.5.
@@ -205,14 +205,14 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             indices = np.argmax(proba, axis=1)
             decoder = self._label_decoder
             if decoder is not None:
-                return [decoder[int(i)] for i in indices]
-            return [int(i) for i in indices]
+                return np.asarray([decoder[int(i)] for i in indices])
+            return np.asarray(indices, dtype=np.int64)
         else:
             p1 = super().predict(X)
             raw = [1 if p >= 0.5 else 0 for p in p1]
             if self._label_decoder is not None:
-                return [self._label_decoder[v] for v in raw]
-            return raw
+                return np.asarray([self._label_decoder[v] for v in raw])
+            return np.asarray(raw, dtype=np.int64)
 
     # -- predict_proba --------------------------------------------------------
 
@@ -223,10 +223,10 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         ordered by ``self.classes_``.
         """
         if self._is_multiclass:
-            return self._predict_proba_multiclass(X)
+            return np.round(self._predict_proba_multiclass(X), decimals=7)
         # Binary path
         p1 = np.asarray(super().predict(X), dtype=np.float64)
-        return np.column_stack([1.0 - p1, p1])
+        return np.round(np.column_stack([1.0 - p1, p1]), decimals=7)
 
     def _predict_proba_multiclass(self, X: object) -> np.ndarray:
         """Multi-class prediction using native multi-class predictor."""
@@ -236,6 +236,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
 
         # Apply native categorical mappings (string -> float ID) before prediction
         X = self._apply_native_cat_mappings_for_predict(X)
+        X = self._validate_numeric_features(X)
 
         # Lazily reconstruct the native predictor after pickle roundtrip
         if self._native_predictor_handle is None and getattr(
@@ -255,11 +256,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             candidate = self._native_matrix_fast_path_candidate(X)
             if candidate is not None:
                 arr = np.ascontiguousarray(candidate, dtype=np.float32)
-                if arr.shape[1] != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {arr.shape[1]} does not match fitted "
-                        f"feature count {self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(arr.shape[1])
                 predict_fn = getattr(handle, "predict_numpy_multiclass", None)
                 if callable(predict_fn):
                     flat = predict_fn(arr)
@@ -271,11 +268,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         dense_payload = self._native_matrix_flat_payload(X)
         if dense_payload is not None:
             flat_values, row_count, feature_count = dense_payload
-            if feature_count != self._n_features_in:
-                raise ValueError(
-                    f"X feature count {feature_count} does not match fitted "
-                    f"feature count {self._n_features_in}"
-                )
+            self._check_prediction_feature_count(feature_count)
             predict_fn = getattr(handle, "predict_dense_multiclass", None)
             if callable(predict_fn):
                 flat = predict_fn(flat_values, row_count, feature_count)
@@ -314,10 +307,10 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         from .evaluation import accuracy
 
         predictions = self.predict(X)
-        _, _, _, label_map = self._encode_classification_targets(y, label_map=self._label_encoder)
+        self._encode_classification_targets(y, label_map=self._label_encoder)
         # Convert y to encoded labels for comparison
         if self._label_encoder is not None:
-            y_encoded = [self._label_encoder[int(v)] for v in self._to_list(y)]
+            y_encoded = [self._label_encoder[v] for v in self._to_list(y)]
             pred_encoded = [self._label_encoder.get(p, p) for p in predictions]
         else:
             y_encoded = [int(v) for v in self._to_list(y)]
@@ -430,7 +423,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         num_classes_for_training = state.pop("_classifier_num_classes_for_training", None)
         super().__setstate__(state)
         if classes is not None:
-            self.classes_ = classes
+            self.classes_ = np.asarray(classes)
         if n_classes is not None:
             self.n_classes_ = n_classes
         self._label_encoder = label_encoder
@@ -442,24 +435,20 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
     @staticmethod
     def _to_list(y: object) -> list:
         """Convert array-like to a flat Python list."""
-        if isinstance(y, np.ndarray):
-            return y.ravel().tolist()
-        if hasattr(y, "__iter__"):
-            return list(y)
-        raise TypeError(f"y must be array-like, got {type(y).__name__}")
+        return _column_or_1d(y).tolist()
 
     @staticmethod
     def _encode_classification_targets(
         y: object,
         *,
-        label_map: dict[int, int] | None = None,
-    ) -> tuple[list[float], list[int], int, dict[int, int]]:
+        label_map: dict[object, int] | None = None,
+    ) -> tuple[list[float], list[object], int, dict[object, int]]:
         """Encode classification targets to contiguous 0..K-1 float values.
 
         Parameters
         ----------
         y : array-like
-            Target labels (integers).
+            Target class labels.
         label_map : dict or None
             If provided, use this existing mapping. Otherwise, build one from y.
 
@@ -474,41 +463,21 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         label_map : dict[int, int]
             Mapping from original label to 0..K-1 index.
         """
-        try:
-            if isinstance(y, np.ndarray):
-                targets = y.ravel().tolist()
-            elif hasattr(y, "__iter__"):
-                targets = list(y)
-            else:
-                raise TypeError(
-                    f"y must be array-like, got {type(y).__name__}"
-                )
-        except ImportError:
-            if hasattr(y, "__iter__"):
-                targets = list(y)
-            else:
-                raise TypeError(
-                    f"y must be array-like, got {type(y).__name__}"
-                )
+        targets_array = _column_or_1d(y, warn=True)
+        target_type = _type_of_target(targets_array, input_name="y", raise_unknown=True)
+        if target_type not in {"binary", "multiclass"}:
+            raise ValueError(f"Unknown label type: {target_type}")
+        targets = targets_array.tolist()
 
         if len(targets) == 0:
             raise ValueError("y must not be empty")
 
-        # Convert to integers
-        int_targets: list[int] = []
-        for i, val in enumerate(targets):
-            fval = float(val)
-            rounded = round(fval)
-            if abs(fval - rounded) > 1e-6:
-                raise ValueError(
-                    f"GBMClassifier requires integer class labels, "
-                    f"but found value {val!r} at index {i}"
-                )
-            int_targets.append(int(rounded))
-
         if label_map is None:
             # Build encoding from data
-            sorted_classes = sorted(set(int_targets))
+            try:
+                sorted_classes = np.unique(targets_array).tolist()
+            except TypeError as exc:
+                raise ValueError("Classifier labels must have a consistent type") from exc
             n_classes = len(sorted_classes)
             if n_classes < 2:
                 raise ValueError(
@@ -522,7 +491,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
 
         # Encode targets
         float_targets: list[float] = []
-        for i, val in enumerate(int_targets):
+        for i, val in enumerate(targets):
             if val not in label_map:
                 raise ValueError(
                     f"Label {val} at index {i} not in known classes {sorted_classes}"

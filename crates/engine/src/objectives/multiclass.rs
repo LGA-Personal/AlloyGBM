@@ -89,8 +89,13 @@ impl MultiClassSoftmaxObjective {
                 0.0
             };
             let weight = sample_weights.map_or(1.0, |w| w[i]);
+            if !weight.is_finite() || weight < 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and non-negative".to_string(),
+                ));
+            }
             let grad = (p_k - indicator) * weight;
-            let hess = (p_k * (1.0 - p_k) * weight).max(1e-7);
+            let hess = (p_k * (1.0 - p_k)).max(1e-7) * weight;
 
             buffer.push(GradientPair { grad, hess });
         }

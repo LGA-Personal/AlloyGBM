@@ -195,6 +195,13 @@ class GBMRanker(_GBMEstimatorCore):
                 "squared-error training"
             )
 
+        X = self._validate_numeric_features(X)
+        y = self._validate_targets(y)
+        if len(X) != len(y):
+            raise ValueError("X and y must contain the same number of rows")
+        if sample_weight is not None:
+            sample_weight = self._validate_sample_weight(sample_weight, len(y))
+
         # Sort training data by group, preserving DataFrame metadata.
         X_sorted, y_sorted, group_sorted, sort_idx = self._sort_by_group(X, y, group)
 
