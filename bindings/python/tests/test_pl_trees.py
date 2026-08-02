@@ -227,7 +227,7 @@ class TestPLClassifier:
         preds_before = clf.predict(X)
         clf2 = pickle.loads(pickle.dumps(clf))
         preds_after = clf2.predict(X)
-        assert preds_before == preds_after
+        np.testing.assert_array_equal(preds_before, preds_after)
 
 
 # ---------------------------------------------------------------------------
