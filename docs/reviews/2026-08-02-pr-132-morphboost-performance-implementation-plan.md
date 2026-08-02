@@ -425,7 +425,7 @@ git commit -m "perf: vectorize exhaustive MorphBoost split scanning"
 - Produces a parser for existing `run_case` output and an explicit baseline/candidate gate report.
 - Freezes the optimized current-formula control used by Tasks 5-7.
 
-- [ ] **Step 1: Add failing performance-gate parser tests**
+- [x] **Step 1: Add failing performance-gate parser tests**
 
 Cover 1.5x pass/fail, 5% regression rejection, missing benchmark names, malformed numbers, median
 aggregation across repeated names, and the allowed end-to-end fallback:
@@ -437,20 +437,20 @@ def test_perf_gate_accepts_required_scanner_speedups():
     assert evaluate_perf_gate(baseline, candidate, end_to_end_improvement=0.18).passed
 ```
 
-- [ ] **Step 2: Run the parser tests and observe failure**
+- [x] **Step 2: Run the parser tests and observe failure**
 
 ```bash
 .venv/bin/python -m pytest benchmarks/tests/test_morph_perf_gate.py -q
 ```
 
-- [ ] **Step 3: Implement the parser and gate report**
+- [x] **Step 3: Implement the parser and gate report**
 
 Parse `name: total_ms=... iterations=... ns_per_iter=...`, group repeated names as independent
 samples, take their medians, compare the required scanner cases, and emit JSON containing per-case
 speedup, worst regression, end-to-end changes, pass/fail, and reasons. Require all named cases and
 at least five samples per required Morph case in both files.
 
-- [ ] **Step 4: Capture repeated candidate measurements**
+- [x] **Step 4: Capture repeated candidate measurements**
 
 Run the Rust benchmark seven times and retain the median `ns_per_iter` per case:
 
@@ -474,7 +474,11 @@ maturin develop --release
   --candidate-fit benchmarks/results/pr132_morph_optimized_control.json
 ```
 
-- [ ] **Step 5: Apply the conditional transcendental decision**
+- [x] **Step 5: Apply the conditional transcendental decision**
+
+Result: retain lane-wise transcendentals. The seven-run medians were 1.92x faster at 255 bins,
+1.08x at 64 bins, and 1.03x at 16 bins; paired end-to-end Morph fit time improved 30.4%, clearing
+the declared 15% fallback with no shape regression.
 
 If the scanner reaches 1.5x at 64/255 bins, retain lane-wise `ln`/`exp`. If it misses 1.5x and the
 end-to-end gain is below 15%, benchmark a second implementation that extracts standardized values,
@@ -482,14 +486,18 @@ uses scalar `(1.0 + x).ln()`/`exp()` only for valid lanes, and vectorizes the su
 Retain the faster implementation only when it passes the same oracle tests. Do not add threshold
 shortlisting.
 
-- [ ] **Step 6: Run the optimized-control quality gate**
+- [x] **Step 6: Run the optimized-control quality gate**
+
+Result: the optimized control had median quality change `0.0`, 97.8% practical wins/ties, worst
+paired change `-0.18%`, and no family veto. Its mean change was `+0.017%`; as expected for a
+behavior-preserving implementation, it does not meet the separate `+0.25%` formula-promotion bar.
 
 Relabel optimized `morph_current` records to `morph_simd`, merge them with baseline
 `morph_current` records, and evaluate `morph_simd` against that control. Floating-order differences
 must satisfy the formula/default quality vetoes even though no intentional calibration occurred. If
 they do not, tighten lane reduction/order or use scalar transcendentals until the control passes.
 
-- [ ] **Step 7: Commit performance evidence and selected implementation**
+- [x] **Step 7: Commit performance evidence and selected implementation**
 
 ```bash
 git add benchmarks/morph_perf_gate.py benchmarks/tests/test_morph_perf_gate.py \
