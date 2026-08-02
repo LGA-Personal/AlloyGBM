@@ -1371,4 +1371,117 @@ mod tests {
         );
         assert!((p - 0.1125_f32).abs() < 1e-6, "got {p}");
     }
+
+    #[test]
+    #[ignore = "release-mode MorphBoost profiling"]
+    fn benchmark_joint_morph_counts() {
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn best_threshold(
+            gradients: &[f32],
+            hessians: &[f32],
+            counts: &[u32],
+            config: &MorphConfig,
+            precomputed: &MorphPrecomputed,
+        ) -> usize {
+            let parent_gradient: f32 = gradients.iter().sum();
+            let parent_hessian: f32 = hessians.iter().sum();
+            let parent_count: u32 = counts.iter().sum();
+            let mut left_gradient = 0.0;
+            let mut left_hessian = 0.0;
+            let mut left_count = 0_u32;
+            let mut best_gain = f32::NEG_INFINITY;
+            let mut best_threshold = 0;
+            for threshold in 0..gradients.len() - 1 {
+                left_gradient += gradients[threshold];
+                left_hessian += hessians[threshold];
+                left_count += counts[threshold];
+                let gain = morph_gain_per_output(
+                    parent_gradient,
+                    parent_hessian,
+                    parent_count,
+                    left_gradient,
+                    left_hessian,
+                    left_count,
+                    parent_gradient - left_gradient,
+                    parent_hessian - left_hessian,
+                    parent_count - left_count,
+                    0.1,
+                    1e-6,
+                    config,
+                    precomputed,
+                    50,
+                    100,
+                    0.0,
+                    1.0,
+                );
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_threshold = threshold;
+                }
+            }
+            black_box(best_gain);
+            best_threshold
+        }
+
+        let config = MorphConfig {
+            morph_warmup_iters: 0,
+            ..MorphConfig::default()
+        };
+        let precomputed = MorphPrecomputed::for_iteration(50, 100, &config);
+        let mut fixtures = Vec::new();
+        let mut ordering_matches = 0;
+        for seed in 0..5_u32 {
+            let mut state = 0x9E37_79B9_u32 ^ seed;
+            let mut gradients = Vec::with_capacity(64);
+            let mut hessians = Vec::with_capacity(64);
+            let mut exact_counts = Vec::with_capacity(64);
+            for _ in 0..64 {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                gradients.push(((state >> 8) as i16 as f32) / 8192.0);
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                hessians.push(0.05 + (state % 850) as f32 / 1_000.0);
+                exact_counts.push(2 + state % 19);
+            }
+            let proxy_counts: Vec<u32> = hessians
+                .iter()
+                .map(|&hessian| morph_count_proxy(hessian))
+                .collect();
+            let proxy = best_threshold(&gradients, &hessians, &proxy_counts, &config, &precomputed);
+            let exact = best_threshold(&gradients, &hessians, &exact_counts, &config, &precomputed);
+            ordering_matches += usize::from(proxy == exact);
+            fixtures.push((gradients, hessians, proxy_counts));
+        }
+        println!("benchmark_joint_morph_counts: ordering_matches={ordering_matches}/5");
+
+        for _ in 0..3 {
+            for (gradients, hessians, counts) in &fixtures {
+                black_box(best_threshold(
+                    gradients,
+                    hessians,
+                    counts,
+                    &config,
+                    &precomputed,
+                ));
+            }
+        }
+        for _ in 0..7 {
+            let started = Instant::now();
+            for _ in 0..1_024 {
+                for (gradients, hessians, counts) in &fixtures {
+                    black_box(best_threshold(
+                        gradients,
+                        hessians,
+                        counts,
+                        &config,
+                        &precomputed,
+                    ));
+                }
+            }
+            let ns_per_iter = started.elapsed().as_nanos() as f64 / (1_024.0 * 5.0);
+            println!("benchmark_joint_morph_counts: ns_per_iter={ns_per_iter:.2}");
+        }
+    }
 }

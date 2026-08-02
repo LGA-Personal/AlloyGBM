@@ -706,7 +706,7 @@ evidence.
 - Produces measured keep/defer decisions for EMA preparation, categorical scan, and joint counts.
 - May produce one implementation only after its design threshold is crossed.
 
-- [ ] **Step 1: Measure EMA, categorical, and joint cases independently**
+- [x] **Step 1: Measure EMA, categorical, and joint cases independently**
 
 Add release-mode ignored Rust timing tests named `benchmark_morph_ema_preparation`,
 `benchmark_morph_categorical_scan`, and `benchmark_joint_morph_counts`. Each test performs warmup,
@@ -725,7 +725,10 @@ cargo test -p alloygbm-engine --release benchmark_joint_morph_counts \
 Record medians in `pr132_morph_secondary.md` and report each phase as a fraction of its
 corresponding end-to-end fit.
 
-- [ ] **Step 2: Apply the EMA threshold**
+- [x] **Step 2: Apply the EMA threshold**
+
+Result: 4.60 us per 8,192-row round, approximately 0.22% of representative round time. Complete
+removal cannot reach the 3% threshold, so no prototype was retained.
 
 If EMA preparation is below 3% of native fit time and a direct-pair prototype improves end-to-end
 time by less than 3%, leave it unchanged. Otherwise introduce a private `GradientMoments` value
@@ -733,14 +736,20 @@ from the existing diagnostics pass containing finite count, mean, and population
 deviation; update `MorphState` from those moments without copying gradients. Pin f32/f64 behavior
 with before/after EMA trajectory tests and run the full quality gate before retaining it.
 
-- [ ] **Step 3: Apply the categorical threshold**
+- [x] **Step 3: Apply the categorical threshold**
+
+Result: 5.15 us per 64-category scan and a conservative 5.9% full-tree upper bound on a 216.54 ms
+representative fit. Scalar categorical scanning is retained.
 
 If categorical Morph scanning is below 10% of representative categorical fit time, record it as
 deferred. If it exceeds 10%, vectorize only prefix-candidate arithmetic in a focused module, retain
 Fisher ordering and bitset construction, and require scalar/SIMD winner parity plus the same 5%
 end-to-end regression cap.
 
-- [ ] **Step 4: Apply the joint-count threshold**
+- [x] **Step 4: Apply the joint-count threshold**
+
+Result: proxy and exact counts selected the same threshold in 5/5 fractional-Hessian fixtures. A
+shared count plane would add 25% histogram payload at two outputs, exceeding the 10% memory cap.
 
 Construct joint-output fixtures where fractional Hessians cause proxy counts to differ from exact
 row counts. If candidate ordering and five-seed quality remain neutral, record exact counts as
@@ -749,7 +758,7 @@ deferred. If a repeatable quality gap appears, add one shared `u32` count plane 
 categorical Morph scoring. Retain only if the quality gate passes, histogram time stays within 5%,
 and representative joint peak memory stays within 10%.
 
-- [ ] **Step 5: Run focused and full tests for retained work**
+- [x] **Step 5: Run focused and full tests for retained work**
 
 ```bash
 cargo test -p alloygbm-engine morph -- --nocapture
@@ -758,7 +767,7 @@ cargo test -p alloygbm-backend-cpu morph -- --nocapture
   bindings/python/tests/test_multi_label_ranker.py -q
 ```
 
-- [ ] **Step 6: Commit only retained secondary changes and all decisions**
+- [x] **Step 6: Commit only retained secondary changes and all decisions**
 
 ```bash
 git add benchmarks/results/pr132_morph_secondary.md \

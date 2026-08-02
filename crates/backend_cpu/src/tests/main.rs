@@ -2353,6 +2353,66 @@ fn morph_simd_preserves_balance_boundary_behavior() {
 }
 
 #[test]
+#[ignore = "release-mode MorphBoost profiling"]
+fn benchmark_morph_categorical_scan() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let num_categories = 64;
+    let missing_bin = num_categories;
+    let mut bins: Vec<HistogramBin> = (0..num_categories)
+        .map(|category| {
+            let gradient = ((category as f32) * 0.37).sin() * 4.0;
+            HistogramBin {
+                grad_sum: gradient,
+                hess_sum: 0.5 + category as f32 * 0.03,
+                grad_sq_sum: 0.0,
+                count: 2 + category as u32 % 11,
+            }
+        })
+        .collect();
+    bins.push(HistogramBin {
+        grad_sum: 0.75,
+        hess_sum: 1.5,
+        grad_sq_sum: 0.0,
+        count: 7,
+    });
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins,
+    };
+    let options = make_options(0.05, 0.1, 0.0, 0.0, missing_bin);
+    let morph = morph_test_context(50, true);
+    with_histogram_feature(&feature, |view| {
+        for _ in 0..3 {
+            black_box(CpuBackend::best_split_morph_categorical_feature(
+                view,
+                0,
+                &options,
+                num_categories,
+                &morph,
+                None,
+            ));
+        }
+        for _ in 0..7 {
+            let started = Instant::now();
+            for _ in 0..2_048 {
+                black_box(CpuBackend::best_split_morph_categorical_feature(
+                    view,
+                    0,
+                    &options,
+                    num_categories,
+                    &morph,
+                    None,
+                ));
+            }
+            let ns_per_iter = started.elapsed().as_nanos() as f64 / 2_048.0;
+            println!("benchmark_morph_categorical_scan: ns_per_iter={ns_per_iter:.2}");
+        }
+    });
+}
+
+#[test]
 fn split_scan_simd_matches_scalar_across_bin_counts_missing_directions_and_ties() {
     let mut missing_left_fixture = None;
     let mut missing_right_fixture = None;

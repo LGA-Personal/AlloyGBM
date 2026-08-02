@@ -228,6 +228,33 @@ fn morph_state_is_in_warmup_phase_handles_degenerate_schedules() {
     assert!(!state.is_in_warmup_phase(1));
 }
 
+#[test]
+#[ignore = "release-mode MorphBoost profiling"]
+fn benchmark_morph_ema_preparation() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let pairs: Vec<GradientPair> = (0..8_192)
+        .map(|index| GradientPair {
+            grad: ((index as f32) * 0.013).sin(),
+            hess: 1.0,
+        })
+        .collect();
+    let mut state = MorphState::new(MorphConfig::default(), 1, 100, 0.05);
+    for _ in 0..3 {
+        state.update_ema_from_gradient_pairs(black_box(&pairs), 0);
+    }
+    for _ in 0..7 {
+        let started = Instant::now();
+        for _ in 0..256 {
+            state.update_ema_from_gradient_pairs(black_box(&pairs), 0);
+        }
+        let ns_per_iter = started.elapsed().as_nanos() as f64 / 256.0;
+        println!("benchmark_morph_ema_preparation: ns_per_iter={ns_per_iter:.2}");
+    }
+    black_box(state.ema_stats[0]);
+}
+
 // ── IterationDiagnostics tests ──────────────────────────────────────────
 
 #[test]
