@@ -53,7 +53,7 @@ def _shape_assertions(diagnostics, expected_rounds, *, expect_projection: bool) 
 class TestRegressorDiagnostics:
     def test_unfitted_regressor_has_no_diagnostics(self) -> None:
         m = GBMRegressor(n_estimators=3)
-        assert m.diagnostics_per_round_ is None
+        assert not hasattr(m, "diagnostics_per_round_")
 
     def test_fitted_regressor_emits_one_entry_per_round(self) -> None:
         rng = np.random.default_rng(7)

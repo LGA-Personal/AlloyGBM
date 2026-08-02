@@ -4,6 +4,7 @@ import inspect
 
 import numpy as np
 import pytest
+from sklearn.exceptions import NotFittedError
 
 from alloygbm import GBMClassifier, GBMRegressor, MultiLabelGBMRanker
 
@@ -28,10 +29,12 @@ def test_quantile_sketch_parameter_round_trips_and_validates() -> None:
     assert model.set_params(quantile_sketch_max_rows=None) is model
     assert model.quantile_sketch_max_rows is None
 
+    x, y = _continuous_fixture()
     with pytest.raises(ValueError, match="quantile_sketch_max_rows"):
-        GBMRegressor(quantile_sketch_max_rows=0)
+        GBMRegressor(quantile_sketch_max_rows=0).fit(x, y)
+    model.set_params(quantile_sketch_max_rows=-1)
     with pytest.raises(ValueError, match="quantile_sketch_max_rows"):
-        model.set_params(quantile_sketch_max_rows=-1)
+        model.fit(x, y)
     with pytest.raises(ValueError, match="quantile_sketch_max_rows"):
         MultiLabelGBMRanker(quantile_sketch_max_rows=0)
 
@@ -112,5 +115,5 @@ def test_changing_sketch_limit_after_fit_requires_refit() -> None:
 
     model.set_params(quantile_sketch_max_rows=8)
 
-    with pytest.raises(RuntimeError, match="must be fit"):
+    with pytest.raises(NotFittedError):
         model.predict(x)

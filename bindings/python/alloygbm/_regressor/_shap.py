@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+from .._sklearn_compat import _NotFittedError
 from . import _base
 from ._base import _max_data_bin_for_max_bins
+
+
+def _require_fitted_estimator(estimator: object) -> None:
+    require_fitted = getattr(estimator, "_require_fitted", None)
+    if callable(require_fitted):
+        require_fitted()
+        return
+    if not getattr(estimator, "_is_fitted", False):
+        raise _NotFittedError(
+            f"This {type(estimator).__name__} instance is not fitted yet. Call "
+            "'fit' with appropriate arguments before using this estimator."
+        )
 
 
 class _ShapMixin:
@@ -108,7 +121,7 @@ class _ShapMixin:
         The legacy non-binning path retains the best-effort exemption
         for linear leaves only.
         """
-        self._require_fitted()
+        _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -231,7 +244,7 @@ class _ShapMixin:
         to the regressor feature's main effect (the diagonal of the interaction
         matrix), ensuring both row-marginal and full additivity are preserved.
         """
-        self._require_fitted()
+        _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -335,7 +348,7 @@ class _ShapMixin:
         """Return feature importances for the provided rows."""
         if method != "shap":
             raise ValueError("unsupported feature importance method; expected 'shap'")
-        self._require_fitted()
+        _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 

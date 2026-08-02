@@ -223,13 +223,15 @@ def test_goss_now_supported_on_multiclass():
     assert model.predict_proba(X).shape == (300, 3)
 
 
-def test_goss_rejects_invalid_rate_ranges():
-    with pytest.raises(ValueError, match=r"goss_top_rate"):
-        GBMRegressor(boosting_mode="goss", goss_top_rate=0.0, goss_other_rate=0.1)
-    with pytest.raises(ValueError, match=r"goss_other_rate"):
-        GBMRegressor(boosting_mode="goss", goss_top_rate=0.2, goss_other_rate=1.5)
-    with pytest.raises(ValueError, match=r"<= 1.0"):
-        GBMRegressor(boosting_mode="goss", goss_top_rate=0.7, goss_other_rate=0.5)
+def test_goss_rejects_invalid_rate_ranges(regression_data):
+    X, y = regression_data
+    for kwargs, match in (
+        ({"goss_top_rate": 0.0, "goss_other_rate": 0.1}, r"goss_top_rate"),
+        ({"goss_top_rate": 0.2, "goss_other_rate": 1.5}, r"goss_other_rate"),
+        ({"goss_top_rate": 0.7, "goss_other_rate": 0.5}, r"<= 1.0"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            GBMRegressor(boosting_mode="goss", **kwargs).fit(X, y)
 
 
 def test_dart_basic_construction_works():
@@ -240,9 +242,10 @@ def test_dart_basic_construction_works():
     assert m.dart_max_drop == 5
 
 
-def test_unknown_boosting_mode_rejected():
+def test_unknown_boosting_mode_rejected(regression_data):
+    X, y = regression_data
     with pytest.raises(ValueError, match=r"boosting_mode"):
-        GBMRegressor(boosting_mode="not_a_mode")
+        GBMRegressor(boosting_mode="not_a_mode").fit(X, y)
 
 
 def test_default_boosting_mode_is_standard_and_bytewise_compatible():

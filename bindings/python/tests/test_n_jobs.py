@@ -12,6 +12,16 @@ from alloygbm import _alloygbm as _native
 from alloygbm._regressor import _base as _regressor_base
 
 
+def _fit_single_output_estimator(estimator):
+    X = np.asarray([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
+    if isinstance(estimator, GBMRanker):
+        estimator.fit(X, [0.0, 1.0, 0.0, 1.0], group=[0, 0, 1, 1])
+    elif isinstance(estimator, GBMClassifier):
+        estimator.fit(X, [0, 0, 1, 1])
+    else:
+        estimator.fit(X, [0.0, 1.0, 2.0, 3.0])
+
+
 @pytest.mark.parametrize(
     "estimator_factory",
     [
@@ -46,8 +56,14 @@ def test_estimators_retain_supported_n_jobs(estimator_factory, n_jobs):
     ids=["true", "false", "zero", "below-minus-one", "float", "string", "object"],
 )
 def test_estimators_reject_invalid_n_jobs(estimator_factory, n_jobs):
+    if estimator_factory is MultiLabelGBMRanker:
+        with pytest.raises(ValueError, match="n_jobs"):
+            estimator_factory(n_jobs=n_jobs)
+        return
+
+    estimator = estimator_factory(n_jobs=n_jobs)
     with pytest.raises(ValueError, match="n_jobs"):
-        estimator_factory(n_jobs=n_jobs)
+        _fit_single_output_estimator(estimator)
 
 
 @pytest.mark.parametrize(
@@ -59,14 +75,21 @@ def test_estimators_reject_invalid_n_jobs(estimator_factory, n_jobs):
         MultiLabelGBMRanker,
     ],
 )
-def test_set_params_validates_and_retains_n_jobs(estimator_factory):
+def test_set_params_retains_n_jobs_and_fit_validates(estimator_factory):
     estimator = estimator_factory()
 
     assert estimator.set_params(n_jobs=2) is estimator
     assert estimator.get_params()["n_jobs"] == 2
+    if estimator_factory is MultiLabelGBMRanker:
+        with pytest.raises(ValueError, match="n_jobs"):
+            estimator.set_params(n_jobs=0)
+        assert estimator.get_params()["n_jobs"] == 2
+        return
+
+    estimator.set_params(n_jobs=0)
+    assert estimator.get_params()["n_jobs"] == 0
     with pytest.raises(ValueError, match="n_jobs"):
-        estimator.set_params(n_jobs=0)
-    assert estimator.get_params()["n_jobs"] == 2
+        _fit_single_output_estimator(estimator)
 
 
 def test_regressor_classifier_and_ranker_signatures_expose_n_jobs():

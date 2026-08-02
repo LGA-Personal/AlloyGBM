@@ -125,53 +125,40 @@ def _dense_memoryview(
 
 
 class GBMRegressorContractTests(unittest.TestCase):
-    def test_constructor_rejects_invalid_values(self) -> None:
-        with self.assertRaisesRegex(ValueError, "learning_rate"):
-            GBMRegressor(learning_rate=0.0)
-        with self.assertRaisesRegex(ValueError, "max_depth"):
-            GBMRegressor(max_depth=0)
-        with self.assertRaisesRegex(ValueError, "n_estimators"):
-            GBMRegressor(n_estimators=0)
-        with self.assertRaisesRegex(ValueError, "row_subsample"):
-            GBMRegressor(row_subsample=0.0)
-        with self.assertRaisesRegex(ValueError, "col_subsample"):
-            GBMRegressor(col_subsample=1.5)
-        with self.assertRaisesRegex(ValueError, "early_stopping_rounds"):
-            GBMRegressor(early_stopping_rounds=0)
-        with self.assertRaisesRegex(ValueError, "min_validation_improvement"):
-            GBMRegressor(min_validation_improvement=-0.1)
-        with self.assertRaisesRegex(ValueError, "min_data_in_leaf"):
-            GBMRegressor(min_data_in_leaf=0)
-        with self.assertRaisesRegex(ValueError, "lambda_l1"):
-            GBMRegressor(lambda_l1=-0.1)
-        with self.assertRaisesRegex(ValueError, "lambda_l2"):
-            GBMRegressor(lambda_l2=-0.1)
-        with self.assertRaisesRegex(ValueError, "min_child_hessian"):
-            GBMRegressor(min_child_hessian=-0.1)
-        with self.assertRaisesRegex(ValueError, "poisson_max_delta_step"):
-            GBMRegressor(poisson_max_delta_step=-0.1)
-        with self.assertRaisesRegex(ValueError, "categorical_feature_index"):
-            GBMRegressor(categorical_feature_index=-1)
-        with self.assertRaisesRegex(ValueError, "categorical_smoothing"):
-            GBMRegressor(categorical_smoothing=-0.1)
-        with self.assertRaisesRegex(ValueError, "categorical_min_samples_leaf"):
-            GBMRegressor(categorical_min_samples_leaf=0)
-        with self.assertRaisesRegex(ValueError, "continuous_binning_strategy"):
-            GBMRegressor(continuous_binning_strategy="invalid")
-        with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
-            GBMRegressor(continuous_binning_max_bins=1)
-        with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
-            GBMRegressor(continuous_binning_max_bins=65536)
-        with self.assertRaisesRegex(ValueError, "feature_bundling"):
-            GBMRegressor(feature_bundling="approximate")
-        with self.assertRaisesRegex(ValueError, "leaf_solver"):
-            GBMRegressor(leaf_solver="invalid")
-        with self.assertRaisesRegex(ValueError, "dro_radius"):
-            GBMRegressor(leaf_solver="dro", dro_radius=-0.1)
-        with self.assertRaisesRegex(ValueError, "dro_metric"):
-            GBMRegressor(leaf_solver="dro", dro_metric="kl")
-        with self.assertRaisesRegex(ValueError, "leaf_solver='dro'.*leaf_model='constant'"):
-            GBMRegressor(leaf_solver="dro", leaf_model="linear")
+    def test_fit_rejects_invalid_constructor_values(self) -> None:
+        cases = [
+            ({"learning_rate": 0.0}, "learning_rate"),
+            ({"max_depth": 0}, "max_depth"),
+            ({"n_estimators": 0}, "n_estimators"),
+            ({"row_subsample": 0.0}, "row_subsample"),
+            ({"col_subsample": 1.5}, "col_subsample"),
+            ({"early_stopping_rounds": 0}, "early_stopping_rounds"),
+            ({"min_validation_improvement": -0.1}, "min_validation_improvement"),
+            ({"min_data_in_leaf": 0}, "min_data_in_leaf"),
+            ({"lambda_l1": -0.1}, "lambda_l1"),
+            ({"lambda_l2": -0.1}, "lambda_l2"),
+            ({"min_child_hessian": -0.1}, "min_child_hessian"),
+            ({"poisson_max_delta_step": -0.1}, "poisson_max_delta_step"),
+            ({"categorical_feature_index": -1}, "categorical_feature_index"),
+            ({"categorical_smoothing": -0.1}, "categorical_smoothing"),
+            ({"categorical_min_samples_leaf": 0}, "categorical_min_samples_leaf"),
+            ({"continuous_binning_strategy": "invalid"}, "continuous_binning_strategy"),
+            ({"continuous_binning_max_bins": 1}, "continuous_binning_max_bins"),
+            ({"continuous_binning_max_bins": 65536}, "continuous_binning_max_bins"),
+            ({"feature_bundling": "approximate"}, "feature_bundling"),
+            ({"leaf_solver": "invalid"}, "leaf_solver"),
+            ({"leaf_solver": "dro", "dro_radius": -0.1}, "dro_radius"),
+            ({"leaf_solver": "dro", "dro_metric": "kl"}, "dro_metric"),
+            (
+                {"leaf_solver": "dro", "leaf_model": "linear"},
+                "leaf_solver='dro'.*leaf_model='constant'",
+            ),
+        ]
+        for kwargs, message in cases:
+            with self.subTest(kwargs=kwargs):
+                model = GBMRegressor(**kwargs)
+                with self.assertRaisesRegex(ValueError, message):
+                    model.fit([[0.0], [1.0]], [0.0, 1.0])
 
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
@@ -261,31 +248,28 @@ class GBMRegressorContractTests(unittest.TestCase):
 
     def test_set_params_rejects_unknown_parameter(self) -> None:
         model = GBMRegressor()
-        with self.assertRaisesRegex(ValueError, "Unknown parameter"):
+        with self.assertRaisesRegex(ValueError, "Invalid parameter"):
             model.set_params(unknown=1)  # type: ignore[arg-type]
 
-    def test_set_params_rejects_invalid_continuous_binning_strategy(self) -> None:
-        model = GBMRegressor()
-        with self.assertRaisesRegex(ValueError, "continuous_binning_strategy"):
-            model.set_params(continuous_binning_strategy="bad")
-
-    def test_set_params_rejects_invalid_continuous_binning_max_bins(self) -> None:
-        model = GBMRegressor()
-        with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
-            model.set_params(continuous_binning_max_bins=0)
+    def test_fit_rejects_invalid_values_assigned_by_set_params(self) -> None:
+        for parameter, value in (
+            ("continuous_binning_strategy", "bad"),
+            ("continuous_binning_max_bins", 0),
+            ("n_estimators", 0),
+        ):
+            with self.subTest(parameter=parameter):
+                model = GBMRegressor().set_params(**{parameter: value})
+                with self.assertRaisesRegex(ValueError, parameter):
+                    model.fit([[0.0], [1.0]], [0.0, 1.0])
 
     def test_feature_bundling_contract_is_a_parameter_before_fit(self) -> None:
         model = GBMRegressor()
 
         self.assertIn("feature_bundling='off'", repr(model))
         self.assertFalse(hasattr(model, "feature_bundling_diagnostics_"))
+        model.set_params(feature_bundling="unsafe")
         with self.assertRaisesRegex(ValueError, "feature_bundling"):
-            model.set_params(feature_bundling="unsafe")
-
-    def test_set_params_rejects_invalid_n_estimators(self) -> None:
-        model = GBMRegressor()
-        with self.assertRaisesRegex(ValueError, "n_estimators"):
-            model.set_params(n_estimators=0)
+            model.fit([[0.0], [1.0]], [0.0, 1.0])
 
     def test_predict_requires_fit(self) -> None:
         model = GBMRegressor()

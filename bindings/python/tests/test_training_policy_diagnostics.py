@@ -143,7 +143,7 @@ def test_reset_fitted_state_clears_resolved_policy() -> None:
 
     model._reset_fitted_state()
 
-    assert model.resolved_training_policy_ is None
+    assert not hasattr(model, "resolved_training_policy_")
 
 
 def test_save_load_model_round_trips_resolved_policy(tmp_path) -> None:

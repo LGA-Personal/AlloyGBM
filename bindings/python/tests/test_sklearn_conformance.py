@@ -14,6 +14,7 @@ from sklearn.base import (
     BaseEstimator,
     ClassifierMixin,
     RegressorMixin,
+    clone,
     is_classifier,
     is_regressor,
 )
@@ -199,3 +200,78 @@ def test_failed_fit_does_not_publish_partial_feature_schema() -> None:
     assert not hasattr(model, "feature_names_in_")
     with pytest.raises(NotFittedError):
         check_is_fitted(model)
+
+
+def test_constructor_preserves_parameter_identity_without_validation() -> None:
+    categorical_indices = [0]
+    monotone_constraints = {0: 1}
+    feature_weights = {0: 2.0}
+    interaction_constraints = [[0, 1]]
+
+    model = GBMRegressor(
+        learning_rate=0.0,
+        categorical_feature_indices=categorical_indices,
+        monotone_constraints=monotone_constraints,
+        feature_weights=feature_weights,
+        interaction_constraints=interaction_constraints,
+    )
+
+    assert model.learning_rate == 0.0
+    assert model.categorical_feature_indices is categorical_indices
+    assert model.monotone_constraints is monotone_constraints
+    assert model.feature_weights is feature_weights
+    assert model.interaction_constraints is interaction_constraints
+
+
+def test_set_params_assigns_known_values_without_validation_or_coercion() -> None:
+    model = GBMRegressor()
+    value = [0]
+
+    returned = model.set_params(
+        learning_rate=0.0,
+        categorical_feature_indices=value,
+    )
+
+    assert returned is model
+    assert model.learning_rate == 0.0
+    assert model.categorical_feature_indices is value
+    with pytest.raises(ValueError, match="Invalid parameter"):
+        model.set_params(does_not_exist=1)
+
+
+@pytest.mark.parametrize(
+    ("estimator_factory", "fit_kwargs", "message"),
+    [
+        (lambda: GBMRegressor(learning_rate=0.0), {}, "learning_rate"),
+        (lambda: GBMClassifier(objective="squared_error"), {}, "auto-detected"),
+        (
+            lambda: GBMRanker(ranking_objective="not-a-ranking-objective"),
+            {"group": [0, 0, 1, 1]},
+            "ranking_objective",
+        ),
+    ],
+)
+def test_invalid_known_parameters_are_rejected_at_fit(
+    estimator_factory, fit_kwargs: dict[str, object], message: str
+) -> None:
+    X, y = _small_regression_data()
+    estimator = estimator_factory()
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        estimator.fit(X, y, **fit_kwargs)
+
+    assert not hasattr(estimator, "n_features_in_")
+
+
+def test_sklearn_clone_preserves_the_complete_parameter_surface() -> None:
+    model = GBMRegressor(
+        n_estimators=2,
+        categorical_feature_indices=[0],
+        monotone_constraints={1: -1},
+        interaction_constraints=[[0, 1]],
+    )
+
+    cloned = clone(model)
+
+    assert cloned is not model
+    assert cloned.get_params(deep=False) == model.get_params(deep=False)

@@ -49,12 +49,6 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
     """Passed to Rust bridge for multiclass_softmax. None for binary."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
-        if kwargs.get("neutralization") == "pre_target":
-            raise ValueError(
-                "neutralization='pre_target' is only supported for GBMRegressor "
-                "squared-error training"
-            )
-        self._validate_classifier_objective(kwargs.get("objective"))
         super().__init__(*args, **kwargs)
 
     __init__.__signature__ = _inspect.signature(GBMRegressor.__init__)  # type: ignore[attr-defined]
@@ -70,6 +64,15 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             f"GBMRegressor(objective={objective!r}) for regression targets or "
             f"GBMRanker(ranking_objective={objective!r}) for grouped ranking."
         )
+
+    def _validate_hyperparameters(self) -> None:
+        super()._validate_hyperparameters()
+        if self.neutralization == "pre_target":
+            raise ValueError(
+                "neutralization='pre_target' is only supported for GBMRegressor "
+                "squared-error training"
+            )
+        self._validate_classifier_objective(self.objective)
 
     def _objective_name(self) -> str:
         # Custom callable objective takes priority over auto-detection.
@@ -121,6 +124,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         -------
         self
         """
+        self._validate_hyperparameters()
         if self.neutralization == "pre_target":
             raise ValueError(
                 "neutralization='pre_target' is only supported for GBMRegressor "
@@ -383,13 +387,6 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         )
 
     def set_params(self, **params: object) -> "GBMClassifier":
-        if params.get("neutralization") == "pre_target":
-            raise ValueError(
-                "neutralization='pre_target' is only supported for GBMRegressor "
-                "squared-error training"
-            )
-        if "objective" in params:
-            self._validate_classifier_objective(params.get("objective"))
         super().set_params(**params)
         return self
 

@@ -83,28 +83,11 @@ class GBMRanker(_GBMEstimatorCore):
         lambdarank_normalize: bool = False,
         **kwargs: object,
     ) -> None:
-        if ranking_objective not in _RANKING_OBJECTIVES:
-            raise ValueError(
-                f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
-                f"got {ranking_objective!r}"
-            )
-        ranking_sigma_value = float(ranking_sigma)
-        if not np.isfinite(ranking_sigma_value) or ranking_sigma_value <= 0.0:
-            raise ValueError("ranking_sigma must be finite and > 0")
-        truncation_level = self._validate_lambdarank_truncation_level(
-            lambdarank_truncation_level
-        )
-        normalize_lambdas = self._validate_lambdarank_normalize(lambdarank_normalize)
-        if kwargs.get("neutralization") == "pre_target":
-            raise ValueError(
-                "neutralization='pre_target' is only supported for GBMRegressor "
-                "squared-error training"
-            )
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
-        self.ranking_sigma = ranking_sigma_value
-        self.lambdarank_truncation_level = truncation_level
-        self.lambdarank_normalize = normalize_lambdas
+        self.ranking_sigma = ranking_sigma
+        self.lambdarank_truncation_level = lambdarank_truncation_level
+        self.lambdarank_normalize = lambdarank_normalize
 
     # Expose the combined GBMRegressor + ranking_objective signature so tools
     # that introspect via ``inspect.signature`` (sklearn clone, benchmarks,
@@ -203,6 +186,7 @@ class GBMRanker(_GBMEstimatorCore):
         eval_metric : callable or None, optional
             Custom evaluation metric. See :meth:`GBMRegressor.fit` for details.
         """
+        self._validate_hyperparameters()
         if group is None:
             raise ValueError("GBMRanker requires 'group' to be provided in fit()")
         if self.neutralization == "pre_target":
@@ -378,34 +362,31 @@ class GBMRanker(_GBMEstimatorCore):
         return params
 
     def set_params(self, **params: object) -> "GBMRanker":
-        if params.get("neutralization") == "pre_target":
+        super().set_params(**params)
+        return self
+
+    def _validate_hyperparameters(self) -> None:
+        super()._validate_hyperparameters()
+        if self.ranking_objective not in _RANKING_OBJECTIVES:
+            raise ValueError(
+                f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
+                f"got {self.ranking_objective!r}"
+            )
+        try:
+            ranking_sigma = float(self.ranking_sigma)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ranking_sigma must be finite and > 0") from exc
+        if not np.isfinite(ranking_sigma) or ranking_sigma <= 0.0:
+            raise ValueError("ranking_sigma must be finite and > 0")
+        self._validate_lambdarank_truncation_level(
+            self.lambdarank_truncation_level
+        )
+        self._validate_lambdarank_normalize(self.lambdarank_normalize)
+        if self.neutralization == "pre_target":
             raise ValueError(
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
-        if "ranking_objective" in params:
-            val = params.pop("ranking_objective")
-            if val not in _RANKING_OBJECTIVES:
-                raise ValueError(
-                    f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
-                    f"got {val!r}"
-                )
-            self.ranking_objective = val
-        if "ranking_sigma" in params:
-            val = float(params.pop("ranking_sigma"))
-            if not np.isfinite(val) or val <= 0.0:
-                raise ValueError("ranking_sigma must be finite and > 0")
-            self.ranking_sigma = val
-        if "lambdarank_truncation_level" in params:
-            self.lambdarank_truncation_level = self._validate_lambdarank_truncation_level(
-                params.pop("lambdarank_truncation_level")
-            )
-        if "lambdarank_normalize" in params:
-            self.lambdarank_normalize = self._validate_lambdarank_normalize(
-                params.pop("lambdarank_normalize")
-            )
-        super().set_params(**params)
-        return self
 
     # -- internal helpers ------------------------------------------------------
 

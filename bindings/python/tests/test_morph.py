@@ -181,10 +181,13 @@ def test_depth_penalty_base_rejects_zero():
     """The Rust core requires depth_penalty_base in (0, 1]; the Python
     constructor must surface the same constraint at construction time
     rather than letting the user reach fit() with an invalid value."""
-    with pytest.raises(ValueError, match=r"depth_penalty_base must be in \(0\.0, 1\.0\]"):
-        GBMRegressor(depth_penalty_base=0.0)
-    with pytest.raises(ValueError, match=r"depth_penalty_base must be in \(0\.0, 1\.0\]"):
-        GBMRegressor().set_params(depth_penalty_base=0.0)
+    X, y = _toy_regression_data(n=20, seed=1)
+    for model in (
+        GBMRegressor(depth_penalty_base=0.0),
+        GBMRegressor().set_params(depth_penalty_base=0.0),
+    ):
+        with pytest.raises(ValueError, match=r"depth_penalty_base must be in \(0\.0, 1\.0\]"):
+            model.fit(X, y)
     # Strictly positive values within range continue to work.
     GBMRegressor(depth_penalty_base=1e-6)
     GBMRegressor(depth_penalty_base=1.0)
@@ -194,10 +197,13 @@ def test_lr_warmup_frac_rejected_with_constant_schedule():
     """lr_warmup_frac is only meaningful with lr_schedule='warmup_cosine'.
     Python validation must reject non-default values with a constant
     schedule rather than silently dropping the parameter in the bridge."""
-    with pytest.raises(ValueError, match="lr_warmup_frac=.*only valid with lr_schedule='warmup_cosine'"):
-        GBMRegressor(lr_warmup_frac=0.7)  # default lr_schedule='constant'
-    with pytest.raises(ValueError, match="lr_warmup_frac=.*only valid with lr_schedule='warmup_cosine'"):
-        GBMRegressor().set_params(lr_warmup_frac=0.7)
+    X, y = _toy_regression_data(n=20, seed=1)
+    for model in (
+        GBMRegressor(lr_warmup_frac=0.7),
+        GBMRegressor().set_params(lr_warmup_frac=0.7),
+    ):
+        with pytest.raises(ValueError, match="lr_warmup_frac=.*only valid with lr_schedule='warmup_cosine'"):
+            model.fit(X, y)
     # lr_warmup_frac with warmup_cosine is fine.
     GBMRegressor(lr_schedule="warmup_cosine", lr_warmup_frac=0.7)
 

@@ -241,10 +241,10 @@ class MonotoneConstraintTests(unittest.TestCase):
 
     def test_monotone_rejects_invalid_values(self):
         """Invalid constraint values should raise ValueError."""
-        with self.assertRaises(ValueError):
-            GBMRegressor(monotone_constraints=[2, 0, 0])
-        with self.assertRaises(ValueError):
-            GBMRegressor(monotone_constraints=[0, -2, 0])
+        X, y = _make_dataset()
+        for constraints in ([2, 0, 0], [0, -2, 0]):
+            with self.assertRaises(ValueError):
+                GBMRegressor(monotone_constraints=constraints).fit(X, y)
 
     def test_monotone_get_set_params(self):
         """monotone_constraints should roundtrip through get/set_params."""
@@ -317,15 +317,16 @@ class FeatureWeightTests(unittest.TestCase):
 
     def test_feature_weights_rejects_negative(self):
         """Negative feature weights should raise ValueError."""
+        X, y = _make_dataset()
         with self.assertRaises(ValueError):
-            GBMRegressor(feature_weights=[-1.0, 1.0])
+            GBMRegressor(feature_weights=[-1.0, 1.0]).fit(X, y)
 
     def test_feature_weights_rejects_non_finite(self):
         """Non-finite feature weights should raise ValueError."""
-        with self.assertRaises(ValueError):
-            GBMRegressor(feature_weights=[float("inf"), 1.0])
-        with self.assertRaises(ValueError):
-            GBMRegressor(feature_weights=[float("nan"), 1.0])
+        X, y = _make_dataset()
+        for invalid in (float("inf"), float("nan")):
+            with self.assertRaises(ValueError):
+                GBMRegressor(feature_weights=[invalid, 1.0]).fit(X, y)
 
     def test_feature_weights_get_set_params(self):
         """feature_weights should roundtrip through get/set_params."""
@@ -374,10 +375,10 @@ class MaxLeavesTests(unittest.TestCase):
 
     def test_max_leaves_rejects_less_than_2(self):
         """max_leaves < 2 should raise ValueError."""
-        with self.assertRaises(ValueError):
-            GBMRegressor(max_leaves=1)
-        with self.assertRaises(ValueError):
-            GBMRegressor(max_leaves=0)
+        X, y = _make_dataset()
+        for invalid in (1, 0):
+            with self.assertRaises(ValueError):
+                GBMRegressor(max_leaves=invalid).fit(X, y)
 
     def test_max_leaves_get_set_params(self):
         """max_leaves should roundtrip through get/set_params."""

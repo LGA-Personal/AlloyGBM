@@ -22,6 +22,10 @@ from alloygbm import GBMClassifier, GBMRegressor
 
 
 class TestInteractionConstraintValidation:
+    @staticmethod
+    def _fit(model: GBMRegressor) -> None:
+        model.fit([[0.0, 0.0], [1.0, 1.0]], [0.0, 1.0])
+
     def test_constructor_accepts_empty_groups_list(self) -> None:
         # Empty list is equivalent to no constraints — must not error.
         m = GBMRegressor(interaction_constraints=[])
@@ -29,19 +33,19 @@ class TestInteractionConstraintValidation:
 
     def test_constructor_rejects_too_many_groups(self) -> None:
         with pytest.raises(ValueError, match="at most 64 groups"):
-            GBMRegressor(interaction_constraints=[[i] for i in range(65)])
+            self._fit(GBMRegressor(interaction_constraints=[[i] for i in range(65)]))
 
     def test_constructor_rejects_empty_group(self) -> None:
         with pytest.raises(ValueError, match="non-empty"):
-            GBMRegressor(interaction_constraints=[[]])
+            self._fit(GBMRegressor(interaction_constraints=[[]]))
 
     def test_constructor_rejects_negative_feature_index(self) -> None:
         with pytest.raises(ValueError, match="negative"):
-            GBMRegressor(interaction_constraints=[[-1, 0]])
+            self._fit(GBMRegressor(interaction_constraints=[[-1, 0]]))
 
     def test_constructor_rejects_duplicate_feature_in_group(self) -> None:
         with pytest.raises(ValueError, match="duplicate"):
-            GBMRegressor(interaction_constraints=[[0, 1, 0]])
+            self._fit(GBMRegressor(interaction_constraints=[[0, 1, 0]]))
 
     def test_set_params_round_trip(self) -> None:
         m = GBMRegressor()

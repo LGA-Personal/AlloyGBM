@@ -113,8 +113,10 @@ def test_dart_ranker_fits_with_groups():
     ],
 )
 def test_dart_invalid_params_rejected(kwargs, match):
+    X = np.asarray([[0.0], [1.0]], dtype=np.float32)
+    y = np.asarray([0.0, 1.0], dtype=np.float32)
     with pytest.raises(ValueError, match=match):
-        GBMRegressor(boosting_mode="dart", **kwargs)
+        GBMRegressor(boosting_mode="dart", **kwargs).fit(X, y)
 
 
 # ----- Multiclass rejection -----

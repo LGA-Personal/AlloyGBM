@@ -60,13 +60,15 @@ class TestLeafWiseGrowthBasic(unittest.TestCase):
 
     def test_invalid_tree_growth_raises(self):
         """Invalid tree_growth string should raise ValueError."""
+        X, y = _make_balanced_dataset()
         with self.assertRaises(ValueError):
-            GBMRegressor(n_estimators=3, tree_growth="invalid")
+            GBMRegressor(n_estimators=3, tree_growth="invalid").fit(X, y)
 
     def test_leaf_without_max_leaves_raises(self):
         """tree_growth='leaf' without max_leaves should raise ValueError."""
+        X, y = _make_balanced_dataset()
         with self.assertRaises(ValueError):
-            GBMRegressor(n_estimators=3, tree_growth="leaf")
+            GBMRegressor(n_estimators=3, tree_growth="leaf").fit(X, y)
 
     def test_level_without_max_leaves_ok(self):
         """tree_growth='level' without max_leaves should work fine."""
@@ -171,15 +173,19 @@ class TestLeafWiseGrowthParams(unittest.TestCase):
 
     def test_set_params_invalid_tree_growth_raises(self):
         """set_params() with invalid tree_growth should raise."""
+        X, y = _make_balanced_dataset()
         m = GBMRegressor(n_estimators=3)
+        m.set_params(tree_growth="bestfirst")
         with self.assertRaises(ValueError):
-            m.set_params(tree_growth="bestfirst")
+            m.fit(X, y)
 
     def test_set_params_leaf_without_max_leaves_raises(self):
         """set_params(tree_growth='leaf') without max_leaves should raise."""
+        X, y = _make_balanced_dataset()
         m = GBMRegressor(n_estimators=3)
+        m.set_params(tree_growth="leaf")
         with self.assertRaises(ValueError):
-            m.set_params(tree_growth="leaf")
+            m.fit(X, y)
 
     def test_repr_includes_tree_growth(self):
         """__repr__ should include tree_growth."""

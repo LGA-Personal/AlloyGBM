@@ -48,7 +48,7 @@ class _GBMEstimatorCore(
 ):
     """Shared implementation for AlloyGBM's single-output estimators."""
 
-    def __init__(
+    def _initialize_validation_probe(
         self,
         *,
         learning_rate: float = 0.1,
@@ -501,6 +501,148 @@ class _GBMEstimatorCore(
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
         self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
 
+    def __init__(
+        self,
+        *,
+        learning_rate: float = 0.1,
+        max_depth: int = 6,
+        n_estimators: int = 6,
+        row_subsample: float = 1.0,
+        col_subsample: float = 1.0,
+        early_stopping_rounds: int | None = None,
+        min_validation_improvement: float = 0.0,
+        min_data_in_leaf: int = 1,
+        lambda_l1: float = 0.0,
+        lambda_l2: float = 0.0,
+        min_child_hessian: float = 0.0,
+        min_split_gain: float = 0.0,
+        seed: int = 0,
+        deterministic: bool = True,
+        continuous_binning_strategy: str = "quantile",
+        continuous_binning_max_bins: int = 256,
+        quantile_sketch_max_rows: int | None = None,
+        feature_bundling: str = "off",
+        categorical_feature_index: int | None = None,
+        categorical_feature_indices: list[int] | None = None,
+        training_policy: str = "auto",
+        store_node_stats: bool = False,
+        categorical_smoothing: float = 20.0,
+        categorical_min_samples_leaf: int = 1,
+        categorical_time_aware: bool = False,
+        monotone_constraints: list[int] | dict[int, int] | None = None,
+        feature_weights: list[float] | dict[int, float] | None = None,
+        interaction_constraints: list[list[int]] | None = None,
+        max_leaves: int | None = None,
+        tree_growth: str = "level",
+        warm_start: bool = False,
+        objective: "str | None | object" = None,
+        max_cat_threshold: int = 0,
+        training_mode: str = "auto",
+        morph_rate: float = 0.1,
+        evolution_pressure: float = 0.2,
+        morph_warmup_iters: int = 5,
+        info_score_weight: float = 0.1,
+        depth_penalty_base: float = 0.9,
+        balance_penalty: bool = True,
+        lr_schedule: str = "constant",
+        lr_warmup_frac: float = 0.1,
+        leaf_model: str = "constant",
+        leaf_solver: str = "standard",
+        dro_radius: float = 0.05,
+        dro_metric: str = "wasserstein",
+        neutralization: str = "none",
+        factor_neutralization_lambda: float = 1e-6,
+        factor_penalty: float = 0.0,
+        factor_exposure_transform: str = "none",
+        boosting_mode: str = "standard",
+        goss_top_rate: float = 0.2,
+        goss_other_rate: float = 0.1,
+        dart_drop_rate: float = 0.1,
+        dart_max_drop: int = 50,
+        dart_normalize_type: str = "tree",
+        dart_sample_type: str = "uniform",
+        tweedie_variance_power: float = 1.5,
+        poisson_max_delta_step: float = 0.7,
+        quantile_alpha: float = 0.5,
+        n_jobs: int | None = None,
+    ) -> None:
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
+        self.n_estimators = n_estimators
+        self.row_subsample = row_subsample
+        self.col_subsample = col_subsample
+        self.early_stopping_rounds = early_stopping_rounds
+        self.min_validation_improvement = min_validation_improvement
+        self.min_data_in_leaf = min_data_in_leaf
+        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
+        self.min_child_hessian = min_child_hessian
+        self.min_split_gain = min_split_gain
+        self.seed = seed
+        self.deterministic = deterministic
+        self.continuous_binning_strategy = continuous_binning_strategy
+        self.continuous_binning_max_bins = continuous_binning_max_bins
+        self.quantile_sketch_max_rows = quantile_sketch_max_rows
+        self.feature_bundling = feature_bundling
+        self.categorical_feature_index = categorical_feature_index
+        self.categorical_feature_indices = categorical_feature_indices
+        self.training_policy = training_policy
+        self.store_node_stats = store_node_stats
+        self.categorical_smoothing = categorical_smoothing
+        self.categorical_min_samples_leaf = categorical_min_samples_leaf
+        self.categorical_time_aware = categorical_time_aware
+        self.monotone_constraints = monotone_constraints
+        self.feature_weights = feature_weights
+        self.interaction_constraints = interaction_constraints
+        self.max_leaves = max_leaves
+        self.tree_growth = tree_growth
+        self.warm_start = warm_start
+        self.objective = objective
+        self.max_cat_threshold = max_cat_threshold
+        self.training_mode = training_mode
+        self.morph_rate = morph_rate
+        self.evolution_pressure = evolution_pressure
+        self.morph_warmup_iters = morph_warmup_iters
+        self.info_score_weight = info_score_weight
+        self.depth_penalty_base = depth_penalty_base
+        self.balance_penalty = balance_penalty
+        self.lr_schedule = lr_schedule
+        self.lr_warmup_frac = lr_warmup_frac
+        self.leaf_model = leaf_model
+        self.leaf_solver = leaf_solver
+        self.dro_radius = dro_radius
+        self.dro_metric = dro_metric
+        self.neutralization = neutralization
+        self.factor_neutralization_lambda = factor_neutralization_lambda
+        self.factor_penalty = factor_penalty
+        self.factor_exposure_transform = factor_exposure_transform
+        self.boosting_mode = boosting_mode
+        self.goss_top_rate = goss_top_rate
+        self.goss_other_rate = goss_other_rate
+        self.dart_drop_rate = dart_drop_rate
+        self.dart_max_drop = dart_max_drop
+        self.dart_normalize_type = dart_normalize_type
+        self.dart_sample_type = dart_sample_type
+        self.tweedie_variance_power = tweedie_variance_power
+        self.poisson_max_delta_step = poisson_max_delta_step
+        self.quantile_alpha = quantile_alpha
+        self.n_jobs = n_jobs
+        self._fit_neutralization: str | None = None
+        self._fit_factor_neutralization_lambda: float | None = None
+        self._fit_factor_penalty: float | None = None
+        self._is_fitted = False
+        self._artifact_bytes: bytes | None = None
+        self._native_predictor_handle: object | None = None
+        self._float_thresholds_converted = False
+        self._n_features_in = 0
+        self._uses_continuous_binning = False
+        self._continuous_feature_mins: list[float] | None = None
+        self._continuous_feature_maxs: list[float] | None = None
+        self._continuous_feature_sorted_values: list[list[float]] | None = None
+        self._continuous_feature_quantile_cuts: list[list[float]] | None = None
+        self._continuous_feature_linear_rank_flags: list[bool] | None = None
+        self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
+
     def __repr__(self) -> str:
         return (
             "GBMRegressor("
@@ -634,8 +776,8 @@ class _GBMEstimatorCore(
             "n_jobs": self.n_jobs,
         }
 
-    def set_params(self, **params: object) -> "GBMRegressor":
-        """Set estimator parameters with constructor-equivalent validation."""
+    def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
+        """Validate parameter values on an isolated probe estimator."""
         allowed = {
             "learning_rate",
             "max_depth",
@@ -1274,6 +1416,53 @@ class _GBMEstimatorCore(
 
         return self
 
+    def set_params(self, **params: object) -> "_GBMEstimatorCore":
+        """Assign known estimator parameters without validating their values."""
+        if not params:
+            return self
+
+        valid_params = self.get_params(deep=True)
+        nested_params: dict[str, dict[str, object]] = {}
+        invalidate_fitted_state = False
+        fitted_sensitive_params = {
+            "continuous_binning_strategy",
+            "continuous_binning_max_bins",
+            "quantile_sketch_max_rows",
+            "feature_bundling",
+        }
+        for full_name, value in params.items():
+            name, delimiter, nested_name = full_name.partition("__")
+            if name not in valid_params:
+                valid_names = ", ".join(sorted(valid_params))
+                raise ValueError(
+                    f"Invalid parameter {name!r} for estimator {self!r}. "
+                    f"Valid parameters are: {valid_names}."
+                )
+            if delimiter:
+                nested_params.setdefault(name, {})[nested_name] = value
+            else:
+                if (
+                    self._is_fitted
+                    and name in fitted_sensitive_params
+                    and getattr(self, name) is not value
+                ):
+                    invalidate_fitted_state = True
+                setattr(self, name, value)
+
+        for name, nested in nested_params.items():
+            valid_params[name].set_params(**nested)
+        if invalidate_fitted_state:
+            self._reset_fitted_state()
+        return self
+
+    def _validate_hyperparameters(self) -> None:
+        """Apply the established parameter contract without mutating ``self``."""
+        probe = _GBMEstimatorCore.__new__(_GBMEstimatorCore)
+        probe._initialize_validation_probe()
+        probe._validate_parameter_updates(
+            **_GBMEstimatorCore.get_params(self, deep=False)
+        )
+
     def fit(
         self,
         X: object,
@@ -1310,6 +1499,7 @@ class _GBMEstimatorCore(
             evaluated after each boosting round and can drive early stopping
             (instead of the built-in loss) when ``early_stopping_rounds`` is set.
         """
+        self._validate_hyperparameters()
         fit_start = time.perf_counter()
         self._fit_start_time = fit_start
         if not self.warm_start:

@@ -36,26 +36,29 @@ def test_quantile_objective_regression() -> None:
 
 
 def test_quantile_objective_parameter_validation() -> None:
-    # 1. Invalid quantile_alpha in __init__
+    X = np.asarray([[0.0], [1.0]], dtype=np.float32)
+    y = np.asarray([0.0, 1.0], dtype=np.float32)
+    # 1. Invalid quantile_alpha from construction
     for bad_alpha in [-0.5, 0.0, 1.0, 1.5]:
         with pytest.raises(ValueError, match="quantile_alpha"):
-            GBMRegressor(objective="quantile", quantile_alpha=bad_alpha)
+            GBMRegressor(objective="quantile", quantile_alpha=bad_alpha).fit(X, y)
 
-    # 2. Invalid quantile_alpha type in __init__
+    # 2. Invalid quantile_alpha type from construction
     with pytest.raises(Exception):
-        GBMRegressor(objective="quantile", quantile_alpha="abc")
+        GBMRegressor(objective="quantile", quantile_alpha="abc").fit(X, y)
 
-    # 3. set_params validation on changing quantile_alpha
+    # 3. Invalid values assigned by set_params fail at fit.
     model = GBMRegressor(objective="quantile", quantile_alpha=0.5)
     for bad_alpha in [-0.1, 0.0, 1.0, 1.1]:
+        model.set_params(quantile_alpha=bad_alpha)
         with pytest.raises(ValueError, match="quantile_alpha"):
-            model.set_params(quantile_alpha=bad_alpha)
+            model.fit(X, y)
 
-    # 4. set_params validation when changing objective to quantile while quantile_alpha is invalid
+    # 4. Changing objective to quantile exposes an already invalid alpha at fit.
     model_bypass = GBMRegressor(objective="squared_error")
-    model_bypass.quantile_alpha = 1.5  # Bypass set_params validation
+    model_bypass.set_params(quantile_alpha=1.5, objective="quantile")
     with pytest.raises(ValueError, match="quantile_alpha"):
-        model_bypass.set_params(objective="quantile")
+        model_bypass.fit(X, y)
 
 
 def test_quantile_objective_pickling() -> None:
@@ -213,17 +216,19 @@ def test_quantile_supported_combinations() -> None:
 
     # 4. GBMClassifier rejects
     from alloygbm import GBMClassifier
+    classifier = GBMClassifier(objective="quantile")
     with pytest.raises(
         ValueError,
         match="GBMClassifier objective is auto-detected.*GBMRanker",
     ):
-        GBMClassifier(objective="quantile")
+        classifier.fit(X, y)
     clf = GBMClassifier()
+    clf.set_params(objective="quantile")
     with pytest.raises(
         ValueError,
         match="GBMClassifier objective is auto-detected.*GBMRanker",
     ):
-        clf.set_params(objective="quantile")
+        clf.fit(X, y)
 
     # 5. GBMRanker accepts
     from alloygbm import GBMRanker

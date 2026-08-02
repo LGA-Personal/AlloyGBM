@@ -242,8 +242,9 @@ class TestCustomObjectiveValidation(unittest.TestCase):
 
     def test_non_callable_raises(self):
         """Non-callable objective raises TypeError."""
+        X, y = _regression_data()
         with self.assertRaises(TypeError):
-            GBMRegressor(objective=42)
+            GBMRegressor(objective=42).fit(X, y)
 
     def test_wrong_return_shape_raises(self):
         """Callable returning wrong shape raises error during fit."""
