@@ -504,8 +504,11 @@ def test_public_ranker_keeps_mandatory_group_contract() -> None:
 
     fitted = GBMRanker(n_estimators=1).fit(X, y, group=[0, 0, 1, 1])
     assert fitted.predict(X).shape == (4,)
+    sized = GBMRanker(n_estimators=1).fit(X, y, group=[2, 2])
+    assert sized.predict(X).shape == (4,)
+    assert GBMRanker._normalize_group_input([2, 2], 4) == [0, 0, 1, 1]
 
-    with pytest.raises(ValueError, match="same number"):
+    with pytest.raises(ValueError, match="positive integer|summing to the number of rows"):
         GBMRanker(n_estimators=1).fit(X, y, group=[0, 0, 1])
     with pytest.raises(ValueError, match="non-negative"):
         GBMRanker(n_estimators=1).fit(X, y, group=[0, 0, -1, -1])

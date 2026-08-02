@@ -207,7 +207,7 @@ class GBMRanker(_GBMEstimatorCore):
             X = self._validate_numeric_features(X)
         if len(X) != len(y):
             raise ValueError("X and y must contain the same number of rows")
-        group = self._validate_group(group, len(y))
+        group = self._normalize_group_input(group, len(y))
         if sample_weight is not None:
             sample_weight = self._validate_sample_weight(sample_weight, len(y))
 
@@ -262,7 +262,9 @@ class GBMRanker(_GBMEstimatorCore):
             validated_eval_y = self._validate_targets(eval_y)
             if len(eval_X) != len(validated_eval_y):
                 raise ValueError("eval X and y must contain the same number of rows")
-            eval_group = self._validate_group(eval_group, len(validated_eval_y))
+            eval_group = self._normalize_group_input(
+                eval_group, len(validated_eval_y)
+            )
             eval_X_sorted, eval_y_sorted, eval_group_sorted, eval_sort_idx = (
                 self._sort_by_group(eval_X, validated_eval_y, eval_group)
             )
@@ -409,6 +411,37 @@ class GBMRanker(_GBMEstimatorCore):
             )
 
     # -- internal helpers ------------------------------------------------------
+
+    @staticmethod
+    def _normalize_group_input(group: object, row_count: int) -> list[int]:
+        values = GBMRanker._coerce_sequence_like(group, "group")
+        if len(values) == row_count:
+            return GBMRanker._validate_group(values, row_count)
+        if len(values) >= row_count:
+            raise ValueError(
+                "group must contain one ID per row or positive query sizes "
+                "summing to the number of rows in X"
+            )
+
+        sizes: list[int] = []
+        for index, value in enumerate(values):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"group size at index {index} must be an integer"
+                ) from exc
+            if not np.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+                raise ValueError(
+                    f"group size at index {index} must be a positive integer"
+                )
+            sizes.append(int(numeric))
+        if sum(sizes) != row_count:
+            raise ValueError(
+                "group must contain one ID per row or positive query sizes "
+                "summing to the number of rows in X"
+            )
+        return np.repeat(np.arange(len(sizes), dtype=np.uint32), sizes).tolist()
 
     @staticmethod
     def _validate_lambdarank_truncation_level(value: object) -> int | None:

@@ -104,13 +104,18 @@ Evaluation
 Group format
 ------------
 
-The ``group`` parameter accepts per-row group identifiers (e.g. query IDs).
-AlloyGBM sorts by group internally, so rows do not need to be pre-sorted.
+The ``group`` parameter accepts per-row group identifiers (e.g. query IDs) or a
+shorter sequence of positive contiguous query sizes whose sum equals the row
+count. Both forms are normalized to per-row IDs before AlloyGBM sorts by group,
+so rows do not need to be pre-sorted.
 
 .. code-block:: python
 
    # Per-row group IDs (AlloyGBM format)
    group = [0, 0, 0, 1, 1, 2, 2, 2, 2]
+
+   # Equivalent contiguous query sizes
+   group = [3, 2, 4]
 
 Early stopping
 --------------
