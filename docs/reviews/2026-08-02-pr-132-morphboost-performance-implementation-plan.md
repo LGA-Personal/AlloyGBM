@@ -223,7 +223,7 @@ git commit -m "bench: establish MorphBoost acceptance matrix"
 - Leaves current post-warmup information behavior unchanged by initially setting both gradient
   channels to the effective gradient.
 
-- [ ] **Step 1: Add failing parent and warmup tests**
+- [x] **Step 1: Add failing parent and warmup tests**
 
 Add a direct formula test where L1 thresholding the parent differs from summing thresholded children:
 
@@ -251,7 +251,7 @@ child `NodeStats` under nonzero L1/L2, missing mass, and `min_leaf_magnitude`. A
 warmup parity. Add a test proving Morph+DRO and factor-penalized Morph do not enter the ordinary
 standard SIMD shortcut.
 
-- [ ] **Step 2: Run the focused Rust tests and observe failure**
+- [x] **Step 2: Run the focused Rust tests and observe failure**
 
 Run:
 
@@ -263,7 +263,7 @@ cargo test -p alloygbm-engine multi_output_morph -- --nocapture
 Expected: the new explicit-parent test does not compile and at least one strengthened L1 fixture
 shows the current parent reconstruction contract.
 
-- [ ] **Step 3: Separate gain and information signals in the scalar oracle**
+- [x] **Step 3: Separate gain and information signals in the scalar oracle**
 
 Use these field names consistently:
 
@@ -296,20 +296,20 @@ normalization consumes `parent.hessian_sum`. In current-control call sites, assi
 effective L1/DRO gradient to both channels. Compute the parent effective gradient once from total
 raw gradient, gradient-square sum, and count through `leaf_effective_gradient`.
 
-- [ ] **Step 4: Route pure-standard Morph rounds through standard scanners**
+- [x] **Step 4: Route pure-standard Morph rounds through standard scanners**
 
 In `best_split_morph_with_factor_context`, select standard numeric/categorical functions only when
 the Morph context is pure-standard and both `dro_config` and `factor_context` are absent. Preserve
 Morph leaf scheduling in the engine; only split selection is redirected. Keep direct numeric helper
 tests aligned with this routing contract.
 
-- [ ] **Step 5: Align joint-output formula inputs**
+- [x] **Step 5: Align joint-output formula inputs**
 
 Update `morph_gain_per_output` to construct and consume explicit parent/child signals even though
 joint training currently has no L1/DRO distinction. Do not change its Hessian-derived count proxy
 in this task.
 
-- [ ] **Step 6: Run focused and workspace tests**
+- [x] **Step 6: Run focused and workspace tests**
 
 ```bash
 cargo test -p alloygbm-backend-cpu morph -- --nocapture
@@ -319,7 +319,7 @@ cargo test --workspace
 
 Expected: all pass, including exact warmup winner/stat parity.
 
-- [ ] **Step 7: Commit the semantic repair**
+- [x] **Step 7: Commit the semantic repair**
 
 ```bash
 git add crates/backend_cpu/src/morph.rs crates/backend_cpu/src/lib.rs \

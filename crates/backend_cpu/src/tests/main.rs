@@ -1740,10 +1740,7 @@ fn best_split_morph_at_warmup_matches_best_split_with_options() {
         "test fixture must produce a non-trivial split (standard path returned None)"
     );
     match (standard, morph_result) {
-        (Some(a), Some(b)) => {
-            assert_eq!(a.feature_index, b.feature_index, "feature_index disagreed");
-            assert_eq!(a.threshold_bin, b.threshold_bin, "threshold_bin disagreed");
-        }
+        (Some(a), Some(b)) => assert_split_candidates_match(Some(&a), Some(&b)),
         (None, None) => {}
         (a, b) => panic!(
             "split selection presence disagreed: standard={:?}, morph={:?}",
@@ -1777,9 +1774,9 @@ fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
         l1_alpha: 0.5,
         min_child_hessian: 0.0,
         min_rows_per_leaf: 1,
-        min_leaf_magnitude: 0.0,
+        min_leaf_magnitude: 0.1,
         dro_config: None,
-        missing_bin_index: 255,
+        missing_bin_index: 3,
     };
 
     let cfg = MorphConfig {
@@ -1806,16 +1803,41 @@ fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
         standard.is_some(),
         "test fixture must produce a non-trivial split (standard path returned None)"
     );
-    let a = standard.unwrap();
-    let b = morph_result.unwrap();
-    assert_eq!(
-        a.feature_index, b.feature_index,
-        "feature_index disagreed under L1/L2 regularization"
-    );
-    assert_eq!(
-        a.threshold_bin, b.threshold_bin,
-        "threshold_bin disagreed under L1/L2 regularization"
-    );
+    assert_split_candidates_match(standard.as_ref(), morph_result.as_ref());
+}
+
+#[test]
+fn morph_standard_scanner_shortcut_excludes_dro_and_factor_penalties() {
+    use alloygbm_core::{DroConfig, DroMetric, MorphConfig, MorphPrecomputed};
+    use alloygbm_engine::MorphContext;
+
+    let cfg = MorphConfig::default();
+    let morph = MorphContext {
+        iteration: 0,
+        total_iterations: 100,
+        grad_mean: 0.0,
+        grad_std: 1.0,
+        config: cfg,
+        precomputed: MorphPrecomputed::for_iteration(0, 100, &cfg),
+    };
+    let ordinary = SplitSelectionOptions::default();
+    assert!(crate::backend_ops::morph_can_use_standard_scanner(
+        &morph, &ordinary, false
+    ));
+
+    let with_dro = SplitSelectionOptions {
+        dro_config: Some(DroConfig {
+            radius: 0.05,
+            metric: DroMetric::Wasserstein,
+        }),
+        ..ordinary
+    };
+    assert!(!crate::backend_ops::morph_can_use_standard_scanner(
+        &morph, &with_dro, false
+    ));
+    assert!(!crate::backend_ops::morph_can_use_standard_scanner(
+        &morph, &ordinary, true
+    ));
 }
 
 #[test]
@@ -1879,15 +1901,30 @@ fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
         options.l1_alpha,
         options.dro_config.as_ref(),
     );
+    let parent_gradient_sum = leaf_effective_gradient(
+        split.left_stats.grad_sum + split.right_stats.grad_sum,
+        split.left_stats.grad_sq_sum + split.right_stats.grad_sq_sum,
+        split.left_stats.row_count + split.right_stats.row_count,
+        options.l1_alpha,
+        options.dro_config.as_ref(),
+    );
     let expected = compute_morph_gain(
         MorphGainInputs {
+            parent: SplitSideStats {
+                gain_gradient_sum: parent_gradient_sum,
+                info_gradient_sum: parent_gradient_sum,
+                hessian_sum: split.left_stats.hess_sum + split.right_stats.hess_sum,
+                count: split.left_stats.row_count + split.right_stats.row_count,
+            },
             left: SplitSideStats {
-                gradient_sum: left_gradient_sum,
+                gain_gradient_sum: left_gradient_sum,
+                info_gradient_sum: left_gradient_sum,
                 hessian_sum: split.left_stats.hess_sum,
                 count: split.left_stats.row_count,
             },
             right: SplitSideStats {
-                gradient_sum: right_gradient_sum,
+                gain_gradient_sum: right_gradient_sum,
+                info_gradient_sum: right_gradient_sum,
                 hessian_sum: split.right_stats.hess_sum,
                 count: split.right_stats.row_count,
             },
@@ -1959,6 +1996,12 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
         grad_sq_sum: 0.0,
         count: 20,
     };
+    bins[nan_bin] = HistogramBin {
+        grad_sum: 0.75,
+        hess_sum: 1.0,
+        grad_sq_sum: 0.75 * 0.75,
+        count: 3,
+    };
 
     let feature_histogram = FeatureHistogram {
         feature_index: 0,
@@ -1968,11 +2011,11 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
         .expect("valid histogram bundle");
 
     let options = SplitSelectionOptions {
-        l2_lambda: 0.0,
-        l1_alpha: 0.0,
+        l2_lambda: 0.7,
+        l1_alpha: 0.25,
         min_child_hessian: 0.0,
         min_rows_per_leaf: 1,
-        min_leaf_magnitude: 0.0,
+        min_leaf_magnitude: 0.05,
         dro_config: None,
         missing_bin_index: nan_bin,
     };
@@ -2012,6 +2055,7 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
 
     assert!(a.is_categorical, "standard split should be categorical");
     assert!(b.is_categorical, "morph split should be categorical");
+    assert_split_candidates_match(Some(&a), Some(&b));
     assert_eq!(
         a.feature_index, b.feature_index,
         "feature_index disagreed for categorical morph at warmup"

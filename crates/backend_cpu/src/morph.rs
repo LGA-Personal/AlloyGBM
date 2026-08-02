@@ -8,13 +8,13 @@ use alloygbm_core::{MorphConfig, MorphPrecomputed};
 
 /// Statistics for one side of a split (left, right, or parent).
 ///
-/// `gradient_sum` is the gain signal selected by the caller. Standard and
-/// MorphBoost-only training pass the L1-thresholded gradient; DRO+Morph passes
-/// the DRO effective gradient so MorphBoost blends its information score with
-/// the same robust gradient gain used by scalar leaf solving.
+/// The gain signal follows the leaf solver's L1/DRO adjustment. The information
+/// signal is separate so calibration can compare adjusted and raw gradients
+/// without changing the Newton gain contract.
 #[derive(Debug, Clone, Copy)]
 pub struct SplitSideStats {
-    pub gradient_sum: f32,
+    pub gain_gradient_sum: f32,
+    pub info_gradient_sum: f32,
     pub hessian_sum: f32,
     pub count: u32,
 }
@@ -22,6 +22,7 @@ pub struct SplitSideStats {
 /// Morph gain inputs.
 #[derive(Debug, Clone, Copy)]
 pub struct MorphGainInputs {
+    pub parent: SplitSideStats,
     pub left: SplitSideStats,
     pub right: SplitSideStats,
     pub iteration: u32,
@@ -72,7 +73,7 @@ pub fn compute_morph_gain(
 /// curvature grows with node mass and the EMA scale tracks gradient units, so
 /// neither node size nor loss scale silently changes the blend weight.
 fn normalize_gradient_gain(inputs: &MorphGainInputs, gradient_score: f32) -> f32 {
-    let parent_hessian = inputs.left.hessian_sum + inputs.right.hessian_sum;
+    let parent_hessian = inputs.parent.hessian_sum;
     let curvature = (parent_hessian + inputs.lambda_l2).max(GAIN_EPSILON);
     let gradient_scale = inputs.grad_std.abs().max(EPS);
     gradient_score / (curvature * gradient_scale * gradient_scale).max(EPS)
@@ -81,12 +82,11 @@ fn normalize_gradient_gain(inputs: &MorphGainInputs, gradient_score: f32) -> f32
 fn gradient_gain(inputs: &MorphGainInputs) -> f32 {
     let l = &inputs.left;
     let r = &inputs.right;
+    let p = &inputs.parent;
     let lambda = inputs.lambda_l2;
-    let parent_g = l.gradient_sum + r.gradient_sum;
-    let parent_h = l.hessian_sum + r.hessian_sum;
-    (l.gradient_sum * l.gradient_sum) / (l.hessian_sum + lambda + GAIN_EPSILON)
-        + (r.gradient_sum * r.gradient_sum) / (r.hessian_sum + lambda + GAIN_EPSILON)
-        - (parent_g * parent_g) / (parent_h + lambda + GAIN_EPSILON)
+    (l.gain_gradient_sum * l.gain_gradient_sum) / (l.hessian_sum + lambda + GAIN_EPSILON)
+        + (r.gain_gradient_sum * r.gain_gradient_sum) / (r.hessian_sum + lambda + GAIN_EPSILON)
+        - (p.gain_gradient_sum * p.gain_gradient_sum) / (p.hessian_sum + lambda + GAIN_EPSILON)
 }
 
 fn info_gain(inputs: &MorphGainInputs, config: &MorphConfig) -> f32 {
@@ -94,16 +94,7 @@ fn info_gain(inputs: &MorphGainInputs, config: &MorphConfig) -> f32 {
         + config.evolution_pressure * (inputs.iteration as f32 / inputs.total_iterations as f32);
     let info_l = info_side(inputs.left, inputs.grad_mean, inputs.grad_std, smoothing);
     let info_r = info_side(inputs.right, inputs.grad_mean, inputs.grad_std, smoothing);
-    let info_parent = info_side(
-        SplitSideStats {
-            gradient_sum: inputs.left.gradient_sum + inputs.right.gradient_sum,
-            hessian_sum: inputs.left.hessian_sum + inputs.right.hessian_sum,
-            count: inputs.left.count + inputs.right.count,
-        },
-        inputs.grad_mean,
-        inputs.grad_std,
-        smoothing,
-    );
+    let info_parent = info_side(inputs.parent, inputs.grad_mean, inputs.grad_std, smoothing);
     info_l + info_r - info_parent
 }
 
@@ -111,7 +102,7 @@ fn info_side(stats: SplitSideStats, mean: f32, std: f32, smoothing: f32) -> f32 
     if stats.count == 0 {
         return 0.0;
     }
-    let g_mean = stats.gradient_sum / stats.count as f32;
+    let g_mean = stats.info_gradient_sum / stats.count as f32;
     let g_norm = (g_mean - mean) / (std + EPS);
     g_norm.abs() * (1.0 + g_norm.abs()).ln() / smoothing
 }
@@ -134,22 +125,46 @@ mod tests {
     use super::*;
     use alloygbm_core::{LrSchedule, MorphConfig};
 
+    fn side(
+        gain_gradient_sum: f32,
+        info_gradient_sum: f32,
+        hessian_sum: f32,
+        count: u32,
+    ) -> SplitSideStats {
+        SplitSideStats {
+            gain_gradient_sum,
+            info_gradient_sum,
+            hessian_sum,
+            count,
+        }
+    }
+
     fn config() -> MorphConfig {
         MorphConfig::default()
     }
 
+    #[test]
+    fn morph_gradient_gain_uses_explicit_parent_signal() {
+        let inputs = MorphGainInputs {
+            parent: side(7.0, 7.0, 8.0, 8),
+            left: side(4.0, 4.0, 4.0, 4),
+            right: side(1.0, 1.0, 4.0, 4),
+            iteration: 10,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            lambda_l2: 1.0,
+        };
+        let expected =
+            4.0_f32.powi(2) / 5.000_001 + 1.0_f32.powi(2) / 5.000_001 - 7.0_f32.powi(2) / 9.000_001;
+        assert!((gradient_gain(&inputs) - expected).abs() < 1e-6);
+    }
+
     fn balanced_inputs(iteration: u32) -> MorphGainInputs {
         MorphGainInputs {
-            left: SplitSideStats {
-                gradient_sum: 5.0,
-                hessian_sum: 4.0,
-                count: 50,
-            },
-            right: SplitSideStats {
-                gradient_sum: -5.0,
-                hessian_sum: 4.0,
-                count: 50,
-            },
+            parent: side(0.0, 0.0, 8.0, 100),
+            left: side(5.0, 5.0, 4.0, 50),
+            right: side(-5.0, -5.0, 4.0, 50),
             iteration,
             total_iterations: 100,
             grad_mean: 0.0,
@@ -223,16 +238,9 @@ mod tests {
     #[test]
     fn balance_penalty_reduces_gain_for_unbalanced_split() {
         let unbalanced = MorphGainInputs {
-            left: SplitSideStats {
-                gradient_sum: 1.0,
-                hessian_sum: 1.0,
-                count: 5,
-            },
-            right: SplitSideStats {
-                gradient_sum: -1.0,
-                hessian_sum: 1.0,
-                count: 95,
-            },
+            parent: side(0.0, 0.0, 2.0, 100),
+            left: side(1.0, 1.0, 1.0, 5),
+            right: side(-1.0, -1.0, 1.0, 95),
             iteration: 5,
             total_iterations: 100,
             grad_mean: 0.0,
@@ -373,16 +381,9 @@ mod tests {
     #[test]
     fn warmup_ignores_balance_penalty() {
         let inputs = MorphGainInputs {
-            left: SplitSideStats {
-                gradient_sum: 1.0,
-                hessian_sum: 1.0,
-                count: 5,
-            },
-            right: SplitSideStats {
-                gradient_sum: -1.0,
-                hessian_sum: 1.0,
-                count: 95,
-            },
+            parent: side(0.0, 0.0, 2.0, 100),
+            left: side(1.0, 1.0, 1.0, 5),
+            right: side(-1.0, -1.0, 1.0, 95),
             iteration: 0,
             total_iterations: 100,
             grad_mean: 0.0,
@@ -403,16 +404,9 @@ mod tests {
             ..config()
         };
         let base = MorphGainInputs {
-            left: SplitSideStats {
-                gradient_sum: 8.0,
-                hessian_sum: 12.0,
-                count: 40,
-            },
-            right: SplitSideStats {
-                gradient_sum: -4.0,
-                hessian_sum: 18.0,
-                count: 60,
-            },
+            parent: side(4.0, 4.0, 30.0, 100),
+            left: side(8.0, 8.0, 12.0, 40),
+            right: side(-4.0, -4.0, 18.0, 60),
             iteration: 30,
             total_iterations: 100,
             grad_mean: 0.0,
@@ -420,16 +414,24 @@ mod tests {
             lambda_l2: 0.0,
         };
         let duplicated = MorphGainInputs {
-            left: SplitSideStats {
-                gradient_sum: base.left.gradient_sum * 2.0,
-                hessian_sum: base.left.hessian_sum * 2.0,
-                count: base.left.count * 2,
-            },
-            right: SplitSideStats {
-                gradient_sum: base.right.gradient_sum * 2.0,
-                hessian_sum: base.right.hessian_sum * 2.0,
-                count: base.right.count * 2,
-            },
+            parent: side(
+                base.parent.gain_gradient_sum * 2.0,
+                base.parent.info_gradient_sum * 2.0,
+                base.parent.hessian_sum * 2.0,
+                base.parent.count * 2,
+            ),
+            left: side(
+                base.left.gain_gradient_sum * 2.0,
+                base.left.info_gradient_sum * 2.0,
+                base.left.hessian_sum * 2.0,
+                base.left.count * 2,
+            ),
+            right: side(
+                base.right.gain_gradient_sum * 2.0,
+                base.right.info_gradient_sum * 2.0,
+                base.right.hessian_sum * 2.0,
+                base.right.count * 2,
+            ),
             ..base
         };
         let pre = MorphPrecomputed::for_iteration(base.iteration, base.total_iterations, &cfg);
@@ -451,16 +453,9 @@ mod tests {
             ..config()
         };
         let base = MorphGainInputs {
-            left: SplitSideStats {
-                gradient_sum: 3.0,
-                hessian_sum: 12.0,
-                count: 40,
-            },
-            right: SplitSideStats {
-                gradient_sum: -1.0,
-                hessian_sum: 18.0,
-                count: 60,
-            },
+            parent: side(2.0, 2.0, 30.0, 100),
+            left: side(3.0, 3.0, 12.0, 40),
+            right: side(-1.0, -1.0, 18.0, 60),
             iteration: 30,
             total_iterations: 100,
             grad_mean: 0.1,
@@ -468,14 +463,24 @@ mod tests {
             lambda_l2: 0.0,
         };
         let scaled = MorphGainInputs {
-            left: SplitSideStats {
-                gradient_sum: base.left.gradient_sum * 10.0,
-                ..base.left
-            },
-            right: SplitSideStats {
-                gradient_sum: base.right.gradient_sum * 10.0,
-                ..base.right
-            },
+            parent: side(
+                base.parent.gain_gradient_sum * 10.0,
+                base.parent.info_gradient_sum * 10.0,
+                base.parent.hessian_sum,
+                base.parent.count,
+            ),
+            left: side(
+                base.left.gain_gradient_sum * 10.0,
+                base.left.info_gradient_sum * 10.0,
+                base.left.hessian_sum,
+                base.left.count,
+            ),
+            right: side(
+                base.right.gain_gradient_sum * 10.0,
+                base.right.info_gradient_sum * 10.0,
+                base.right.hessian_sum,
+                base.right.count,
+            ),
             grad_mean: base.grad_mean * 10.0,
             grad_std: base.grad_std * 10.0,
             ..base

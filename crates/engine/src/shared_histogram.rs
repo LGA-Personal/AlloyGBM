@@ -214,6 +214,9 @@ pub fn compute_multi_output_split_gain_morph(
             }
         }
         total += morph_gain_per_output(
+            g_l + g_r,
+            h_l + h_r,
+            c_l.saturating_add(c_r),
             g_l,
             h_l,
             c_l,
@@ -347,6 +350,9 @@ pub fn find_best_multi_output_categorical_split_morph_with_factor_penalty(
             let cl = left_c[ko];
             let cr = total_c[ko].saturating_sub(cl);
             gain += morph_gain_per_output(
+                total_g[ko],
+                total_h[ko],
+                total_c[ko],
                 gl,
                 hl,
                 cl,
@@ -426,6 +432,9 @@ fn morph_count_proxy(h: f32) -> u32 {
 /// depend on backend-cpu; the formula is small and self-contained).
 #[allow(clippy::too_many_arguments)]
 fn morph_gain_per_output(
+    g_parent: f32,
+    h_parent: f32,
+    c_parent: u32,
     g_l: f32,
     h_l: f32,
     c_l: u32,
@@ -448,11 +457,9 @@ fn morph_gain_per_output(
 
     // Gradient gain (standard XGBoost-style; same formula as the standard
     // variant's per-output term, modulo `GAIN_EPSILON` matching).
-    let p_g = g_l + g_r;
-    let p_h = h_l + h_r;
     let gradient_score = (g_l * g_l) / (h_l + lambda_l2 + GAIN_EPSILON)
         + (g_r * g_r) / (h_r + lambda_l2 + GAIN_EPSILON)
-        - (p_g * p_g) / (p_h + lambda_l2 + GAIN_EPSILON);
+        - (g_parent * g_parent) / (h_parent + lambda_l2 + GAIN_EPSILON);
 
     let mut gain = if pre.in_warmup || pre.info_score_negligible {
         gradient_score
@@ -470,9 +477,9 @@ fn morph_gain_per_output(
         };
         let info_l = info_side(g_l, c_l);
         let info_r = info_side(g_r, c_r);
-        let info_p = info_side(g_l + g_r, c_l.saturating_add(c_r));
+        let info_p = info_side(g_parent, c_parent);
         let info_score = info_l + info_r - info_p;
-        let curvature = (p_h + lambda_l2).max(GAIN_EPSILON);
+        let curvature = (h_parent + lambda_l2).max(GAIN_EPSILON);
         let gradient_scale = grad_std.abs().max(INFO_EPS);
         let normalized_gradient_score =
             gradient_score / (curvature * gradient_scale * gradient_scale).max(INFO_EPS);
@@ -481,7 +488,7 @@ fn morph_gain_per_output(
 
     // Balance penalty for very-unbalanced splits.
     if !pre.in_warmup && pre.balance_penalty {
-        let total = c_l.saturating_add(c_r);
+        let total = c_parent;
         if total > 0 {
             let min_side = c_l.min(c_r);
             let ratio = min_side as f32 / total as f32;
