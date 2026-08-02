@@ -28,7 +28,7 @@ pytest-cov>=7.1.0
 coverage>=7.14.1
 
 # Optional-but-tested integration paths
-scikit-learn>=1.8.0
+scikit-learn>=1.8.0,<1.10
 pandas>=2.0
 
 # Benchmarks (cross-library comparison)

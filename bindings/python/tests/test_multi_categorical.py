@@ -111,33 +111,41 @@ class TestMultiCategoricalValidation(unittest.TestCase):
 
     def test_mutual_exclusion_with_singular(self):
         """Setting both singular and plural should raise."""
+        model = GBMRegressor(
+            n_estimators=3,
+            categorical_feature_index=0,
+            categorical_feature_indices=[0, 1],
+        )
         with self.assertRaises(ValueError):
-            GBMRegressor(
-                n_estimators=3,
-                categorical_feature_index=0,
-                categorical_feature_indices=[0, 1],
-            )
+            model.fit([[0.0, 0.0]], [0.0])
 
     def test_set_params_mutual_exclusion(self):
         """set_params with both singular and plural should raise."""
         m = GBMRegressor(n_estimators=3, categorical_feature_index=0)
+        m.set_params(categorical_feature_indices=[0, 1])
         with self.assertRaises(ValueError):
-            m.set_params(categorical_feature_indices=[0, 1])
+            m.fit([[0.0, 0.0]], [0.0])
 
     def test_negative_index_raises(self):
         """Negative indices should raise ValueError."""
         with self.assertRaises(ValueError):
-            GBMRegressor(n_estimators=3, categorical_feature_indices=[-1, 0])
+            GBMRegressor(n_estimators=3, categorical_feature_indices=[-1, 0]).fit(
+                [[0.0, 0.0]], [0.0]
+            )
 
     def test_duplicate_indices_raises(self):
         """Duplicate indices should raise ValueError."""
         with self.assertRaises(ValueError):
-            GBMRegressor(n_estimators=3, categorical_feature_indices=[0, 0])
+            GBMRegressor(n_estimators=3, categorical_feature_indices=[0, 0]).fit(
+                [[0.0, 0.0]], [0.0]
+            )
 
     def test_non_list_raises(self):
         """Non-list type should raise TypeError."""
         with self.assertRaises(TypeError):
-            GBMRegressor(n_estimators=3, categorical_feature_indices="0,1")
+            GBMRegressor(n_estimators=3, categorical_feature_indices="0,1").fit(
+                [[0.0, 0.0]], [0.0]
+            )
 
     def test_fit_values_list_and_values_mutual_exclusion(self):
         """categorical_feature_values and categorical_feature_values_list are mutually exclusive."""

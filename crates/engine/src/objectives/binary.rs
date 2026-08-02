@@ -47,9 +47,9 @@ impl ObjectiveOps for BinaryCrossEntropyObjective {
             let mut pos_w = 0.0_f32;
             let mut tot_w = 0.0_f32;
             for (&target, &weight) in targets.iter().zip(weights) {
-                if !weight.is_finite() || weight <= 0.0 {
+                if !weight.is_finite() || weight < 0.0 {
                     return Err(EngineError::ContractViolation(
-                        "sample weights must be finite and > 0".to_string(),
+                        "sample weights must be finite and non-negative".to_string(),
                     ));
                 }
                 pos_w += target * weight;
@@ -100,7 +100,14 @@ impl ObjectiveOps for BinaryCrossEntropyObjective {
             // grad = (p - y) * w, hess = p * (1 - p) * w
             let grad = (p - targets[index]) * weight;
             let hess = (p * (1.0 - p)).max(1e-7) * weight;
-            gradients.push(GradientPair::new(grad, hess)?);
+            if weight == 0.0 {
+                gradients.push(GradientPair {
+                    grad: 0.0,
+                    hess: 0.0,
+                });
+            } else {
+                gradients.push(GradientPair::new(grad, hess)?);
+            }
         }
         Ok(gradients)
     }

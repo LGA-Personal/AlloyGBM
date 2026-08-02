@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from sklearn.exceptions import NotFittedError
 
 from alloygbm import GBMRegressor
 
@@ -129,7 +130,7 @@ def test_shap_interaction_values_linear_rank_with_linear_leaves(monkeypatch) -> 
 
 def test_shap_interaction_values_handles_unfit_model() -> None:
     model = GBMRegressor(n_estimators=3)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(NotFittedError):
         model.shap_interaction_values(np.zeros((2, 3), dtype=np.float32))
 
 

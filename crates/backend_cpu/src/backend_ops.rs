@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::CpuBackend;
 use crate::factor_split::validate_factor_split_context;
-use crate::split_helpers::apply_feature_weight;
+use crate::split_helpers::{apply_feature_weight, gain_materially_exceeds};
 use crate::{NodeStatsAccumulator, pl, pl_histogram};
 
 impl BackendOps for CpuBackend {
@@ -182,9 +182,10 @@ impl BackendOps for CpuBackend {
                 .into_par_iter()
                 .filter_map(|index| find_best(histograms.feature(index).expect("bounded feature")))
                 .reduce_with(|a, b| {
-                    if apply_feature_weight(&b, feature_weights)
-                        > apply_feature_weight(&a, feature_weights)
-                    {
+                    if gain_materially_exceeds(
+                        apply_feature_weight(&b, feature_weights),
+                        apply_feature_weight(&a, feature_weights),
+                    ) {
                         b
                     } else {
                         a
@@ -192,9 +193,10 @@ impl BackendOps for CpuBackend {
                 })
         } else {
             histograms.features().filter_map(find_best).reduce(|a, b| {
-                if apply_feature_weight(&b, feature_weights)
-                    > apply_feature_weight(&a, feature_weights)
-                {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&b, feature_weights),
+                    apply_feature_weight(&a, feature_weights),
+                ) {
                     b
                 } else {
                     a
@@ -408,9 +410,10 @@ impl BackendOps for CpuBackend {
                 .par_iter()
                 .filter_map(find_best)
                 .reduce_with(|a, b| {
-                    if apply_feature_weight(&b, feature_weights)
-                        > apply_feature_weight(&a, feature_weights)
-                    {
+                    if gain_materially_exceeds(
+                        apply_feature_weight(&b, feature_weights),
+                        apply_feature_weight(&a, feature_weights),
+                    ) {
                         b
                     } else {
                         a
@@ -422,9 +425,10 @@ impl BackendOps for CpuBackend {
                 .iter()
                 .filter_map(find_best)
                 .reduce(|a, b| {
-                    if apply_feature_weight(&b, feature_weights)
-                        > apply_feature_weight(&a, feature_weights)
-                    {
+                    if gain_materially_exceeds(
+                        apply_feature_weight(&b, feature_weights),
+                        apply_feature_weight(&a, feature_weights),
+                    ) {
                         b
                     } else {
                         a

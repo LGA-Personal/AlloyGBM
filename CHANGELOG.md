@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Closed the sklearn estimator contract.** `GBMRegressor` and
+  `GBMClassifier` now pass every applicable scikit-learn 1.8 and 1.9 estimator
+  check, with correct semantic mixin order, clone-safe parameter handling,
+  fit-only learned attributes, `n_features_in_`, standard fitted-state and
+  dense-input validation, zero-weight semantics, and NumPy prediction outputs.
+  Classifiers preserve arbitrary numeric, boolean, and string labels through
+  prediction and persistence. A group-supplying test adapter gives
+  `GBMRanker` equivalent coverage without weakening its required `group=` API.
+  Sparse matrices remain unsupported and are rejected explicitly.
+
 - **Hardened model artifact and dense-input trust boundaries.** Artifact writers,
   contract validation, engine/predictor loaders, and optional section decoders
   now share explicit resource budgets, checked count arithmetic, finite-value

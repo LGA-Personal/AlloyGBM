@@ -316,6 +316,35 @@ fn quantile_sketch_uses_exact_fallback_and_even_row_coverage() {
 }
 
 #[test]
+fn integer_sample_weights_match_repeated_row_quantile_cuts() {
+    let values = vec![0.1, 0.4, 0.8, 1.2];
+    let weights = vec![3.0, 0.0, 2.0, 1.0];
+    let repeated_values = vec![0.1, 0.1, 0.1, 0.8, 0.8, 1.2];
+
+    let weighted = prepare_training_matrices_from_dense_values(
+        &values,
+        values.len(),
+        1,
+        &vec![0.0; values.len()],
+        None,
+        Some(weights),
+        None,
+        ContinuousBinningStrategy::Quantile,
+        256,
+        None,
+        false,
+        BinnedLayout::ColumnMajor,
+    )
+    .expect("weighted quantile preparation succeeds");
+    let repeated = prepare_quantile_fixture(&repeated_values, repeated_values.len(), 1, None);
+
+    assert_eq!(
+        weighted.metadata.feature_quantile_cuts,
+        repeated.metadata.feature_quantile_cuts
+    );
+}
+
+#[test]
 fn quantile_sketch_is_identical_across_rayon_thread_counts() {
     let values = (0..4096)
         .flat_map(|row| {

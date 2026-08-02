@@ -4,9 +4,17 @@
 
 ## Overview
 
-`GBMRanker` extends `GBMRegressor` with ranking-specific objectives. All ranking
-objectives require query group identifiers to be passed in `fit()`. Data is
-sorted by group internally.
+`GBMRanker` is a dedicated estimator shell over AlloyGBM's shared native
+training core. It deliberately does not claim generic regressor or classifier
+semantics. All ranking objectives require query group identifiers to be passed
+in `fit()`. Data is sorted by group internally.
+
+Generic scikit-learn checks cannot provide mandatory query groups. AlloyGBM's
+test suite therefore runs the applicable checks through a test-only adapter
+that supplies deterministic groups, while direct tests preserve the public
+`fit(X, y, *, group=...)` contract. Scikit-learn 1.8 and 1.9 are certified;
+there are no AlloyGBM-specific check exclusions. Sparse matrices remain
+unsupported.
 
 ## Quick Example
 
@@ -174,13 +182,17 @@ print(model.best_iteration_)
 
 ## Group Format
 
-The `group` parameter accepts per-row group identifiers (e.g. query IDs). This
-is different from LightGBM's group-size format. AlloyGBM sorts by group
-internally, so rows do not need to be pre-sorted.
+The `group` parameter accepts per-row group identifiers (e.g. query IDs) or a
+shorter sequence of positive contiguous query sizes whose sum equals the row
+count. Both forms are normalized to per-row IDs before AlloyGBM sorts by group,
+so rows do not need to be pre-sorted.
 
 ```python
 # Per-row group IDs (AlloyGBM format)
 group = [0, 0, 0, 1, 1, 2, 2, 2, 2]
+
+# Equivalent contiguous query sizes
+group = [3, 2, 4]
 ```
 
 ## Current Scope

@@ -107,7 +107,7 @@ jobs:
             --runtime-workdir "$GITHUB_WORKSPACE"
 
       - name: Install test dependencies
-        run: python -m pip install pytest pytest-subtests numpy scikit-learn pandas
+        run: python -m pip install pytest pytest-subtests numpy "scikit-learn>=1.9,<1.10" pandas
 
       - name: Run pytest suite
         run: python -m pytest bindings/python/tests/ -q
@@ -170,13 +170,17 @@ jobs:
           assert params["learning_rate"] == 0.2
           assert params["max_depth"] == 4
 
+          # Invalid parameter values are validated at fit() (not
+          # construction/set_params) so cloning and parameter-search
+          # workflows follow the scikit-learn estimator contract.
+          model.set_params(learning_rate=0.0)
           try:
-              model.set_params(learning_rate=0.0)
+              model.fit([[0.0], [1.0], [2.0], [3.0]], [0.0, 1.0, 2.0, 3.0])
           except ValueError:
               pass
           else:
               raise AssertionError(
-                  "expected ValueError for invalid learning_rate"
+                  "expected ValueError for invalid learning_rate at fit()"
               )
 
           print("GBMRegressor contract smoke ok")
@@ -220,7 +224,7 @@ jobs:
           model.fit(X, y)
 
           assert model.n_classes_ == 3, f"expected 3 classes, got {model.n_classes_}"
-          assert model.classes_ == [0, 1, 2]
+          assert np.array_equal(model.classes_, [0, 1, 2])
 
           probas = model.predict_proba(X)
           assert probas.shape == (150, 3), f"unexpected shape: {probas.shape}"
@@ -316,3 +320,46 @@ jobs:
           assert 0 in model._native_cat_mappings_
           print("Native categorical split smoke ok")
           PY
+
+  sklearn-conformance:
+    name: sklearn ${{ matrix.sklearn-minor }} conformance
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sklearn-minor: "1.8"
+            sklearn-constraint: "scikit-learn>=1.8,<1.9"
+          - sklearn-minor: "1.9"
+            sklearn-constraint: "scikit-learn>=1.9,<1.10"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python --out dist
+
+      - name: Install conformance environment
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install pytest pytest-subtests numpy pandas "${{ matrix.sklearn-constraint }}"
+
+      - name: Run sklearn conformance suites
+        run: |
+          python -m pytest \
+            bindings/python/tests/test_sklearn_conformance.py \
+            bindings/python/tests/test_regressor_contract.py \
+            bindings/python/tests/test_classifier_and_metrics.py \
+            bindings/python/tests/test_ranker.py -q

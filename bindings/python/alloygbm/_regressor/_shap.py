@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+from .._sklearn_compat import _NotFittedError
 from . import _base
 from ._base import _max_data_bin_for_max_bins
+
+
+def _require_fitted_estimator(estimator: object) -> None:
+    require_fitted = getattr(estimator, "_require_fitted", None)
+    if callable(require_fitted):
+        require_fitted()
+        return
+    if not getattr(estimator, "_is_fitted", False):
+        raise _NotFittedError(
+            f"This {type(estimator).__name__} instance is not fitted yet. Call "
+            "'fit' with appropriate arguments before using this estimator."
+        )
 
 
 class _ShapMixin:
@@ -108,8 +121,7 @@ class _ShapMixin:
         The legacy non-binning path retains the best-effort exemption
         for linear leaves only.
         """
-        if not self._is_fitted:
-            raise RuntimeError("GBMRegressor must be fit before shap_values")
+        _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -232,10 +244,7 @@ class _ShapMixin:
         to the regressor feature's main effect (the diagonal of the interaction
         matrix), ensuring both row-marginal and full additivity are preserved.
         """
-        if not self._is_fitted:
-            raise RuntimeError(
-                "GBMRegressor must be fit before shap_interaction_values"
-            )
+        _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -339,8 +348,7 @@ class _ShapMixin:
         """Return feature importances for the provided rows."""
         if method != "shap":
             raise ValueError("unsupported feature importance method; expected 'shap'")
-        if not self._is_fitted:
-            raise RuntimeError("GBMRegressor must be fit before feature_importances")
+        _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -407,11 +415,10 @@ class _ShapMixin:
             shap_global_importance = _base._load_native_shap_global_importance()
             importance = shap_global_importance(self._artifact_bytes, rows)
         result = [(str(name), float(value)) for name, value in importance]
-        if self.feature_names_in_ is not None and len(result) == len(
-            self.feature_names_in_
-        ):
+        feature_names = getattr(self, "feature_names_in_", None)
+        if feature_names is not None and len(result) == len(feature_names):
             result = [
-                (self.feature_names_in_[i], score)
+                (feature_names[i], score)
                 for i, (_name, score) in enumerate(result)
             ]
         return result

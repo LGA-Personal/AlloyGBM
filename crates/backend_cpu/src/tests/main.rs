@@ -729,6 +729,12 @@ fn best_split_returns_high_gain_candidate() {
 }
 
 #[test]
+fn split_gain_comparison_treats_f32_noise_as_a_tie() {
+    assert!(!gain_materially_exceeds(1.0 + 5e-7, 1.0));
+    assert!(gain_materially_exceeds(1.0 + 2e-6, 1.0));
+}
+
+#[test]
 fn best_split_with_l2_regularization_reduces_gain_magnitude() {
     let backend = CpuBackend;
     let histograms = backend

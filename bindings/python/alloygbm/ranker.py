@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ._regressor._core import _GBMEstimatorCore
 from .regressor import GBMRegressor
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ _OBJECTIVE_NAME_MAP = {
 }
 
 
-class GBMRanker(GBMRegressor):
+class GBMRanker(_GBMEstimatorCore):
     """Gradient Boosted Decision Tree learning-to-rank estimator.
 
     Trains a ranking model using one of several learning-to-rank objectives.
@@ -82,28 +83,11 @@ class GBMRanker(GBMRegressor):
         lambdarank_normalize: bool = False,
         **kwargs: object,
     ) -> None:
-        if ranking_objective not in _RANKING_OBJECTIVES:
-            raise ValueError(
-                f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
-                f"got {ranking_objective!r}"
-            )
-        ranking_sigma_value = float(ranking_sigma)
-        if not np.isfinite(ranking_sigma_value) or ranking_sigma_value <= 0.0:
-            raise ValueError("ranking_sigma must be finite and > 0")
-        truncation_level = self._validate_lambdarank_truncation_level(
-            lambdarank_truncation_level
-        )
-        normalize_lambdas = self._validate_lambdarank_normalize(lambdarank_normalize)
-        if kwargs.get("neutralization") == "pre_target":
-            raise ValueError(
-                "neutralization='pre_target' is only supported for GBMRegressor "
-                "squared-error training"
-            )
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
-        self.ranking_sigma = ranking_sigma_value
-        self.lambdarank_truncation_level = truncation_level
-        self.lambdarank_normalize = normalize_lambdas
+        self.ranking_sigma = ranking_sigma
+        self.lambdarank_truncation_level = lambdarank_truncation_level
+        self.lambdarank_normalize = lambdarank_normalize
 
     # Expose the combined GBMRegressor + ranking_objective signature so tools
     # that introspect via ``inspect.signature`` (sklearn clone, benchmarks,
@@ -202,6 +186,7 @@ class GBMRanker(GBMRegressor):
         eval_metric : callable or None, optional
             Custom evaluation metric. See :meth:`GBMRegressor.fit` for details.
         """
+        self._validate_hyperparameters()
         if group is None:
             raise ValueError("GBMRanker requires 'group' to be provided in fit()")
         if self.neutralization == "pre_target":
@@ -209,6 +194,22 @@ class GBMRanker(GBMRegressor):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
+
+        y = self._validate_targets(y)
+        has_categorical = (
+            self.categorical_feature_index is not None
+            or self.categorical_feature_indices is not None
+            or categorical_feature_values is not None
+            or categorical_feature_values_list is not None
+            or self._infer_explicit_categorical_features(X) is not None
+        )
+        if not has_categorical:
+            X = self._validate_numeric_features(X)
+        if len(X) != len(y):
+            raise ValueError("X and y must contain the same number of rows")
+        group = self._normalize_group_input(group, len(y))
+        if sample_weight is not None:
+            sample_weight = self._validate_sample_weight(sample_weight, len(y))
 
         # Sort training data by group, preserving DataFrame metadata.
         X_sorted, y_sorted, group_sorted, sort_idx = self._sort_by_group(X, y, group)
@@ -258,8 +259,14 @@ class GBMRanker(GBMRegressor):
                     "eval_group must be provided when eval_set is used with GBMRanker"
                 )
             eval_X, eval_y = eval_set
+            validated_eval_y = self._validate_targets(eval_y)
+            if len(eval_X) != len(validated_eval_y):
+                raise ValueError("eval X and y must contain the same number of rows")
+            eval_group = self._normalize_group_input(
+                eval_group, len(validated_eval_y)
+            )
             eval_X_sorted, eval_y_sorted, eval_group_sorted, eval_sort_idx = (
-                self._sort_by_group(eval_X, eval_y, eval_group)
+                self._sort_by_group(eval_X, validated_eval_y, eval_group)
             )
             sorted_eval_set = (eval_X_sorted, eval_y_sorted)
             sorted_eval_group = eval_group_sorted
@@ -377,36 +384,64 @@ class GBMRanker(GBMRegressor):
         return params
 
     def set_params(self, **params: object) -> "GBMRanker":
-        if params.get("neutralization") == "pre_target":
+        super().set_params(**params)
+        return self
+
+    def _validate_hyperparameters(self) -> None:
+        super()._validate_hyperparameters()
+        if self.ranking_objective not in _RANKING_OBJECTIVES:
+            raise ValueError(
+                f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
+                f"got {self.ranking_objective!r}"
+            )
+        try:
+            ranking_sigma = float(self.ranking_sigma)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ranking_sigma must be finite and > 0") from exc
+        if not np.isfinite(ranking_sigma) or ranking_sigma <= 0.0:
+            raise ValueError("ranking_sigma must be finite and > 0")
+        self._validate_lambdarank_truncation_level(
+            self.lambdarank_truncation_level
+        )
+        self._validate_lambdarank_normalize(self.lambdarank_normalize)
+        if self.neutralization == "pre_target":
             raise ValueError(
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
-        if "ranking_objective" in params:
-            val = params.pop("ranking_objective")
-            if val not in _RANKING_OBJECTIVES:
-                raise ValueError(
-                    f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
-                    f"got {val!r}"
-                )
-            self.ranking_objective = val
-        if "ranking_sigma" in params:
-            val = float(params.pop("ranking_sigma"))
-            if not np.isfinite(val) or val <= 0.0:
-                raise ValueError("ranking_sigma must be finite and > 0")
-            self.ranking_sigma = val
-        if "lambdarank_truncation_level" in params:
-            self.lambdarank_truncation_level = self._validate_lambdarank_truncation_level(
-                params.pop("lambdarank_truncation_level")
-            )
-        if "lambdarank_normalize" in params:
-            self.lambdarank_normalize = self._validate_lambdarank_normalize(
-                params.pop("lambdarank_normalize")
-            )
-        super().set_params(**params)
-        return self
 
     # -- internal helpers ------------------------------------------------------
+
+    @staticmethod
+    def _normalize_group_input(group: object, row_count: int) -> list[int]:
+        values = GBMRanker._coerce_sequence_like(group, "group")
+        if len(values) == row_count:
+            return GBMRanker._validate_group(values, row_count)
+        if len(values) >= row_count:
+            raise ValueError(
+                "group must contain one ID per row or positive query sizes "
+                "summing to the number of rows in X"
+            )
+
+        sizes: list[int] = []
+        for index, value in enumerate(values):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"group size at index {index} must be an integer"
+                ) from exc
+            if not np.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+                raise ValueError(
+                    f"group size at index {index} must be a positive integer"
+                )
+            sizes.append(int(numeric))
+        if sum(sizes) != row_count:
+            raise ValueError(
+                "group must contain one ID per row or positive query sizes "
+                "summing to the number of rows in X"
+            )
+        return np.repeat(np.arange(len(sizes), dtype=np.uint32), sizes).tolist()
 
     @staticmethod
     def _validate_lambdarank_truncation_level(value: object) -> int | None:

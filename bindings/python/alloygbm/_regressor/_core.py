@@ -8,13 +8,14 @@ from numbers import Integral
 
 import numpy as np
 
+from .._sklearn_compat import _RegressorMixin, _check_is_fitted
 from ._validation import _ValidationMixin, _resolved_training_policy_to_dict
 from ._quantization import _QuantizationMixin
 from ._shap import _ShapMixin
 from ._persistence import _PersistenceMixin
 from . import _base
 from ._base import (
-    _GBMRegressorBase,
+    _GBMEstimatorBase,
     _MAX_CONTINUOUS_QUANTIZED_BIN,
     _max_data_bin_for_max_bins,
     _MIN_CONTINUOUS_QUANTIZED_BINS,
@@ -38,10 +39,16 @@ def _validate_n_jobs(value: object) -> int | None:
     raise ValueError("n_jobs must be None, -1, or a positive integer")
 
 
-class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _PersistenceMixin, _GBMRegressorBase):
-    """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
+class _GBMEstimatorCore(
+    _ValidationMixin,
+    _QuantizationMixin,
+    _ShapMixin,
+    _PersistenceMixin,
+    _GBMEstimatorBase,
+):
+    """Shared implementation for AlloyGBM's single-output estimators."""
 
-    def __init__(
+    def _initialize_validation_probe(
         self,
         *,
         learning_rate: float = 0.1,
@@ -491,26 +498,150 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self._continuous_feature_maxs: list[float] | None = None
         self._continuous_feature_sorted_values: list[list[float]] | None = None
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
-        self.feature_quantile_cut_methods_: list[str] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
-        self.feature_names_in_: list[str] | None = None
         self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
-        self.best_iteration_: int | None = None
-        self.best_score_: float | None = None
-        self.n_estimators_: int | None = None
-        self.evals_result_: dict[str, dict[str, list[float]]] | None = None
-        self.fit_timing_: dict[str, float] | None = None
-        self.diagnostics_per_round_: list[dict] | None = None
-        self.factor_exposure_diagnostics_: dict | None = None
-        self.feature_bundling_diagnostics_: dict[str, int | bool] = {
-            "active": False,
-            "original_feature_count": 0,
-            "effective_feature_count": 0,
-            "bundle_count": 0,
-            "bundled_feature_count": 0,
-            "skipped_feature_count": 0,
-            "observed_conflict_count": 0,
-        }
+
+    def __init__(
+        self,
+        *,
+        learning_rate: float = 0.1,
+        max_depth: int = 6,
+        n_estimators: int = 6,
+        row_subsample: float = 1.0,
+        col_subsample: float = 1.0,
+        early_stopping_rounds: int | None = None,
+        min_validation_improvement: float = 0.0,
+        min_data_in_leaf: int = 1,
+        lambda_l1: float = 0.0,
+        lambda_l2: float = 0.0,
+        min_child_hessian: float = 0.0,
+        min_split_gain: float = 0.0,
+        seed: int = 0,
+        deterministic: bool = True,
+        continuous_binning_strategy: str = "quantile",
+        continuous_binning_max_bins: int = 256,
+        quantile_sketch_max_rows: int | None = None,
+        feature_bundling: str = "off",
+        categorical_feature_index: int | None = None,
+        categorical_feature_indices: list[int] | None = None,
+        training_policy: str = "auto",
+        store_node_stats: bool = False,
+        categorical_smoothing: float = 20.0,
+        categorical_min_samples_leaf: int = 1,
+        categorical_time_aware: bool = False,
+        monotone_constraints: list[int] | dict[int, int] | None = None,
+        feature_weights: list[float] | dict[int, float] | None = None,
+        interaction_constraints: list[list[int]] | None = None,
+        max_leaves: int | None = None,
+        tree_growth: str = "level",
+        warm_start: bool = False,
+        objective: "str | None | object" = None,
+        max_cat_threshold: int = 0,
+        training_mode: str = "auto",
+        morph_rate: float = 0.1,
+        evolution_pressure: float = 0.2,
+        morph_warmup_iters: int = 5,
+        info_score_weight: float = 0.1,
+        depth_penalty_base: float = 0.9,
+        balance_penalty: bool = True,
+        lr_schedule: str = "constant",
+        lr_warmup_frac: float = 0.1,
+        leaf_model: str = "constant",
+        leaf_solver: str = "standard",
+        dro_radius: float = 0.05,
+        dro_metric: str = "wasserstein",
+        neutralization: str = "none",
+        factor_neutralization_lambda: float = 1e-6,
+        factor_penalty: float = 0.0,
+        factor_exposure_transform: str = "none",
+        boosting_mode: str = "standard",
+        goss_top_rate: float = 0.2,
+        goss_other_rate: float = 0.1,
+        dart_drop_rate: float = 0.1,
+        dart_max_drop: int = 50,
+        dart_normalize_type: str = "tree",
+        dart_sample_type: str = "uniform",
+        tweedie_variance_power: float = 1.5,
+        poisson_max_delta_step: float = 0.7,
+        quantile_alpha: float = 0.5,
+        n_jobs: int | None = None,
+    ) -> None:
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
+        self.n_estimators = n_estimators
+        self.row_subsample = row_subsample
+        self.col_subsample = col_subsample
+        self.early_stopping_rounds = early_stopping_rounds
+        self.min_validation_improvement = min_validation_improvement
+        self.min_data_in_leaf = min_data_in_leaf
+        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
+        self.min_child_hessian = min_child_hessian
+        self.min_split_gain = min_split_gain
+        self.seed = seed
+        self.deterministic = deterministic
+        self.continuous_binning_strategy = continuous_binning_strategy
+        self.continuous_binning_max_bins = continuous_binning_max_bins
+        self.quantile_sketch_max_rows = quantile_sketch_max_rows
+        self.feature_bundling = feature_bundling
+        self.categorical_feature_index = categorical_feature_index
+        self.categorical_feature_indices = categorical_feature_indices
+        self.training_policy = training_policy
+        self.store_node_stats = store_node_stats
+        self.categorical_smoothing = categorical_smoothing
+        self.categorical_min_samples_leaf = categorical_min_samples_leaf
+        self.categorical_time_aware = categorical_time_aware
+        self.monotone_constraints = monotone_constraints
+        self.feature_weights = feature_weights
+        self.interaction_constraints = interaction_constraints
+        self.max_leaves = max_leaves
+        self.tree_growth = tree_growth
+        self.warm_start = warm_start
+        self.objective = objective
+        self.max_cat_threshold = max_cat_threshold
+        self.training_mode = training_mode
+        self.morph_rate = morph_rate
+        self.evolution_pressure = evolution_pressure
+        self.morph_warmup_iters = morph_warmup_iters
+        self.info_score_weight = info_score_weight
+        self.depth_penalty_base = depth_penalty_base
+        self.balance_penalty = balance_penalty
+        self.lr_schedule = lr_schedule
+        self.lr_warmup_frac = lr_warmup_frac
+        self.leaf_model = leaf_model
+        self.leaf_solver = leaf_solver
+        self.dro_radius = dro_radius
+        self.dro_metric = dro_metric
+        self.neutralization = neutralization
+        self.factor_neutralization_lambda = factor_neutralization_lambda
+        self.factor_penalty = factor_penalty
+        self.factor_exposure_transform = factor_exposure_transform
+        self.boosting_mode = boosting_mode
+        self.goss_top_rate = goss_top_rate
+        self.goss_other_rate = goss_other_rate
+        self.dart_drop_rate = dart_drop_rate
+        self.dart_max_drop = dart_max_drop
+        self.dart_normalize_type = dart_normalize_type
+        self.dart_sample_type = dart_sample_type
+        self.tweedie_variance_power = tweedie_variance_power
+        self.poisson_max_delta_step = poisson_max_delta_step
+        self.quantile_alpha = quantile_alpha
+        self.n_jobs = n_jobs
+        self._fit_neutralization: str | None = None
+        self._fit_factor_neutralization_lambda: float | None = None
+        self._fit_factor_penalty: float | None = None
+        self._is_fitted = False
+        self._artifact_bytes: bytes | None = None
+        self._native_predictor_handle: object | None = None
+        self._float_thresholds_converted = False
+        self._n_features_in = 0
+        self._uses_continuous_binning = False
+        self._continuous_feature_mins: list[float] | None = None
+        self._continuous_feature_maxs: list[float] | None = None
+        self._continuous_feature_sorted_values: list[list[float]] | None = None
+        self._continuous_feature_quantile_cuts: list[list[float]] | None = None
+        self._continuous_feature_linear_rank_flags: list[bool] | None = None
+        self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -645,8 +776,8 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "n_jobs": self.n_jobs,
         }
 
-    def set_params(self, **params: object) -> "GBMRegressor":
-        """Set estimator parameters with constructor-equivalent validation."""
+    def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
+        """Validate parameter values on an isolated probe estimator."""
         allowed = {
             "learning_rate",
             "max_depth",
@@ -1285,6 +1416,53 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
 
         return self
 
+    def set_params(self, **params: object) -> "_GBMEstimatorCore":
+        """Assign known estimator parameters without validating their values."""
+        if not params:
+            return self
+
+        valid_params = self.get_params(deep=True)
+        nested_params: dict[str, dict[str, object]] = {}
+        invalidate_fitted_state = False
+        fitted_sensitive_params = {
+            "continuous_binning_strategy",
+            "continuous_binning_max_bins",
+            "quantile_sketch_max_rows",
+            "feature_bundling",
+        }
+        for full_name, value in params.items():
+            name, delimiter, nested_name = full_name.partition("__")
+            if name not in valid_params:
+                valid_names = ", ".join(sorted(valid_params))
+                raise ValueError(
+                    f"Invalid parameter {name!r} for estimator {self!r}. "
+                    f"Valid parameters are: {valid_names}."
+                )
+            if delimiter:
+                nested_params.setdefault(name, {})[nested_name] = value
+            else:
+                if (
+                    self._is_fitted
+                    and name in fitted_sensitive_params
+                    and getattr(self, name) is not value
+                ):
+                    invalidate_fitted_state = True
+                setattr(self, name, value)
+
+        for name, nested in nested_params.items():
+            valid_params[name].set_params(**nested)
+        if invalidate_fitted_state:
+            self._reset_fitted_state()
+        return self
+
+    def _validate_hyperparameters(self) -> None:
+        """Apply the established parameter contract without mutating ``self``."""
+        probe = _GBMEstimatorCore.__new__(_GBMEstimatorCore)
+        probe._initialize_validation_probe()
+        probe._validate_parameter_updates(
+            **_GBMEstimatorCore.get_params(self, deep=False)
+        )
+
     def fit(
         self,
         X: object,
@@ -1321,8 +1499,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             evaluated after each boosting round and can drive early stopping
             (instead of the built-in loss) when ``early_stopping_rounds`` is set.
         """
+        self._validate_hyperparameters()
         fit_start = time.perf_counter()
         self._fit_start_time = fit_start
+        if not self.warm_start:
+            self._reset_fitted_state()
         targets = self._validate_targets(y)
         obj = self._objective_name()
         if obj == "quantile":
@@ -1424,6 +1605,9 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             and len(effective_categorical_indices) > 0
         )
 
+        if not has_categorical:
+            X = self._validate_numeric_features(X)
+
         # Backward-compat aliases used by some downstream code paths
         effective_categorical_feature_index: int | None = (
             effective_categorical_indices[0]
@@ -1460,13 +1644,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             feature_count = len(training_rows[0])
         if row_count != len(targets):
             raise ValueError("X and y must contain the same number of rows")
-        (
-            factor_exposure_values,
-            factor_exposure_row_count,
-            factor_exposure_factor_count,
-            transformed_factor_exposures,
-        ) = self._prepare_factor_exposures(factor_exposures, row_count)
-
         if init_model is not None and hasattr(init_model, "_n_features_in"):
             if (
                 init_model._n_features_in is not None
@@ -1490,6 +1667,55 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     UserWarning,
                     stacklevel=2,
                 )
+            else:
+                repeats = self._frequency_weight_repeats(validated_sample_weights)
+                if repeats is not None:
+                    X = self._repeat_arraylike_rows(X, repeats)
+                    targets = self._repeat_arraylike_rows(targets, repeats).tolist()
+                    y = targets
+                    group = self._repeat_arraylike_rows(group, repeats)
+                    time_index = self._repeat_arraylike_rows(time_index, repeats)
+                    factor_exposures = self._repeat_arraylike_rows(
+                        factor_exposures, repeats
+                    )
+                    if categorical_values_list is not None:
+                        categorical_values_list = [
+                            self._repeat_arraylike_rows(values, repeats).tolist()
+                            for values in categorical_values_list
+                        ]
+                        categorical_values = (
+                            categorical_values_list[0]
+                            if len(categorical_values_list) == 1
+                            else None
+                        )
+                    row_count = len(targets)
+                    dense_training_bytes_payload = (
+                        self._native_matrix_bytes_payload(X)
+                        if not has_categorical
+                        else None
+                    )
+                    dense_training_payload = (
+                        self._native_matrix_flat_payload(X)
+                        if not has_categorical and dense_training_bytes_payload is None
+                        else None
+                    )
+                    training_rows = (
+                        self._validate_rows(
+                            X,
+                            categorical_feature_indices=effective_categorical_indices,
+                        )
+                        if dense_training_bytes_payload is None
+                        and dense_training_payload is None
+                        else None
+                    )
+                    validated_sample_weights = None
+
+        (
+            factor_exposure_values,
+            factor_exposure_row_count,
+            factor_exposure_factor_count,
+            transformed_factor_exposures,
+        ) = self._prepare_factor_exposures(factor_exposures, row_count)
 
         # Target-domain validation for GLM objectives — applied to training
         # targets here, and again to validation targets after `eval_set` is
@@ -1506,17 +1732,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             raise ValueError("eval_sample_weight requires eval_set to be provided")
         if eval_group is not None and eval_set is None:
             raise ValueError("eval_group requires eval_set to be provided")
-
-        # Capture feature names from DataFrame columns if available.
-        columns = getattr(X, "columns", None)
-        if columns is not None:
-            names = [str(c) for c in columns]
-            if len(names) == feature_count:
-                self.feature_names_in_ = names
-            else:
-                self.feature_names_in_ = None
-        else:
-            self.feature_names_in_ = None
 
         if has_categorical:
             assert effective_categorical_indices is not None
@@ -2132,6 +2347,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "total_fit_seconds": float(total_fit_seconds),
         }
         self._record_fit_neutralization_contract()
+        self._publish_fitted_schema(X, feature_count)
         self._is_fitted = True
         self._record_post_fit_factor_exposure_diagnostics(
             X, transformed_factor_exposures
@@ -2188,6 +2404,10 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "total_fit_seconds": float(total_fit_seconds),
         }
         self._record_fit_neutralization_contract()
+        if fit_X is not None:
+            self._publish_fitted_schema(fit_X, self._n_features_in)
+        else:
+            self.n_features_in_ = int(self._n_features_in)
         self._is_fitted = True
         if fit_X is not None:
             self._record_post_fit_factor_exposure_diagnostics(
@@ -2219,6 +2439,19 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "skipped_feature_count": int(diagnostics.skipped_feature_count),
             "observed_conflict_count": int(diagnostics.observed_conflict_count),
         }
+
+    def _publish_fitted_schema(self, X: object, feature_count: int) -> None:
+        self.n_features_in_ = int(feature_count)
+        columns = getattr(X, "columns", None)
+        if columns is not None:
+            names = list(columns)
+            if len(names) == feature_count and all(
+                isinstance(name, str) for name in names
+            ):
+                self.feature_names_in_ = np.asarray(names, dtype=object)
+                return
+        if hasattr(self, "feature_names_in_"):
+            del self.feature_names_in_
 
     def _fit_with_legacy_native_bridge(
         self,
@@ -2629,6 +2862,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "total_fit_seconds": float(total_fit_seconds),
         }
         self._record_fit_neutralization_contract()
+        self._publish_fitted_schema(X, feature_count)
         self._is_fitted = True
         self._record_post_fit_factor_exposure_diagnostics(
             X, transformed_factor_exposures
@@ -2641,10 +2875,16 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             return values.reshape(-1)
         return np.asarray(values, dtype=np.float32).reshape(-1)
 
+    def _check_prediction_feature_count(self, feature_count: int) -> None:
+        if feature_count != self.n_features_in_:
+            raise ValueError(
+                f"X has {feature_count} features, but {type(self).__name__} is expecting "
+                f"{self.n_features_in_} features as input"
+            )
+
     def predict(self, X: object) -> np.ndarray:
         """Predict using the fitted native artifact."""
-        if not self._is_fitted:
-            raise RuntimeError("GBMRegressor must be fit before predict")
+        self._require_fitted()
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
         # Lazily reconstruct the native predictor after pickle roundtrip.
@@ -2658,6 +2898,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             self._convert_predictor_thresholds_to_float()
         # Convert native categorical columns to integer IDs before prediction.
         X = self._apply_native_cat_mappings_for_predict(X)
+        X = self._validate_numeric_features(X)
         rows: object
         # Fast path: float thresholds + zero-copy numpy — no data copying
         if self._float_thresholds_converted:
@@ -2667,11 +2908,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 candidate = self._native_matrix_fast_path_candidate(X)
                 if candidate is not None:
                     arr = _np.ascontiguousarray(candidate, dtype=_np.float32)
-                    if arr.shape[1] != self._n_features_in:
-                        raise ValueError(
-                            f"X feature count {arr.shape[1]} does not match fitted "
-                            f"feature count {self._n_features_in}"
-                        )
+                    self._check_prediction_feature_count(arr.shape[1])
                     predict_numpy = getattr(
                         self._native_predictor_handle, "predict_numpy", None
                     )
@@ -2684,11 +2921,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             dense_payload = self._native_matrix_flat_payload(X)
             if dense_payload is not None:
                 flat_values, row_count, feature_count = dense_payload
-                if feature_count != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {feature_count} does not match fitted feature count "
-                        f"{self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(feature_count)
                 # Float threshold fallback (when bytes path unavailable)
                 if self._float_thresholds_converted:
                     predict_dense = getattr(
@@ -2813,37 +3046,21 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             if self._float_thresholds_converted:
                 # Float thresholds: send raw (unquantized) rows directly
                 validated_rows = self._validate_rows(X)
-                if len(validated_rows[0]) != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {len(validated_rows[0])} does not match fitted "
-                        f"feature count {self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(len(validated_rows[0]))
                 rows = validated_rows
             else:
                 quantized_rows = self._quantize_rows_for_prediction(self._validate_rows(X))
-                if len(quantized_rows[0]) != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {len(quantized_rows[0])} does not match fitted "
-                        f"feature count {self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(len(quantized_rows[0]))
                 rows = quantized_rows
         else:
             dense_payload = self._native_matrix_flat_payload(X)
             if dense_payload is not None:
                 _, _, feature_count = dense_payload
-                if feature_count != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {feature_count} does not match fitted feature count "
-                        f"{self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(feature_count)
                 rows = dense_payload
             else:
                 validated_rows = self._validate_rows(X)
-                if len(validated_rows[0]) != self._n_features_in:
-                    raise ValueError(
-                        f"X feature count {len(validated_rows[0])} does not match fitted feature count "
-                        f"{self._n_features_in}"
-                    )
+                self._check_prediction_feature_count(len(validated_rows[0]))
                 rows = validated_rows
         if self._native_predictor_handle is not None:
             if isinstance(rows, tuple):
@@ -2888,6 +3105,12 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         targets = self._validate_targets(y)
         return float(r2_score(targets, predictions))
 
+    def __sklearn_is_fitted__(self) -> bool:
+        return bool(self._is_fitted and self._artifact_bytes is not None)
+
+    def _require_fitted(self) -> None:
+        _check_is_fitted(self)
+
     def __sklearn_tags__(self):
         if not hasattr(super(), "__sklearn_tags__"):
             return {
@@ -2906,6 +3129,10 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
 
     def _more_tags(self):
         return {"allow_nan": True, "requires_y": True}
+
+
+class GBMRegressor(_RegressorMixin, _GBMEstimatorCore):
+    """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
 
 
 # Inject GBMRegressor into _validation's namespace so its static-method bodies

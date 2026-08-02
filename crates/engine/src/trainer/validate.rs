@@ -178,7 +178,11 @@ pub(crate) fn validate_gradient_pairs(
 ) -> EngineResult<()> {
     validate_gradient_pair_length(gradients, row_count)?;
     for gradient in gradients {
-        if !gradient.grad.is_finite() || !gradient.hess.is_finite() || gradient.hess <= 0.0 {
+        if !gradient.grad.is_finite()
+            || !gradient.hess.is_finite()
+            || gradient.hess < 0.0
+            || (gradient.hess == 0.0 && gradient.grad != 0.0)
+        {
             return Err(EngineError::ContractViolation(
                 "objective produced invalid gradient/hessian values".to_string(),
             ));

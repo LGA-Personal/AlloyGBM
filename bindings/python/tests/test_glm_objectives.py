@@ -147,13 +147,15 @@ def test_tweedie_objective_trains_and_predicts_positive() -> None:
 
 
 def test_tweedie_rejects_invalid_variance_power() -> None:
+    X = np.asarray([[0.0], [1.0]], dtype=np.float32)
+    y = np.asarray([0.0, 1.0], dtype=np.float32)
     for bad_p in (0.5, 1.0, 2.0, 2.5):
         with pytest.raises(Exception):
             GBMRegressor(
                 objective="tweedie",
                 tweedie_variance_power=bad_p,
                 n_estimators=3,
-            )
+            ).fit(X, y)
 
 
 def test_tweedie_deviance_improves_with_training() -> None:
@@ -198,23 +200,25 @@ def test_poisson_model_round_trips_through_pickle() -> None:
     np.testing.assert_allclose(p1, p2, rtol=1e-6)
 
 
-def test_set_params_rejects_invalid_tweedie_power_when_objective_is_tweedie() -> None:
+def test_fit_rejects_invalid_tweedie_power_assigned_by_set_params() -> None:
     """PR #41 review C3: `set_params` must apply the same cross-field check
     the constructor does — out-of-range tweedie_variance_power must be
     rejected when the resolved objective is 'tweedie', whether the power,
     the objective, or both change in the call."""
     m = GBMRegressor(objective="tweedie", tweedie_variance_power=1.5)
-    # Changing only the power: must be rejected because objective stays tweedie.
-    with pytest.raises(ValueError, match="tweedie_variance_power"):
-        m.set_params(tweedie_variance_power=2.0)
-    with pytest.raises(ValueError, match="tweedie_variance_power"):
-        m.set_params(tweedie_variance_power=0.5)
+    X = np.asarray([[0.0], [1.0]], dtype=np.float32)
+    y = np.asarray([0.0, 1.0], dtype=np.float32)
+    for power in (2.0, 0.5):
+        m.set_params(tweedie_variance_power=power)
+        with pytest.raises(ValueError, match="tweedie_variance_power"):
+            m.fit(X, y)
 
     # Switching objective to tweedie while leaving an out-of-range power
     # already on the estimator: must be rejected.
     m2 = GBMRegressor(objective="squared_error", tweedie_variance_power=2.5)
+    m2.set_params(objective="tweedie")
     with pytest.raises(ValueError, match="tweedie_variance_power"):
-        m2.set_params(objective="tweedie")
+        m2.fit(X, y)
 
     # Switching BOTH at once with a valid pair: accepted.
     m3 = GBMRegressor(objective="squared_error")

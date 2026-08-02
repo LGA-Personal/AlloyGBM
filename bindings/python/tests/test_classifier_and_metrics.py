@@ -29,7 +29,7 @@ class GBMClassifierTests(unittest.TestCase):
         clf = GBMClassifier(n_estimators=10, seed=42)
         clf.fit(X_train, y_train)
         preds = clf.predict(X_train)
-        self.assertIsInstance(preds, list)
+        self.assertIsInstance(preds, np.ndarray)
         self.assertEqual(len(preds), len(y_train))
         self.assertTrue(all(p in (0, 1) for p in preds))
 
@@ -57,14 +57,14 @@ class GBMClassifierTests(unittest.TestCase):
         X_train, y_train, _, _ = self._make_binary_dataset()
         clf = GBMClassifier(n_estimators=5, seed=42)
         clf.fit(X_train, y_train)
-        self.assertEqual(clf.classes_, [0, 1])
+        np.testing.assert_array_equal(clf.classes_, [0, 1])
         self.assertEqual(clf.n_classes_, 2)
         self.assertIsNotNone(clf.n_estimators_)
 
     def test_validates_non_integer_targets(self) -> None:
         X = np.array([[1], [2], [3]], dtype=np.float32)
         clf = GBMClassifier(n_estimators=3, seed=42)
-        with self.assertRaisesRegex(ValueError, "integer class labels"):
+        with self.assertRaisesRegex(ValueError, "Unknown label type: continuous"):
             clf.fit(X, [0.0, 0.5, 1.0])
 
     def test_validates_at_least_two_classes_present(self) -> None:
@@ -94,18 +94,21 @@ class GBMClassifierTests(unittest.TestCase):
         self.assertEqual(clf._objective_name(), "binary_crossentropy")
 
     def test_rejects_explicit_string_objectives_with_alternative_estimators(self) -> None:
+        X_train, y_train, _, _ = self._make_binary_dataset()
         for objective in ("quantile", "poisson"):
             with self.subTest(objective=objective):
+                clf = GBMClassifier(objective=objective)
                 with self.assertRaisesRegex(ValueError, "objective is auto-detected") as cm:
-                    GBMClassifier(objective=objective)
+                    clf.fit(X_train, y_train)
                 message = str(cm.exception)
                 self.assertIn(f"objective={objective!r}", message)
                 self.assertIn(f"GBMRegressor(objective={objective!r})", message)
                 self.assertIn(f"GBMRanker(ranking_objective={objective!r})", message)
 
                 clf = GBMClassifier()
+                clf.set_params(objective=objective)
                 with self.assertRaisesRegex(ValueError, "objective is auto-detected") as cm:
-                    clf.set_params(objective=objective)
+                    clf.fit(X_train, y_train)
                 self.assertIn(f"GBMRanker(ranking_objective={objective!r})", str(cm.exception))
 
     def test_accuracy_metric(self) -> None:

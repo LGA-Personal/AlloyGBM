@@ -50,14 +50,15 @@ class FactorNeutralizationTests(unittest.TestCase):
         self.assertEqual(model.neutralization, "pre_target")
 
     def test_invalid_constructor_values(self):
-        with self.assertRaises(ValueError):
-            GBMRegressor(neutralization="bad")
-        with self.assertRaises(ValueError):
-            GBMRegressor(factor_neutralization_lambda=-1.0)
-        with self.assertRaises(ValueError):
-            GBMRegressor(factor_penalty=-1.0)
-        with self.assertRaises(ValueError):
-            GBMRegressor(factor_exposure_transform="bad")
+        x, y, _ = factor_data()
+        for kwargs in (
+            {"neutralization": "bad"},
+            {"factor_neutralization_lambda": -1.0},
+            {"factor_penalty": -1.0},
+            {"factor_exposure_transform": "bad"},
+        ):
+            with self.assertRaises(ValueError):
+                GBMRegressor(**kwargs).fit(x, y)
 
     def test_requires_factor_exposures_when_active(self):
         x, y, _ = factor_data()
@@ -237,11 +238,13 @@ class FactorNeutralizationTests(unittest.TestCase):
                 leaf_model="linear",
             ).fit(x, y, factor_exposures=f)
 
-    def test_set_params_invalid_neutralization_combo_is_atomic(self):
+    def test_set_params_invalid_neutralization_combo_fails_at_fit(self):
+        x, y, _ = factor_data()
         model = GBMRegressor(neutralization="split_penalty", factor_penalty=0.1)
+        model.set_params(neutralization="none")
         with self.assertRaises(ValueError):
-            model.set_params(neutralization="none")
-        self.assertEqual(model.neutralization, "split_penalty")
+            model.fit(x, y)
+        self.assertEqual(model.neutralization, "none")
         self.assertEqual(model.factor_penalty, 0.1)
 
     def test_bridge_rejects_factor_penalty_without_split_penalty(self):
@@ -384,16 +387,22 @@ class FactorNeutralizationTests(unittest.TestCase):
         )
 
     def test_pre_target_rejected_by_classifier_and_ranker_constructors(self):
+        x, y, _ = factor_data()
         with self.assertRaises(ValueError):
-            GBMClassifier(neutralization="pre_target")
+            GBMClassifier(neutralization="pre_target").fit(x, (y > np.median(y)).astype(int))
         with self.assertRaises(ValueError):
-            GBMRanker(neutralization="pre_target")
+            GBMRanker(neutralization="pre_target").fit(
+                x, y, group=np.repeat(np.arange(len(y) // 10), 10)
+            )
 
     def test_pre_target_rejected_by_classifier_and_ranker_set_params(self):
+        x, y, _ = factor_data()
+        classifier = GBMClassifier().set_params(neutralization="pre_target")
         with self.assertRaises(ValueError):
-            GBMClassifier().set_params(neutralization="pre_target")
+            classifier.fit(x, (y > np.median(y)).astype(int))
+        ranker = GBMRanker().set_params(neutralization="pre_target")
         with self.assertRaises(ValueError):
-            GBMRanker().set_params(neutralization="pre_target")
+            ranker.fit(x, y, group=np.repeat(np.arange(len(y) // 10), 10))
 
     def test_pickle_preserves_params_and_predictions(self):
         x, y, f = factor_data()

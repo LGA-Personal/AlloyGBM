@@ -64,8 +64,10 @@ class GBMRankerObjectiveTests(unittest.TestCase):
         self.assertEqual(GBMRanker(ranking_objective="yetirank")._objective_name(), "yetirank")
 
     def test_invalid_objective_raises(self) -> None:
+        X, y, group = _make_ranking_dataset()
+        ranker = GBMRanker(ranking_objective="invalid")
         with self.assertRaisesRegex(ValueError, "ranking_objective"):
-            GBMRanker(ranking_objective="invalid")
+            ranker.fit(X, y, group=group)
 
     def test_group_required(self) -> None:
         X, y, _group = _make_ranking_dataset()
@@ -231,20 +233,25 @@ class GBMRankerSerializationTests(unittest.TestCase):
         self.assertFalse(ranker.lambdarank_normalize)
 
     def test_lambdarank_truncation_level_validation(self) -> None:
+        X, y, group = _make_ranking_dataset()
         for invalid in (0, -1, 1.5, float("inf")):
             with self.subTest(invalid=invalid):
+                ranker = GBMRanker(lambdarank_truncation_level=invalid)
                 with self.assertRaisesRegex(ValueError, "lambdarank_truncation_level"):
-                    GBMRanker(lambdarank_truncation_level=invalid)
+                    ranker.fit(X, y, group=group)
         for invalid in (0, 1, "yes"):
             with self.subTest(invalid=invalid):
+                ranker = GBMRanker(lambdarank_normalize=invalid)
                 with self.assertRaisesRegex(ValueError, "lambdarank_normalize"):
-                    GBMRanker(lambdarank_normalize=invalid)
+                    ranker.fit(X, y, group=group)
 
     def test_ranking_sigma_validation(self) -> None:
+        X, y, group = _make_ranking_dataset()
         for invalid in (0.0, -1.0, float("inf")):
             with self.subTest(invalid=invalid):
+                ranker = GBMRanker(ranking_sigma=invalid)
                 with self.assertRaisesRegex(ValueError, "ranking_sigma"):
-                    GBMRanker(ranking_sigma=invalid)
+                    ranker.fit(X, y, group=group)
 
     def test_set_params_ranking_objective(self) -> None:
         ranker = GBMRanker(ranking_objective="rank:ndcg")

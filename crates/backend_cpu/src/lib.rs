@@ -31,8 +31,8 @@ use arena::{
 use factor_split::{FactorSplitScratch, with_factor_split_scratch};
 use split_helpers::{
     GainStrategy, MissingDirectionCandidate, ScalarSideStats, apply_feature_weight,
-    categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, goes_left_for_split,
-    l1_threshold_gradient, split_gain_term,
+    categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, gain_materially_exceeds,
+    goes_left_for_split, l1_threshold_gradient, split_gain_term,
 };
 use split_scan::with_split_scan_scratch;
 
@@ -831,7 +831,7 @@ impl CpuBackend {
                         }
                         // Horizontal argmax for this chunk against the running best.
                         for (j, &g) in g_arr.iter().take(chunk_len).enumerate() {
-                            if g > best_gain {
+                            if gain_materially_exceeds(g, best_gain) {
                                 best_gain = g;
                                 best_threshold = chunk_start + j;
                                 best_default_left = default_left;
@@ -1158,7 +1158,7 @@ impl CpuBackend {
                     continue;
                 }
 
-                if gain > best_gain {
+                if gain_materially_exceeds(gain, best_gain) {
                     best_gain = gain;
                     best_candidate = Some(SplitCandidate {
                         node_id,
@@ -1539,7 +1539,7 @@ impl CpuBackend {
                     continue;
                 }
 
-                if gain > best_gain {
+                if gain_materially_exceeds(gain, best_gain) {
                     let bitset = if let Some(scratch) = factor_scratch.as_deref() {
                         scratch.categorical_bitset.clone()
                     } else {
@@ -1603,9 +1603,10 @@ impl CpuBackend {
                 .into_par_iter()
                 .filter_map(|index| find_best(histograms.feature(index).expect("bounded feature")))
                 .reduce_with(|a, b| {
-                    if apply_feature_weight(&b, feature_weights)
-                        > apply_feature_weight(&a, feature_weights)
-                    {
+                    if gain_materially_exceeds(
+                        apply_feature_weight(&b, feature_weights),
+                        apply_feature_weight(&a, feature_weights),
+                    ) {
                         b
                     } else {
                         a
@@ -1613,9 +1614,10 @@ impl CpuBackend {
                 })
         } else {
             histograms.features().filter_map(find_best).reduce(|a, b| {
-                if apply_feature_weight(&b, feature_weights)
-                    > apply_feature_weight(&a, feature_weights)
-                {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&b, feature_weights),
+                    apply_feature_weight(&a, feature_weights),
+                ) {
                     b
                 } else {
                     a

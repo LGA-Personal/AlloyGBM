@@ -4,10 +4,11 @@
 
 ## Overview
 
-`GBMClassifier` extends `GBMRegressor` with a binary cross-entropy (log-loss)
-objective. Predictions are probabilities obtained via sigmoid transform. When
-sklearn is available, `GBMClassifier` inherits `ClassifierMixin` for full
-pipeline compatibility.
+`GBMClassifier` is a classification estimator shell over AlloyGBM's shared
+native training core. Binary and multiclass targets are supported. When
+scikit-learn is available, `ClassifierMixin` precedes the shared estimator core
+in the MRO, so classifier tags, scoring, cloning, and pipeline behavior do not
+inherit regressor semantics.
 
 ## Quick Example
 
@@ -109,19 +110,26 @@ Returns log-probabilities of shape `(n_samples, 2)`.
 
 ## Post-Fit Attributes
 
-In addition to the standard `GBMRegressor` post-fit attributes:
+In addition to the shared estimator post-fit attributes:
 
-- `classes_: list[int]` -- always `[0, 1]`
-- `n_classes_: int` -- always `2`
+- `classes_: np.ndarray` -- sorted labels in their original numeric, boolean,
+  or string dtype
+- `n_classes_: int` -- number of fitted classes
 
 ## sklearn Compatibility
 
-When sklearn is installed, `GBMClassifier`:
+When scikit-learn is installed, `GBMClassifier`:
 
-- inherits from `ClassifierMixin`
+- is certified against every applicable estimator check in scikit-learn 1.8
+  and 1.9
 - works with `cross_val_score`, `GridSearchCV`, `Pipeline`
 - implements `__sklearn_tags__` and `_more_tags`
 - `score(X, y)` returns accuracy (the sklearn classifier convention)
+- returns one-dimensional NumPy label arrays from `predict(...)`
+
+Sparse matrices are not a supported training format and raise an explicit
+error. Known constructor and `set_params(...)` values are validated at the
+start of `fit(...)`, matching scikit-learn cloning and model-selection rules.
 
 ## Early Stopping
 

@@ -6265,6 +6265,46 @@ fn goss_selects_top_alpha_by_gradient_magnitude() {
 }
 
 #[test]
+fn standard_row_selection_excludes_zero_weight_gradient_pairs() {
+    let mut gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 0.0,
+            hess: 0.0,
+        },
+        GradientPair {
+            grad: -1.0,
+            hess: 1.0,
+        },
+    ];
+    let selection = select_row_indices_for_round(
+        BoostingMode::Standard,
+        gradients.len(),
+        1.0,
+        0,
+        0,
+        &mut gradients,
+    );
+    assert_eq!(selection.selected, vec![0, 2]);
+    assert_eq!(selection.excluded, vec![1]);
+
+    let mut multiclass = vec![gradients.clone(), gradients];
+    let selection = select_row_indices_for_round_multiclass(
+        BoostingMode::Standard,
+        3,
+        1.0,
+        0,
+        0,
+        &mut multiclass,
+    );
+    assert_eq!(selection.selected, vec![0, 2]);
+    assert_eq!(selection.excluded, vec![1]);
+}
+
+#[test]
 fn goss_zero_other_rate_returns_only_top() {
     let grads: Vec<f32> = (0..50).map(|i| i as f32).collect();
     let (top, other, amp) = goss_sample_indices(&grads, 0.2, 0.0, 1, 0);
@@ -10109,6 +10149,54 @@ fn test_quantile_objective_gradients_and_loss() {
     // average loss = (7.0 + 4.5) / 2 = 5.75
     let loss_weighted = obj.loss(&predictions, &targets, Some(&weights)).unwrap();
     assert!((loss_weighted - 5.75).abs() < 1e-6);
+}
+
+#[test]
+fn zero_sample_weights_produce_zero_gradient_pairs() {
+    let predictions = [0.0, 0.0];
+    let targets = [0.0, 1.0];
+    let weights = [0.0, 1.0];
+
+    let squared = SquaredErrorObjective
+        .compute_gradients(&predictions, &targets, Some(&weights))
+        .expect("zero weights are valid");
+    assert_eq!(
+        squared[0],
+        GradientPair {
+            grad: 0.0,
+            hess: 0.0
+        }
+    );
+
+    let binary = BinaryCrossEntropyObjective
+        .compute_gradients(&predictions, &targets, Some(&weights))
+        .expect("zero weights are valid");
+    assert_eq!(
+        binary[0],
+        GradientPair {
+            grad: 0.0,
+            hess: 0.0
+        }
+    );
+
+    let multiclass = MultiClassSoftmaxObjective::new(2).expect("valid class count");
+    let mut gradients = Vec::new();
+    multiclass
+        .compute_gradients_for_class(
+            &[predictions.to_vec(), predictions.to_vec()],
+            &targets,
+            Some(&weights),
+            0,
+            &mut gradients,
+        )
+        .expect("zero weights are valid");
+    assert_eq!(
+        gradients[0],
+        GradientPair {
+            grad: 0.0,
+            hess: 0.0
+        }
+    );
 }
 
 #[test]
