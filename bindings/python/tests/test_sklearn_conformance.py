@@ -151,7 +151,6 @@ def test_public_estimator_paths_and_parameter_signatures_are_stable() -> None:
 
 
 def test_estimators_remain_importable_without_sklearn() -> None:
-    package_root = Path(__file__).resolve().parents[1]
     script = """
 import importlib.abc
 import sys
@@ -170,8 +169,10 @@ assert GBMRegressor().get_params()["n_estimators"] == 6
 assert GBMClassifier().get_params()["n_estimators"] == 6
 assert GBMRanker().get_params()["ranking_objective"] == "rank:ndcg"
 """
+    # Import alloygbm the same way the parent process does (installed package),
+    # not from the source tree — a wheel-built install keeps the compiled
+    # `_alloygbm` extension only in the installed package, not in `bindings/python`.
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(package_root)
 
     result = subprocess.run(
         [sys.executable, "-c", script],
