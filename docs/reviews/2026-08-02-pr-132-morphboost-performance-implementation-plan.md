@@ -860,7 +860,7 @@ git add CHANGELOG.md docs/user/morphboost.md docs/site/source/morphboost.rst \
 git commit -m "docs: close MorphBoost scanner review finding"
 ```
 
-- [ ] **Step 7: Prepare the draft PR without merging**
+- [x] **Step 7: Prepare the draft PR without merging**
 
 Push `codex/morphboost-performance` and open a draft PR summarizing scanner architecture,
 warmup correction, measured speedups, quality gates, promoted/rejected trials, compatibility, and
