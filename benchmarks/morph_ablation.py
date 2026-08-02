@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Morph ablation harness.
 
-Toggles each morph component independently on 3 representative datasets and
+Toggles each morph component independently on 4 representative datasets and
 prints a markdown summary table.
 
 Usage::
@@ -37,18 +37,32 @@ def _binary_dataset(n=2000, n_features=20, seed=1):
     return X[:split], y[:split], X[split:], y[split:]
 
 
+def _multiclass_dataset(n=2000, n_features=20, n_classes=4, seed=3):
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, n_features)).astype(np.float32)
+    weights = rng.standard_normal((n_features, n_classes)).astype(np.float32)
+    logits = X @ weights + 0.5 * rng.standard_normal((n, n_classes)).astype(np.float32)
+    y = np.argmax(logits, axis=1).astype(np.int32)
+    split = int(0.8 * n)
+    return X[:split], y[:split], X[split:], y[split:]
+
+
 def _ranking_dataset(n=2000, n_features=20, n_groups=50, seed=2):
     rng = np.random.default_rng(seed)
     X = rng.standard_normal((n, n_features)).astype(np.float32)
     y = rng.integers(0, 5, size=n).astype(np.float32)
     sizes = [n // n_groups] * n_groups
     sizes[-1] += n - sum(sizes)
-    group = np.repeat(np.arange(n_groups), sizes).astype(np.int32)
-    order = np.argsort(group)
-    X, y, group = X[order], y[order], group[order]
     split_g = n_groups * 4 // 5
     split_n = sum(sizes[:split_g])
-    return X[:split_n], y[:split_n], group[:split_g], X[split_n:], y[split_n:], group[split_g:]
+    return (
+        X[:split_n],
+        y[:split_n],
+        sizes[:split_g],
+        X[split_n:],
+        y[split_n:],
+        sizes[split_g:],
+    )
 
 
 # --- Ablation configs ---
@@ -69,6 +83,12 @@ def _rmse(y_true, y_pred):
 
 def _accuracy(y_true, y_pred):
     return float(np.mean(y_true == y_pred))
+
+
+def _log_loss(y_true, y_prob):
+    y_prob = np.asarray(y_prob, dtype=np.float64)
+    selected = y_prob[np.arange(len(y_true)), np.asarray(y_true, dtype=np.int64)]
+    return float(-np.mean(np.log(np.clip(selected, 1e-15, 1.0))))
 
 
 # --- Run ---
@@ -112,15 +132,19 @@ def evaluate_calibration_gates(results: list[Result]) -> list[GateResult]:
             continue
 
         if calibrated.metric_name == "Accuracy":
-            passed = calibrated.metric >= baseline.metric - 0.08
+            passed = calibrated.metric >= baseline.metric - 0.03
             detail = (
                 f"accuracy delta={calibrated.metric - baseline.metric:+.4f} "
-                "(limit -0.0800)"
+                "(limit -0.0300)"
             )
+        elif calibrated.metric_name == "NDCG@10":
+            ratio = calibrated.metric / max(abs(baseline.metric), 1e-12)
+            passed = ratio >= 0.97
+            detail = f"NDCG ratio={ratio:.3f} (limit 0.970)"
         else:
             ratio = calibrated.metric / max(abs(baseline.metric), 1e-12)
-            passed = ratio <= 1.35
-            detail = f"error ratio={ratio:.3f} (limit 1.350)"
+            passed = ratio <= 1.10
+            detail = f"error ratio={ratio:.3f} (limit 1.100)"
         gates.append(GateResult(dataset, passed, detail))
     return gates
 
@@ -164,6 +188,22 @@ def run_ablation(quick: bool = False) -> list[Result]:
         except Exception as exc:
             results.append(Result(name, "binary_classification", float("nan"), f"ERROR: {exc}", 0.0))
 
+    # Multiclass classification
+    X_tr, y_tr, X_te, y_te = _multiclass_dataset(n=n)
+    for name, kwargs in ABLATION_CONFIGS.items():
+        tm = kwargs.get("training_mode", "auto")
+        extra = {k: v for k, v in kwargs.items() if k != "training_mode"}
+        try:
+            m = GBMClassifier(n_estimators=n_est, max_depth=5, training_mode=tm,
+                              seed=0, **extra)
+            t0 = time.perf_counter()
+            m.fit(X_tr, y_tr)
+            elapsed = time.perf_counter() - t0
+            loss = _log_loss(y_te, np.asarray(m.predict_proba(X_te)))
+            results.append(Result(name, "multiclass_classification", loss, "LogLoss", elapsed))
+        except Exception as exc:
+            results.append(Result(name, "multiclass_classification", float("nan"), f"ERROR: {exc}", 0.0))
+
     # Ranking (simplified — skip in quick mode)
     if not quick:
         X_tr, y_tr, g_tr, X_te, y_te, g_te = _ranking_dataset(n=n)
@@ -176,9 +216,10 @@ def run_ablation(quick: bool = False) -> list[Result]:
                 t0 = time.perf_counter()
                 m.fit(X_tr, y_tr, group=g_tr)
                 elapsed = time.perf_counter() - t0
-                # Use RMSE as proxy for ranking score (NDCG would need group info)
-                rmse = _rmse(y_te, np.asarray(m.predict(X_te)))
-                results.append(Result(name, "ranking", rmse, "RMSE(proxy)", elapsed))
+                from alloygbm.evaluation import ndcg
+                group_ids = np.repeat(np.arange(len(g_te)), g_te)
+                score = ndcg(y_te, np.asarray(m.predict(X_te)), group=group_ids, k=10)
+                results.append(Result(name, "ranking", score, "NDCG@10", elapsed))
             except Exception as exc:
                 results.append(Result(name, "ranking", float("nan"), f"ERROR: {exc}", 0.0))
 

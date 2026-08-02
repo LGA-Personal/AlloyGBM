@@ -29,6 +29,8 @@ Use the runner's ``--models`` flag to filter which arms run. Focused
 harnesses are also provided:
 
 - ``benchmarks/morph_report.py`` -- quick MorphBoost-vs-peers comparison
+- ``docs/benchmarks/morphboost_pr132.md`` -- exhaustive SIMD scanner,
+  quality-matrix, calibration, and secondary-cost evidence for PR #132
 - ``benchmarks/numerai_benchmark.py`` -- Numerai tournament benchmark with
   walk-forward CV, residualized targets, and Numerai-specific scoring
 - ``benchmarks/pl_trees_benchmark.py`` -- piecewise-linear-leaf

@@ -15,6 +15,7 @@ mod backend_ops;
 mod factor_split;
 mod morph;
 pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+mod morph_scan;
 
 mod pl_histogram;
 pub use pl_histogram::build_linear_histograms_cpu;
@@ -994,6 +995,17 @@ impl CpuBackend {
 
         let parent_gain_term =
             split_gain_term(total_grad, total_hess, total_grad_sq, total_count, &options);
+        let parent_grad_for_morph = if matches!(&strategy, GainStrategy::Morph(_)) {
+            leaf_effective_gradient(
+                total_grad,
+                total_grad_sq,
+                total_count,
+                options.l1_alpha,
+                options.dro_config.as_ref(),
+            )
+        } else {
+            0.0
+        };
 
         if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_deref_mut()) {
             scratch.prepare_numeric_prefix(
@@ -1121,13 +1133,21 @@ impl CpuBackend {
                     GainStrategy::Morph(morph) => {
                         use crate::morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
                         let inputs = MorphGainInputs {
+                            parent: SplitSideStats {
+                                gain_gradient_sum: parent_grad_for_morph,
+                                info_gradient_sum: parent_grad_for_morph,
+                                hessian_sum: total_hess,
+                                count: total_count,
+                            },
                             left: SplitSideStats {
-                                gradient_sum: left_grad_for_gain,
+                                gain_gradient_sum: left_grad_for_gain,
+                                info_gradient_sum: left_grad_for_gain,
                                 hessian_sum: left.hess,
                                 count: left.count,
                             },
                             right: SplitSideStats {
-                                gradient_sum: right_grad_for_gain,
+                                gain_gradient_sum: right_grad_for_gain,
+                                info_gradient_sum: right_grad_for_gain,
                                 hessian_sum: right.hess,
                                 count: right.count,
                             },
@@ -1349,6 +1369,17 @@ impl CpuBackend {
         let total_count = nm_total_count + missing_count;
         let parent_gain_term =
             split_gain_term(total_grad, total_hess, total_grad_sq, total_count, &options);
+        let parent_grad_for_morph = if matches!(&strategy, GainStrategy::Morph(_)) {
+            leaf_effective_gradient(
+                total_grad,
+                total_grad_sq,
+                total_count,
+                options.l1_alpha,
+                options.dro_config.as_ref(),
+            )
+        } else {
+            0.0
+        };
 
         // Sort categories by the same gradient signal used for leaf values.
         // For standard mode this preserves the historical raw-gradient Fisher
@@ -1502,13 +1533,21 @@ impl CpuBackend {
                     GainStrategy::Morph(morph) => {
                         use crate::morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
                         let inputs = MorphGainInputs {
+                            parent: SplitSideStats {
+                                gain_gradient_sum: parent_grad_for_morph,
+                                info_gradient_sum: parent_grad_for_morph,
+                                hessian_sum: total_hess,
+                                count: total_count,
+                            },
                             left: SplitSideStats {
-                                gradient_sum: left_grad_for_gain,
+                                gain_gradient_sum: left_grad_for_gain,
+                                info_gradient_sum: left_grad_for_gain,
                                 hessian_sum: left.hess,
                                 count: left.count,
                             },
                             right: SplitSideStats {
-                                gradient_sum: right_grad_for_gain,
+                                gain_gradient_sum: right_grad_for_gain,
+                                info_gradient_sum: right_grad_for_gain,
                                 hessian_sum: right.hess,
                                 count: right.count,
                             },
@@ -1628,7 +1667,9 @@ impl CpuBackend {
 
     /// Morph-mode best split for a single numeric feature.
     ///
-    /// Thin wrapper around `best_split_for_feature_inner` with `GainStrategy::Morph`.
+    /// Ordinary numeric Morph uses the exhaustive SIMD scanner. DRO and
+    /// factor-penalized modes retain the scalar oracle because their candidate
+    /// formulas require additional per-bin state.
     pub(crate) fn best_split_morph_numeric_feature(
         feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
@@ -1636,6 +1677,14 @@ impl CpuBackend {
         morph: &MorphContext,
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
+        if options.dro_config.is_none() && factor_context.is_none() {
+            return morph_scan::best_split_morph_numeric_simd(
+                feature_histogram,
+                node_id,
+                *options,
+                morph,
+            );
+        }
         Self::best_split_for_feature_inner(
             feature_histogram,
             node_id,

@@ -3,11 +3,12 @@ use crate::split_helpers::goes_left_for_split;
 use crate::*;
 use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
-    LeafModelKind, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
-    discover_exact_feature_bundles,
+    LeafModelKind, MISSING_BIN_U8, MorphConfig, MorphPrecomputed, TrainParams, TrainingDataset,
+    TreeGrowth, discover_exact_feature_bundles,
 };
 use alloygbm_engine::{
-    BackendOps, FactorSplitContext, HistogramExecution, SquaredErrorObjective, Trainer,
+    BackendOps, FactorSplitContext, HistogramExecution, MorphContext, SquaredErrorObjective,
+    Trainer,
 };
 
 fn sample_binned_matrix() -> BinnedMatrix {
@@ -1740,10 +1741,7 @@ fn best_split_morph_at_warmup_matches_best_split_with_options() {
         "test fixture must produce a non-trivial split (standard path returned None)"
     );
     match (standard, morph_result) {
-        (Some(a), Some(b)) => {
-            assert_eq!(a.feature_index, b.feature_index, "feature_index disagreed");
-            assert_eq!(a.threshold_bin, b.threshold_bin, "threshold_bin disagreed");
-        }
+        (Some(a), Some(b)) => assert_split_candidates_match(Some(&a), Some(&b)),
         (None, None) => {}
         (a, b) => panic!(
             "split selection presence disagreed: standard={:?}, morph={:?}",
@@ -1777,9 +1775,9 @@ fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
         l1_alpha: 0.5,
         min_child_hessian: 0.0,
         min_rows_per_leaf: 1,
-        min_leaf_magnitude: 0.0,
+        min_leaf_magnitude: 0.1,
         dro_config: None,
-        missing_bin_index: 255,
+        missing_bin_index: 3,
     };
 
     let cfg = MorphConfig {
@@ -1806,16 +1804,41 @@ fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
         standard.is_some(),
         "test fixture must produce a non-trivial split (standard path returned None)"
     );
-    let a = standard.unwrap();
-    let b = morph_result.unwrap();
-    assert_eq!(
-        a.feature_index, b.feature_index,
-        "feature_index disagreed under L1/L2 regularization"
-    );
-    assert_eq!(
-        a.threshold_bin, b.threshold_bin,
-        "threshold_bin disagreed under L1/L2 regularization"
-    );
+    assert_split_candidates_match(standard.as_ref(), morph_result.as_ref());
+}
+
+#[test]
+fn morph_standard_scanner_shortcut_excludes_dro_and_factor_penalties() {
+    use alloygbm_core::{DroConfig, DroMetric, MorphConfig, MorphPrecomputed};
+    use alloygbm_engine::MorphContext;
+
+    let cfg = MorphConfig::default();
+    let morph = MorphContext {
+        iteration: 0,
+        total_iterations: 100,
+        grad_mean: 0.0,
+        grad_std: 1.0,
+        config: cfg,
+        precomputed: MorphPrecomputed::for_iteration(0, 100, &cfg),
+    };
+    let ordinary = SplitSelectionOptions::default();
+    assert!(crate::backend_ops::morph_can_use_standard_scanner(
+        &morph, &ordinary, false
+    ));
+
+    let with_dro = SplitSelectionOptions {
+        dro_config: Some(DroConfig {
+            radius: 0.05,
+            metric: DroMetric::Wasserstein,
+        }),
+        ..ordinary
+    };
+    assert!(!crate::backend_ops::morph_can_use_standard_scanner(
+        &morph, &with_dro, false
+    ));
+    assert!(!crate::backend_ops::morph_can_use_standard_scanner(
+        &morph, &ordinary, true
+    ));
 }
 
 #[test]
@@ -1825,11 +1848,12 @@ fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
 
     let backend = CpuBackend;
     let histograms = backend
-        .build_histograms(
+        .build_histograms_with_grad_sq(
             &sample_binned_matrix(),
             &sample_gradients(),
             &sample_node(),
             &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            true,
         )
         .expect("histograms should build");
 
@@ -1879,15 +1903,30 @@ fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
         options.l1_alpha,
         options.dro_config.as_ref(),
     );
+    let parent_gradient_sum = leaf_effective_gradient(
+        split.left_stats.grad_sum + split.right_stats.grad_sum,
+        split.left_stats.grad_sq_sum + split.right_stats.grad_sq_sum,
+        split.left_stats.row_count + split.right_stats.row_count,
+        options.l1_alpha,
+        options.dro_config.as_ref(),
+    );
     let expected = compute_morph_gain(
         MorphGainInputs {
+            parent: SplitSideStats {
+                gain_gradient_sum: parent_gradient_sum,
+                info_gradient_sum: parent_gradient_sum,
+                hessian_sum: split.left_stats.hess_sum + split.right_stats.hess_sum,
+                count: split.left_stats.row_count + split.right_stats.row_count,
+            },
             left: SplitSideStats {
-                gradient_sum: left_gradient_sum,
+                gain_gradient_sum: left_gradient_sum,
+                info_gradient_sum: left_gradient_sum,
                 hessian_sum: split.left_stats.hess_sum,
                 count: split.left_stats.row_count,
             },
             right: SplitSideStats {
-                gradient_sum: right_gradient_sum,
+                gain_gradient_sum: right_gradient_sum,
+                info_gradient_sum: right_gradient_sum,
                 hessian_sum: split.right_stats.hess_sum,
                 count: split.right_stats.row_count,
             },
@@ -1959,6 +1998,12 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
         grad_sq_sum: 0.0,
         count: 20,
     };
+    bins[nan_bin] = HistogramBin {
+        grad_sum: 0.75,
+        hess_sum: 1.0,
+        grad_sq_sum: 0.75 * 0.75,
+        count: 3,
+    };
 
     let feature_histogram = FeatureHistogram {
         feature_index: 0,
@@ -1968,11 +2013,11 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
         .expect("valid histogram bundle");
 
     let options = SplitSelectionOptions {
-        l2_lambda: 0.0,
-        l1_alpha: 0.0,
+        l2_lambda: 0.7,
+        l1_alpha: 0.25,
         min_child_hessian: 0.0,
         min_rows_per_leaf: 1,
-        min_leaf_magnitude: 0.0,
+        min_leaf_magnitude: 0.05,
         dro_config: None,
         missing_bin_index: nan_bin,
     };
@@ -2012,6 +2057,7 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
 
     assert!(a.is_categorical, "standard split should be categorical");
     assert!(b.is_categorical, "morph split should be categorical");
+    assert_split_candidates_match(Some(&a), Some(&b));
     assert_eq!(
         a.feature_index, b.feature_index,
         "feature_index disagreed for categorical morph at warmup"
@@ -2083,6 +2129,287 @@ fn standard_simd_and_scalar_candidates(
 
     assert_split_candidates_match(scalar.as_ref(), simd.as_ref());
     (scalar, simd)
+}
+
+#[test]
+fn morph_simd_matches_scalar_on_fixed_histogram() {
+    use alloygbm_core::{MorphConfig, MorphPrecomputed};
+    use alloygbm_engine::MorphContext;
+
+    let feature = FeatureHistogram {
+        feature_index: 3,
+        bins: (0..17)
+            .map(|index| HistogramBin {
+                grad_sum: ((index as f32 - 8.0) * 0.37).sin(),
+                hess_sum: 0.5 + index as f32 * 0.1,
+                grad_sq_sum: 0.0,
+                count: 2 + index as u32 % 5,
+            })
+            .collect(),
+    };
+    let config = MorphConfig {
+        morph_warmup_iters: 0,
+        ..MorphConfig::default()
+    };
+    let morph = MorphContext {
+        iteration: 40,
+        total_iterations: 100,
+        grad_mean: 0.05,
+        grad_std: 0.8,
+        config,
+        precomputed: MorphPrecomputed::for_iteration(40, 100, &config),
+    };
+    let options = make_options(0.1, 0.2, 0.1, 0.01, 16);
+    let scalar = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature_inner(
+            view,
+            7,
+            options,
+            GainStrategy::Morph(&morph),
+            None,
+        )
+    });
+    let simd = with_histogram_feature(&feature, |view| {
+        crate::morph_scan::best_split_morph_numeric_simd(view, 7, options, &morph)
+    });
+
+    assert_split_candidates_match(scalar.as_ref(), simd.as_ref());
+}
+
+fn morph_test_context(iteration: u32, balance_penalty: bool) -> MorphContext {
+    let config = MorphConfig {
+        morph_warmup_iters: 5,
+        balance_penalty,
+        ..MorphConfig::default()
+    };
+    MorphContext {
+        iteration,
+        total_iterations: 100,
+        grad_mean: -0.03,
+        grad_std: 0.7,
+        config,
+        precomputed: MorphPrecomputed::for_iteration(iteration, 100, &config),
+    }
+}
+
+fn assert_morph_split_parity(scalar: Option<&SplitCandidate>, simd: Option<&SplitCandidate>) {
+    match (scalar, simd) {
+        (Some(scalar), Some(simd)) => {
+            assert_eq!(scalar.feature_index, simd.feature_index);
+            assert_eq!(scalar.threshold_bin, simd.threshold_bin);
+            assert_eq!(scalar.default_left, simd.default_left);
+            let tolerance = 1e-5_f32.max(1e-5 * scalar.gain.abs());
+            assert!(
+                (scalar.gain - simd.gain).abs() <= tolerance,
+                "Morph gain drift: scalar={} simd={} tolerance={tolerance}",
+                scalar.gain,
+                simd.gain
+            );
+            assert_eq!(scalar.left_stats, simd.left_stats);
+            assert_eq!(scalar.right_stats, simd.right_stats);
+        }
+        (None, None) => {}
+        (scalar, simd) => panic!(
+            "Morph scalar/SIMD disagree on Some-ness: scalar={}, simd={}",
+            scalar.is_some(),
+            simd.is_some()
+        ),
+    }
+}
+
+fn morph_simd_and_scalar_candidates(
+    feature: &FeatureHistogram,
+    options: SplitSelectionOptions,
+    morph: &MorphContext,
+) -> (Option<SplitCandidate>, Option<SplitCandidate>) {
+    let scalar = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_inner(
+            view,
+            11,
+            options,
+            GainStrategy::Morph(morph),
+            None,
+        )
+    });
+    let simd = with_histogram_feature(feature, |view| {
+        crate::morph_scan::best_split_morph_numeric_simd(view, 11, options, morph)
+    });
+    assert_morph_split_parity(scalar.as_ref(), simd.as_ref());
+    (scalar, simd)
+}
+
+#[test]
+fn morph_simd_matches_scalar_across_randomized_histograms() {
+    for &bin_count in &[16_usize, 64, 255] {
+        for seed in 0..8_u32 {
+            let mut state = 0xA341_316C_u32 ^ seed ^ bin_count as u32;
+            let mut bins = Vec::with_capacity(bin_count);
+            for _ in 0..bin_count {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let gradient = ((state >> 8) as i16 as f32) / 8192.0;
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                bins.push(HistogramBin {
+                    grad_sum: gradient,
+                    hess_sum: 0.05 + (state % 2_000) as f32 / 1_000.0,
+                    grad_sq_sum: gradient * gradient,
+                    count: 1 + state % 13,
+                });
+            }
+            let feature = FeatureHistogram {
+                feature_index: seed,
+                bins,
+            };
+            for &iteration in &[0_u32, 25, 99] {
+                let morph = morph_test_context(iteration, seed % 2 == 0);
+                let missing_bin = if seed % 2 == 0 {
+                    bin_count - 1
+                } else {
+                    bin_count
+                };
+                let options = make_options(
+                    if seed % 3 == 0 { 0.15 } else { 0.0 },
+                    0.2,
+                    if seed % 4 == 0 { 0.1 } else { 0.0 },
+                    if seed % 5 == 0 { 0.01 } else { 0.0 },
+                    missing_bin,
+                );
+                morph_simd_and_scalar_candidates(&feature, options, &morph);
+            }
+        }
+    }
+}
+
+#[test]
+fn morph_simd_masks_tail_invalid_and_non_finite_candidates() {
+    let all_invalid = FeatureHistogram {
+        feature_index: 0,
+        bins: (0..11)
+            .map(|index| HistogramBin {
+                grad_sum: index as f32 - 5.0,
+                hess_sum: 0.1,
+                grad_sq_sum: 0.0,
+                count: 1,
+            })
+            .collect(),
+    };
+    let morph = morph_test_context(40, true);
+    let options = SplitSelectionOptions {
+        min_rows_per_leaf: 20,
+        missing_bin_index: 10,
+        ..SplitSelectionOptions::default()
+    };
+    let (scalar, simd) = morph_simd_and_scalar_candidates(&all_invalid, options, &morph);
+    assert!(scalar.is_none() && simd.is_none());
+
+    let non_finite = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 1.0e30,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 4,
+            },
+            HistogramBin {
+                grad_sum: -1.0e30,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 4,
+            },
+        ],
+    };
+    let (scalar, simd) =
+        morph_simd_and_scalar_candidates(&non_finite, make_options(0.0, 0.0, 0.0, 0.0, 2), &morph);
+    assert!(scalar.is_none() && simd.is_none());
+}
+
+#[test]
+fn morph_simd_preserves_balance_boundary_behavior() {
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 3.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 9,
+            },
+            HistogramBin {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -2.0,
+                hess_sum: 8.0,
+                grad_sq_sum: 0.0,
+                count: 90,
+            },
+        ],
+    };
+    let morph = morph_test_context(50, true);
+    morph_simd_and_scalar_candidates(&feature, make_options(0.0, 0.1, 0.0, 0.0, 3), &morph);
+}
+
+#[test]
+#[ignore = "release-mode MorphBoost profiling"]
+fn benchmark_morph_categorical_scan() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let num_categories = 64;
+    let missing_bin = num_categories;
+    let mut bins: Vec<HistogramBin> = (0..num_categories)
+        .map(|category| {
+            let gradient = ((category as f32) * 0.37).sin() * 4.0;
+            HistogramBin {
+                grad_sum: gradient,
+                hess_sum: 0.5 + category as f32 * 0.03,
+                grad_sq_sum: 0.0,
+                count: 2 + category as u32 % 11,
+            }
+        })
+        .collect();
+    bins.push(HistogramBin {
+        grad_sum: 0.75,
+        hess_sum: 1.5,
+        grad_sq_sum: 0.0,
+        count: 7,
+    });
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins,
+    };
+    let options = make_options(0.05, 0.1, 0.0, 0.0, missing_bin);
+    let morph = morph_test_context(50, true);
+    with_histogram_feature(&feature, |view| {
+        for _ in 0..3 {
+            black_box(CpuBackend::best_split_morph_categorical_feature(
+                view,
+                0,
+                &options,
+                num_categories,
+                &morph,
+                None,
+            ));
+        }
+        for _ in 0..7 {
+            let started = Instant::now();
+            for _ in 0..2_048 {
+                black_box(CpuBackend::best_split_morph_categorical_feature(
+                    view,
+                    0,
+                    &options,
+                    num_categories,
+                    &morph,
+                    None,
+                ));
+            }
+            let ns_per_iter = started.elapsed().as_nanos() as f64 / 2_048.0;
+            println!("benchmark_morph_categorical_scan: ns_per_iter={ns_per_iter:.2}");
+        }
+    });
 }
 
 #[test]

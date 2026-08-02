@@ -1,0 +1,1245 @@
+{
+  "alloygbm": "0.12.10",
+  "arguments": {
+    "arms": [
+      "auto",
+      "morph_current"
+    ],
+    "profile": "default",
+    "quick": false,
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "git_head": "5584988fce3f9d2dac4804e2c3510045d3cf72d8",
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "production_base": "77dbf6d",
+  "python": "3.13.5",
+  "records": [
+    {
+      "arm": "auto",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.053189832950010896,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.7336807248059529,
+      "secondary_metrics": {
+        "mae": 0.5705067439157574
+      },
+      "seed": 0,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.10931687499396503,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.7687179068566565,
+      "secondary_metrics": {
+        "mae": 0.620220817225345
+      },
+      "seed": 0,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.10302479099482298,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.044844696319752,
+      "secondary_metrics": {
+        "mae": 0.8014391286451428
+      },
+      "seed": 1,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.051889833994209766,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.9715920135208345,
+      "secondary_metrics": {
+        "mae": 0.7037220060883556
+      },
+      "seed": 1,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.05216916697099805,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.2443924266257975,
+      "secondary_metrics": {
+        "mae": 0.9585716053115902
+      },
+      "seed": 2,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.09827508393209428,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.3544874633008281,
+      "secondary_metrics": {
+        "mae": 1.0707500874705147
+      },
+      "seed": 2,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.1052571670152247,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.6624372817876376,
+      "secondary_metrics": {
+        "mae": 1.262829314044211
+      },
+      "seed": 3,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.05344179202802479,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.5225783951433447,
+      "secondary_metrics": {
+        "mae": 1.1548236521484796
+      },
+      "seed": 3,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.0520126250339672,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.9933502788093426,
+      "secondary_metrics": {
+        "mae": 0.7682101588288788
+      },
+      "seed": 4,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.09404379094485193,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.025099424849102,
+      "secondary_metrics": {
+        "mae": 0.8065940312881139
+      },
+      "seed": 4,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.6579031660221517,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.8290605518103505,
+      "secondary_metrics": {
+        "mae": 0.6586863332340727
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8098390420200303,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.7827561664801619,
+      "secondary_metrics": {
+        "mae": 0.603572822699789
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.817687000031583,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.7844894442139394,
+      "secondary_metrics": {
+        "mae": 0.5907953864334559
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.2964010830037296,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.8833820107254592,
+      "secondary_metrics": {
+        "mae": 0.6988785750618263
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.3380371250677854,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.1385950398035538,
+      "secondary_metrics": {
+        "mae": 0.9021795684238896
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8215133750345558,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.9614996375522459,
+      "secondary_metrics": {
+        "mae": 0.7520678698492702
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8216057500103489,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.281483619782074,
+      "secondary_metrics": {
+        "mae": 0.9374271192282322
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.1583505830494687,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.6773893361188834,
+      "secondary_metrics": {
+        "mae": 1.2607691505836556
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.3618328340817243,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.9522102272440993,
+      "secondary_metrics": {
+        "mae": 0.7512025571195409
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8298924579285085,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.8084159948868972,
+      "secondary_metrics": {
+        "mae": 0.6430993309913902
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.13972341595217586,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.2965689793737842,
+      "secondary_metrics": {
+        "mae": 1.0203347947184835
+      },
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.24740120791830122,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.6138029329375845,
+      "secondary_metrics": {
+        "mae": 1.3045968523770661
+      },
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.24692212499212474,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.5692448034822346,
+      "secondary_metrics": {
+        "mae": 1.2616386281137761
+      },
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.13802866695914418,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.2446783584545917,
+      "secondary_metrics": {
+        "mae": 0.9735129891293575
+      },
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.13857579103205353,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.416591438492481,
+      "secondary_metrics": {
+        "mae": 1.1034178702561883
+      },
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.24731170805171132,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.7419626204074918,
+      "secondary_metrics": {
+        "mae": 1.382276717688186
+      },
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.2460274159675464,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.9083651465441496,
+      "secondary_metrics": {
+        "mae": 1.5304479277331913
+      },
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.13736429205164313,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.4794330571157126,
+      "secondary_metrics": {
+        "mae": 1.1627082631334007
+      },
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.13663633400574327,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.7129923510537435,
+      "secondary_metrics": {
+        "mae": 1.3318030071041937
+      },
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.23555091698653996,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 2.2194713603896523,
+      "secondary_metrics": {
+        "mae": 1.7890751702958734
+      },
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.0328322089044377,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.151329831170829,
+      "secondary_metrics": {
+        "mae": 0.9226593448083832
+      },
+      "seed": 0,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5061007499461994,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.8439391634187918,
+      "secondary_metrics": {
+        "mae": 0.6567255721283739
+      },
+      "seed": 0,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.506938291946426,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.5577043952124323,
+      "secondary_metrics": {
+        "mae": 0.42682293522591597
+      },
+      "seed": 1,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.0474429579917341,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.729332024760536,
+      "secondary_metrics": {
+        "mae": 0.5816697515737631
+      },
+      "seed": 1,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.05356908403337,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.5443050273195884,
+      "secondary_metrics": {
+        "mae": 0.43445236724474634
+      },
+      "seed": 2,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5068269589683041,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.424385280029696,
+      "secondary_metrics": {
+        "mae": 0.33028480994087245
+      },
+      "seed": 2,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5031167910201475,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.2498925104434182,
+      "secondary_metrics": {
+        "mae": 0.9611792552396837
+      },
+      "seed": 3,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.9886486670002341,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.630226724518406,
+      "secondary_metrics": {
+        "mae": 1.3008920238111816
+      },
+      "seed": 3,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.9953439169330522,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.2933240640935943,
+      "secondary_metrics": {
+        "mae": 1.0325167556262056
+      },
+      "seed": 4,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5024627090897411,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 0.9608615296286727,
+      "secondary_metrics": {
+        "mae": 0.7297682893103644
+      },
+      "seed": 4,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.19273145799525082,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.4305365304524582,
+      "secondary_metrics": {
+        "mae": 1.0961600969531347
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.3228167080087587,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.4806684355810709,
+      "secondary_metrics": {
+        "mae": 1.1270005755276964
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.3257481249747798,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.5527448795542866,
+      "secondary_metrics": {
+        "mae": 1.1901884469274635
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.19500770792365074,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.462525293124115,
+      "secondary_metrics": {
+        "mae": 1.1320924320757935
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.19704791705589741,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.4598240376381555,
+      "secondary_metrics": {
+        "mae": 1.1711550166444262
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.33430062502156943,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.5260136689505208,
+      "secondary_metrics": {
+        "mae": 1.2187398031933188
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.3256498749833554,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.4992562588914395,
+      "secondary_metrics": {
+        "mae": 1.1879412324145073
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.19637312495615333,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.4354418775144304,
+      "secondary_metrics": {
+        "mae": 1.1294635523326422
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "auto",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.19268533401191235,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.412504931769131,
+      "secondary_metrics": {
+        "mae": 1.0840583435009892
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "reg-noisy-nonlinear",
+      "fit_seconds": 0.33444920799229294,
+      "higher_is_better": false,
+      "primary_metric": "rmse",
+      "primary_value": 1.5022051894239268,
+      "secondary_metrics": {
+        "mae": 1.1332294610947962
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.5048177079297602,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.1500850629067977,
+      "secondary_metrics": {
+        "accuracy": 0.9353658536585366
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "auto",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.22338833298999816,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.14690402009055656,
+      "secondary_metrics": {
+        "accuracy": 0.9378048780487804
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "auto",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.2313070830423385,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.16682366056557893,
+      "secondary_metrics": {
+        "accuracy": 0.9231707317073171
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.5163945000385866,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.16993425690928132,
+      "secondary_metrics": {
+        "accuracy": 0.9207317073170732
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.5208059590077028,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.1409608769678149,
+      "secondary_metrics": {
+        "accuracy": 0.9414634146341463
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "auto",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.22675037500448525,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.1407702655852892,
+      "secondary_metrics": {
+        "accuracy": 0.9390243902439024
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "auto",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.22657399997115135,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.1480977853914738,
+      "secondary_metrics": {
+        "accuracy": 0.9317073170731708
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.5032521249959245,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.15480438989131823,
+      "secondary_metrics": {
+        "accuracy": 0.9280487804878049
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.498215000028722,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.1579755795319101,
+      "secondary_metrics": {
+        "accuracy": 0.9280487804878049
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "auto",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.2239828339079395,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.15429060786676235,
+      "secondary_metrics": {
+        "accuracy": 0.9292682926829269
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "auto",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.04604099993594,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9886017654040155,
+      "secondary_metrics": {
+        "accuracy": 0.5780487804878048
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 5.177090792101808,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 1.0235490341747118,
+      "secondary_metrics": {
+        "accuracy": 0.5634146341463414
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 5.1673011659877375,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9782839267562718,
+      "secondary_metrics": {
+        "accuracy": 0.6048780487804878
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "auto",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.0160776249831542,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9621367427489453,
+      "secondary_metrics": {
+        "accuracy": 0.6170731707317073
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "auto",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.027976333978586,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9526503621282988,
+      "secondary_metrics": {
+        "accuracy": 0.6146341463414634
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 5.152943791006692,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9630303386257028,
+      "secondary_metrics": {
+        "accuracy": 0.6146341463414634
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 5.245882458984852,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 1.0692552159664037,
+      "secondary_metrics": {
+        "accuracy": 0.5585365853658537
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "auto",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.055389625020325,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 1.0309820959875735,
+      "secondary_metrics": {
+        "accuracy": 0.5756097560975609
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "auto",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.019184499979019,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9804118581238856,
+      "secondary_metrics": {
+        "accuracy": 0.5829268292682926
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 5.149830125039443,
+      "higher_is_better": false,
+      "primary_metric": "log_loss",
+      "primary_value": 1.0048767556264107,
+      "secondary_metrics": {
+        "accuracy": 0.5951219512195122
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.3263357919640839,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9057651345675867,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.1319247909123078,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9078866464102804,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.13233845797367394,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9275150351375729,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.32197600009385496,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9250387568013733,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.32083887490443885,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9214455219801924,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.13193237502127886,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9183495895819842,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.13188945793081075,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.8972145801184369,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.3130967499455437,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.8926736211481665,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.321747790905647,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9181883434857654,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.13161058304831386,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9147187772357763,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.32383775000926107,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9634707439204503,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.5143890419276431,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9634707439204503,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.5070576670113951,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.32357341691385955,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.32255725003778934,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9814850074835262,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.5074082500068471,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.5069618329871446,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.31981483299750835,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "auto",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.32346791692543775,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9823322070788296,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "morph_current",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.5105789159424603,
+      "higher_is_better": true,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    }
+  ],
+  "schema_version": 1
+}

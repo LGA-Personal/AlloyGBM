@@ -14,6 +14,19 @@ use crate::factor_split::validate_factor_split_context;
 use crate::split_helpers::{apply_feature_weight, gain_materially_exceeds};
 use crate::{NodeStatsAccumulator, pl, pl_histogram};
 
+pub(crate) fn morph_uses_standard_gain_only(morph: &MorphContext) -> bool {
+    morph.precomputed.in_warmup
+        || (morph.precomputed.info_score_negligible && !morph.precomputed.balance_penalty)
+}
+
+pub(crate) fn morph_can_use_standard_scanner(
+    morph: &MorphContext,
+    options: &SplitSelectionOptions,
+    has_factor_context: bool,
+) -> bool {
+    !has_factor_context && options.dro_config.is_none() && morph_uses_standard_gain_only(morph)
+}
+
 impl BackendOps for CpuBackend {
     fn build_histograms(
         &self,
@@ -154,6 +167,15 @@ impl BackendOps for CpuBackend {
     ) -> EngineResult<Option<SplitCandidate>> {
         if let Some(ctx) = factor_context {
             validate_factor_split_context(ctx)?;
+        }
+        if morph_can_use_standard_scanner(morph, &options, factor_context.is_some()) {
+            return Ok(Self::best_split_with_options_internal(
+                histograms,
+                options,
+                feature_weights,
+                categorical_features,
+                None,
+            ));
         }
         let find_best = |fh: HistogramFeatureView<'_>| -> Option<SplitCandidate> {
             let fi = fh.feature_index() as usize;

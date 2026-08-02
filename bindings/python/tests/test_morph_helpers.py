@@ -59,7 +59,7 @@ def test_build_morph_config_dict_defaults():
 def test_morph_ablation_gate_accepts_bounded_regression():
     gates = evaluate_calibration_gates([
         Result("baseline_auto", "regression", 1.0, "RMSE", 0.1),
-        Result("morph_full", "regression", 1.34, "RMSE", 0.1),
+        Result("morph_full", "regression", 1.08, "RMSE", 0.1),
     ])
     assert len(gates) == 1
     assert gates[0].passed
@@ -72,6 +72,15 @@ def test_morph_ablation_gate_rejects_material_regression():
     ])
     assert len(gates) == 1
     assert not gates[0].passed
+
+
+def test_morph_ablation_gate_treats_ndcg_as_higher_is_better():
+    gates = evaluate_calibration_gates([
+        Result("baseline_auto", "ranking", 0.80, "NDCG@10", 0.1),
+        Result("morph_full", "ranking", 0.79, "NDCG@10", 0.1),
+    ])
+    assert len(gates) == 1
+    assert gates[0].passed
 
 
 def test_apply_interaction_importance_bonus_passthrough():
