@@ -170,13 +170,17 @@ jobs:
           assert params["learning_rate"] == 0.2
           assert params["max_depth"] == 4
 
+          # Invalid parameter values are validated at fit() (not
+          # construction/set_params) so cloning and parameter-search
+          # workflows follow the scikit-learn estimator contract.
+          model.set_params(learning_rate=0.0)
           try:
-              model.set_params(learning_rate=0.0)
+              model.fit([[0.0], [1.0], [2.0], [3.0]], [0.0, 1.0, 2.0, 3.0])
           except ValueError:
               pass
           else:
               raise AssertionError(
-                  "expected ValueError for invalid learning_rate"
+                  "expected ValueError for invalid learning_rate at fit()"
               )
 
           print("GBMRegressor contract smoke ok")
@@ -220,7 +224,7 @@ jobs:
           model.fit(X, y)
 
           assert model.n_classes_ == 3, f"expected 3 classes, got {model.n_classes_}"
-          assert model.classes_ == [0, 1, 2]
+          assert np.array_equal(model.classes_, [0, 1, 2])
 
           probas = model.predict_proba(X)
           assert probas.shape == (150, 3), f"unexpected shape: {probas.shape}"
