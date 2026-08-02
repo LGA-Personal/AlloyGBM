@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import os
 
+from .._sklearn_compat import _BaseEstimator, _SKLEARN_AVAILABLE
+
 _PRE_BINNED_INTEGER_TOLERANCE = 1e-6
 _MAX_CONTINUOUS_QUANTIZED_BIN_U8 = 254
 _MISSING_BIN_U8 = 255
@@ -358,19 +360,8 @@ def _linear_tail_core_span_ratio_threshold_from_env() -> float:
     return min(1.0, max(0.0, parsed))
 
 
-try:
-    from sklearn.base import BaseEstimator, RegressorMixin
-
-    class _GBMRegressorBase(BaseEstimator, RegressorMixin):
-        pass
-
-    _SKLEARN_AVAILABLE = True
-except ImportError:
-
-    class _GBMRegressorBase:  # type: ignore[no-redef]
-        pass
-
-    _SKLEARN_AVAILABLE = False
+class _GBMEstimatorBase(_BaseEstimator):
+    """Shared estimator base without regression or classification semantics."""
 
 
 def _diagnostics_to_dicts(diagnostics):

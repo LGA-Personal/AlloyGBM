@@ -8,13 +8,14 @@ from numbers import Integral
 
 import numpy as np
 
+from .._sklearn_compat import _RegressorMixin
 from ._validation import _ValidationMixin, _resolved_training_policy_to_dict
 from ._quantization import _QuantizationMixin
 from ._shap import _ShapMixin
 from ._persistence import _PersistenceMixin
 from . import _base
 from ._base import (
-    _GBMRegressorBase,
+    _GBMEstimatorBase,
     _MAX_CONTINUOUS_QUANTIZED_BIN,
     _max_data_bin_for_max_bins,
     _MIN_CONTINUOUS_QUANTIZED_BINS,
@@ -38,8 +39,14 @@ def _validate_n_jobs(value: object) -> int | None:
     raise ValueError("n_jobs must be None, -1, or a positive integer")
 
 
-class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _PersistenceMixin, _GBMRegressorBase):
-    """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
+class _GBMEstimatorCore(
+    _ValidationMixin,
+    _QuantizationMixin,
+    _ShapMixin,
+    _PersistenceMixin,
+    _GBMEstimatorBase,
+):
+    """Shared implementation for AlloyGBM's single-output estimators."""
 
     def __init__(
         self,
@@ -2906,6 +2913,10 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
 
     def _more_tags(self):
         return {"allow_nan": True, "requires_y": True}
+
+
+class GBMRegressor(_RegressorMixin, _GBMEstimatorCore):
+    """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
 
 
 # Inject GBMRegressor into _validation's namespace so its static-method bodies

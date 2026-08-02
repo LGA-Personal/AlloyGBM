@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ._regressor._core import _GBMEstimatorCore
 from .regressor import GBMRegressor
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ _OBJECTIVE_NAME_MAP = {
 }
 
 
-class GBMRanker(GBMRegressor):
+class GBMRanker(_GBMEstimatorCore):
     """Gradient Boosted Decision Tree learning-to-rank estimator.
 
     Trains a ranking model using one of several learning-to-rank objectives.

@@ -7,20 +7,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ._regressor._core import _GBMEstimatorCore
+from ._sklearn_compat import _ClassifierMixin
 from .regressor import GBMRegressor
 
 if TYPE_CHECKING:
     pass
 
-try:
-    from sklearn.base import ClassifierMixin
-
-    _SKLEARN_CLASSIFIER_MIXIN = ClassifierMixin
-except ImportError:
-    _SKLEARN_CLASSIFIER_MIXIN = object  # type: ignore[assignment,misc]
-
-
-class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
+class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
     """Gradient Boosted Decision Tree classifier with sklearn-compatible API.
 
     Supports binary classification (log-loss) and multi-class classification
@@ -414,8 +408,6 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             tags.non_deterministic = not self.deterministic
         if hasattr(tags, "input_tags") and hasattr(tags.input_tags, "allow_nan"):
             tags.input_tags.allow_nan = True
-        if hasattr(tags, "classifier_tags"):
-            tags.classifier_tags.multi_output = False
         return tags
 
     def _more_tags(self):
