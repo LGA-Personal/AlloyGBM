@@ -26,3 +26,23 @@ Evidence:
 
 - `pr132_morph_regularized_control.json`: optimized effective-gradient control.
 - `pr132_morph_raw_info.json`: raw-information candidate.
+
+## Balance and information-weight defaults
+
+Status: **no default change**. Calibration used seeds `0`, `1`, and `2` on the full nine-fixture
+matrix. No candidate passed every predeclared veto, so confirmation seeds and public-report datasets
+were not run.
+
+| Arm | Mean | Median | Win/tie | Worst pair | Decision |
+|---|---:|---:|---:|---:|---|
+| No balance | -3.482% | -1.418% | 29.6% | -10.353% | Reject |
+| Info weight 0.05 | +2.579% | +0.594% | 70.4% | -4.402% | Reject |
+| Info weight 0.075 | +1.784% | +0.743% | 77.8% | -3.166% | Reject |
+| Info weight 0.10 | 0.000% | 0.000% | 100.0% | 0.000% | Current control |
+| Info weight 0.15 | -4.553% | -2.763% | 22.2% | -14.682% | Reject |
+
+Disabling balance particularly hurt regression (`-6.186%` family mean), so the enabled default is
+retained. Weight `0.05` failed binary, multiclass, and ranking family vetoes as well as the worst-pair
+limit. Weight `0.075` was the strongest candidate but missed the declared `-3.0%` worst-pair limit
+with `-3.166%`; it was rejected without using held-out data. Full records and gate summaries are in
+`pr132_morph_calibration.json`.

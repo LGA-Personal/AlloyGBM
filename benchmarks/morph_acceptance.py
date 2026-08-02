@@ -307,6 +307,25 @@ def evaluate_candidate(
     )
 
 
+def select_calibration_candidate(
+    records: Sequence[MorphBenchmarkRecord],
+    candidate_arms: Sequence[str],
+    *,
+    control_arm: str = "morph_current",
+) -> str | None:
+    calibration = [record for record in records if record.seed in {0, 1, 2}]
+    passing: list[tuple[float, str]] = []
+    for arm in candidate_arms:
+        gate = evaluate_candidate(
+            calibration,
+            control_arm=control_arm,
+            candidate_arm=arm,
+        )
+        if gate.passed:
+            passing.append((gate.mean_improvement, arm))
+    return max(passing)[1] if passing else None
+
+
 def _split_rows(X: np.ndarray, y: np.ndarray) -> DatasetBundle:
     split = max(1, min(len(X) - 1, int(0.8 * len(X))))
     return DatasetBundle(X[:split], y[:split], X[split:], y[split:])

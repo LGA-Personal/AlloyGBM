@@ -89,6 +89,78 @@ def test_regularized_profile_covers_l1_levels_and_dro_families() -> None:
     }
 
 
+def test_calibration_arms_have_exact_single_dimension_overrides() -> None:
+    assert ACCEPTANCE.ARMS["morph_current"] == {"training_mode": "morph"}
+    assert ACCEPTANCE.ARMS["morph_no_balance"] == {
+        "training_mode": "morph",
+        "balance_penalty": False,
+    }
+    for arm, weight in {
+        "morph_info_005": 0.05,
+        "morph_info_0075": 0.075,
+        "morph_info_010": 0.1,
+        "morph_info_015": 0.15,
+    }.items():
+        assert ACCEPTANCE.ARMS[arm] == {
+            "training_mode": "morph",
+            "info_score_weight": weight,
+        }
+
+
+def test_rotated_arm_order_changes_by_dataset_and_seed() -> None:
+    arms = ["control", "a", "b"]
+    assert ACCEPTANCE._rotated_arms(arms, 0, 0) == ["control", "a", "b"]
+    assert ACCEPTANCE._rotated_arms(arms, 0, 1) == ["a", "b", "control"]
+    assert ACCEPTANCE._rotated_arms(arms, 1, 1) == ["b", "control", "a"]
+
+
+def test_candidate_selection_ignores_confirmation_seeds() -> None:
+    calibration = []
+    for seed in range(3):
+        calibration.extend(
+            [
+                _record(arm="morph_current", value=1.0, seed=seed),
+                _record(arm="candidate_a", value=0.99, seed=seed),
+                _record(arm="candidate_b", value=0.995, seed=seed),
+            ]
+        )
+    confirmation = []
+    for seed in (3, 4):
+        confirmation.extend(
+            [
+                _record(arm="morph_current", value=1.0, seed=seed),
+                _record(arm="candidate_a", value=2.0, seed=seed),
+                _record(arm="candidate_b", value=0.1, seed=seed),
+            ]
+        )
+    selected = ACCEPTANCE.select_calibration_candidate(
+        [*calibration, *confirmation], ["candidate_a", "candidate_b"]
+    )
+    assert selected == "candidate_a"
+
+
+def test_confirmation_gate_is_separate_from_calibration_selection() -> None:
+    records = []
+    for seed in range(5):
+        records.extend(
+            [
+                _record(arm="morph_current", value=1.0, seed=seed),
+                _record(
+                    arm="candidate",
+                    value=0.99 if seed < 3 else 1.04,
+                    seed=seed,
+                ),
+            ]
+        )
+    assert (
+        ACCEPTANCE.select_calibration_candidate(records, ["candidate"])
+        == "candidate"
+    )
+    assert not ACCEPTANCE.evaluate_candidate(
+        records, control_arm="morph_current", candidate_arm="candidate"
+    ).passed
+
+
 def test_normalized_improvement_respects_metric_direction() -> None:
     assert ACCEPTANCE.normalized_improvement(2.0, 1.5, False) == pytest.approx(0.25)
     assert ACCEPTANCE.normalized_improvement(0.8, 0.84, True) == pytest.approx(0.05)

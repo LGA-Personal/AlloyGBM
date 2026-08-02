@@ -612,19 +612,19 @@ git commit -m "bench: reject raw-gradient MorphBoost information trial"
   highest mean improvement using arm name as the deterministic final tie-break.
 - Produces at most one new default combination; rejected arms remain benchmark-only.
 
-- [ ] **Step 1: Add failing arm-order and held-out-selection tests**
+- [x] **Step 1: Add failing arm-order and held-out-selection tests**
 
 Require rotating arm order by dataset/seed, exact arm kwargs, calibration-only selection, and a
 separate confirmation gate. Assert that confirmation records cannot influence
 `select_calibration_candidate`.
 
-- [ ] **Step 2: Implement named calibration arms**
+- [x] **Step 2: Implement named calibration arms**
 
 Map arms to public estimator kwargs. `morph_current` uses no overrides,
 `morph_no_balance` sets `balance_penalty=False`, and information arms set only
 `info_score_weight`. Keep the optimized current formula as control.
 
-- [ ] **Step 3: Evaluate balance enablement first**
+- [x] **Step 3: Evaluate balance enablement first**
 
 ```bash
 .venv/bin/python benchmarks/morph_acceptance.py \
@@ -638,7 +638,7 @@ source constants unless both on/off variants show opposing task-family effects a
 the balance exponential is material. If that condition holds, test exactly one midpoint coefficient
 `-0.25` against the current `-0.5` using the same calibration/confirmation split.
 
-- [ ] **Step 4: Evaluate information weight around the surviving balance control**
+- [x] **Step 4: Evaluate information weight around the surviving balance control**
 
 ```bash
 .venv/bin/python benchmarks/morph_acceptance.py \
@@ -650,19 +650,21 @@ Select the highest calibration aggregate that passes all calibration vetoes, the
 that arm on seeds `3,4` and public `morph_report.py` datasets. Promote it only if the combined
 five-seed gate passes. This selection order prevents confirmation-data tuning.
 
-- [ ] **Step 5: Apply an accepted default consistently**
+- [x] **Step 5: Apply an accepted default consistently**
+
+Result: no candidate passed every calibration veto, so production defaults remain unchanged.
 
 If a balance or information default changes, update Rust `MorphConfig::default`, Python constructor
 defaults/signatures, `build_morph_config_dict`, repr/get/set parameter expectations, and focused
 tests together. If no candidate passes, leave every production default unchanged.
 
-- [ ] **Step 6: Save one merged result and record rejected arms**
+- [x] **Step 6: Save one merged result and record rejected arms**
 
 Write all calibration and confirmation records plus gate summaries to
 `pr132_morph_calibration.json`. Append each arm's gate statistics and final decision to the formula
 trial report. Include public-report results only for the finalist.
 
-- [ ] **Step 7: Run focused defaults and Morph suites**
+- [x] **Step 7: Run focused defaults and Morph suites**
 
 ```bash
 cargo test -p alloygbm-core morph -- --nocapture
@@ -672,7 +674,7 @@ cargo test -p alloygbm-backend-cpu morph -- --nocapture
   benchmarks/tests/test_morph_acceptance.py -q
 ```
 
-- [ ] **Step 8: Commit the calibration result**
+- [x] **Step 8: Commit the calibration result**
 
 ```bash
 git add benchmarks/morph_acceptance.py benchmarks/tests/test_morph_acceptance.py \
