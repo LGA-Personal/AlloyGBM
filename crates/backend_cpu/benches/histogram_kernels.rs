@@ -1,9 +1,9 @@
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{
     BinnedMatrix, FeatureHistogram, FeatureTile, GradientPair, HistogramBin, HistogramBundle,
-    NodeSlice,
+    MorphConfig, MorphPrecomputed, NodeSlice,
 };
-use alloygbm_engine::BackendOps;
+use alloygbm_engine::{BackendOps, MorphContext, SplitSelectionOptions};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -140,6 +140,7 @@ fn build_histograms_baseline_reference(
 
 fn main() {
     let backend = CpuBackend;
+    println!("production_base: 77dbf6d");
     println!("runtime_target_arch: {}", std::env::consts::ARCH);
     println!("runtime_avx2_enabled: {}", runtime_avx2_enabled());
     println!(
@@ -170,6 +171,7 @@ fn main() {
     });
 
     let small_fixture = build_fixture(1_024, 16, 63, 4);
+    let morph_16_fixture = build_fixture(1_024, 16, 15, 4);
     run_case("histogram_build_small_baseline_ref", 8, 140, || {
         let histograms = build_histograms_baseline_reference(
             &small_fixture.binned_matrix,
@@ -221,6 +223,14 @@ fn main() {
             &small_fixture.feature_tiles,
         )
         .expect("small split benchmark histogram precompute should succeed");
+    let split_histograms_16 = backend
+        .build_histograms(
+            &morph_16_fixture.binned_matrix,
+            &morph_16_fixture.gradients,
+            &morph_16_fixture.node,
+            &morph_16_fixture.feature_tiles,
+        )
+        .expect("16-bin split benchmark histogram precompute should succeed");
     let split_histograms_medium = backend
         .build_histograms(
             &medium_fixture.binned_matrix,
@@ -239,6 +249,38 @@ fn main() {
         let split = backend
             .best_split(&split_histograms_medium)
             .expect("best split benchmark should succeed");
+        black_box(split);
+    });
+
+    let morph_config = MorphConfig {
+        morph_warmup_iters: 0,
+        ..MorphConfig::default()
+    };
+    let morph = MorphContext {
+        iteration: 50,
+        total_iterations: 100,
+        grad_mean: 0.0,
+        grad_std: 1.0,
+        config: morph_config,
+        precomputed: MorphPrecomputed::for_iteration(50, 100, &morph_config),
+    };
+    let split_options = SplitSelectionOptions::default();
+    run_case("best_split_morph_16", 12, 500, || {
+        let split = backend
+            .best_split_morph(&split_histograms_16, split_options, &[], &[], &morph)
+            .expect("16-bin Morph split benchmark should succeed");
+        black_box(split);
+    });
+    run_case("best_split_morph_64", 12, 500, || {
+        let split = backend
+            .best_split_morph(&split_histograms_small, split_options, &[], &[], &morph)
+            .expect("64-bin Morph split benchmark should succeed");
+        black_box(split);
+    });
+    run_case("best_split_morph_255", 12, 500, || {
+        let split = backend
+            .best_split_morph(&split_histograms_medium, split_options, &[], &[], &morph)
+            .expect("255-bin Morph split benchmark should succeed");
         black_box(split);
     });
 }

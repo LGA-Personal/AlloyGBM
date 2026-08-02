@@ -65,7 +65,7 @@ NumPy, scikit-learn metrics/datasets, pytest, maturin, Sphinx.
 - Produces parseable `best_split_morph_{16,64,255}` Rust benchmark rows.
 - Freezes quality and timing evidence at source commit `77dbf6d` before production changes.
 
-- [ ] **Step 1: Add failing ranking and gate-contract tests**
+- [x] **Step 1: Add failing ranking and gate-contract tests**
 
 Add tests that require ranking groups to be positive sizes summing to the row count, require NDCG@10
 instead of RMSE, and pin the promotion math:
@@ -92,7 +92,7 @@ def test_candidate_gate_rejects_bad_worst_case():
 Also test error/higher-is-better normalization, the 0.1% practical-tie boundary, equal dataset
 weighting, task-family veto, and deterministic bootstrap output.
 
-- [ ] **Step 2: Run the focused tests and observe the intended failures**
+- [x] **Step 2: Run the focused tests and observe the intended failures**
 
 Run:
 
@@ -104,7 +104,7 @@ Run:
 Expected: imports or assertions fail because the acceptance harness does not exist and the ranking
 fixture returns a truncated ID vector.
 
-- [ ] **Step 3: Implement the benchmark record and gate layer**
+- [x] **Step 3: Implement the benchmark record and gate layer**
 
 Create these stable data contracts:
 
@@ -141,14 +141,14 @@ actual Git HEAD, explicit `production_base="77dbf6d"`, platform, Python/package 
 arguments, and records. Reject missing pairs, duplicate pair keys, non-finite values, or mismatched
 primary metrics before aggregation.
 
-- [ ] **Step 4: Repair and strengthen `morph_ablation.py`**
+- [x] **Step 4: Repair and strengthen `morph_ablation.py`**
 
 Return query-size lists from `_ranking_dataset`, split only at a query boundary, and compute NDCG@10
 with `alloygbm.evaluation.ndcg_score` per query before averaging. Add a multiclass fixture and use
 log loss as the classifier primary metric while retaining accuracy in output. Replace the old 35%
 RMSE/8-point-accuracy gate with a call to the shared acceptance code for paired records.
 
-- [ ] **Step 5: Implement the full acceptance matrix**
+- [x] **Step 5: Implement the full acceptance matrix**
 
 Define predeclared cases for small/narrow, small/wide, tall/narrow, tall/wide, noisy nonlinear,
 sparse-signal high-dimensional, imbalanced binary/multiclass, and small/large-query ranking.
@@ -167,14 +167,14 @@ all arms. Expose:
 regularized` selects the same task families with `lambda_l1` values `0.1` and `0.5` and includes
 Morph+DRO compatibility arms; this profile is used only for Task 5's gradient-source decision.
 
-- [ ] **Step 6: Add parseable Morph scanner benchmark cases**
+- [x] **Step 6: Add parseable Morph scanner benchmark cases**
 
 Extend `histogram_kernels.rs` with fixtures whose maximum bins are 15, 63, and 255 and construct a
 post-warmup `MorphContext` using `morph_warmup_iters=0`. Call `BackendOps::best_split_morph` with
 empty feature weights/categories and print `best_split_morph_16`, `best_split_morph_64`, and
 `best_split_morph_255` through the existing `run_case` format. Keep the existing standard cases.
 
-- [ ] **Step 7: Run tests and capture immutable baseline evidence**
+- [x] **Step 7: Run tests and capture immutable baseline evidence**
 
 Run the Rust benchmark seven times so baseline and candidate aggregation are symmetric:
 
@@ -195,7 +195,7 @@ Verify the JSON identifies the actual branch HEAD and `production_base=77dbf6d`.
 `git diff 77dbf6d -- crates bindings/python/alloygbm` is empty so the baseline contains no
 production implementation change.
 
-- [ ] **Step 8: Commit the benchmark contract**
+- [x] **Step 8: Commit the benchmark contract**
 
 ```bash
 git add benchmarks/morph_ablation.py benchmarks/morph_acceptance.py \
