@@ -261,6 +261,25 @@ class TestNativeCategoricalSplits(unittest.TestCase):
         preds = ranker.predict(X)
         self.assertEqual(len(preds), len(y))
 
+    def test_ranker_preserves_inferred_categorical_dataframe_path(self) -> None:
+        """Ranker validation must not coerce categorical DataFrames to numeric."""
+        pd = pytest.importorskip("pandas")
+        X, y, group, cats = _make_cat_ranking_data()
+        frame = pd.DataFrame(
+            {
+                "category": pd.Categorical(cats),
+                "numeric": X[:, 1],
+            }
+        )
+        ranker = GBMRanker(
+            n_estimators=3,
+            max_cat_threshold=64,
+            training_policy="manual",
+            seed=42,
+        ).fit(frame, y, group=group)
+
+        self.assertEqual(ranker.predict(frame).shape, (len(y),))
+
     # 6. Early stopping with categorical features
     def test_native_cat_early_stopping(self) -> None:
         """Early stopping with categorical features and max_cat_threshold."""

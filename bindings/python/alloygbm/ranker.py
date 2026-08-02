@@ -195,10 +195,19 @@ class GBMRanker(_GBMEstimatorCore):
                 "squared-error training"
             )
 
-        X = self._validate_numeric_features(X)
         y = self._validate_targets(y)
+        has_categorical = (
+            self.categorical_feature_index is not None
+            or self.categorical_feature_indices is not None
+            or categorical_feature_values is not None
+            or categorical_feature_values_list is not None
+            or self._infer_explicit_categorical_features(X) is not None
+        )
+        if not has_categorical:
+            X = self._validate_numeric_features(X)
         if len(X) != len(y):
             raise ValueError("X and y must contain the same number of rows")
+        group = self._validate_group(group, len(y))
         if sample_weight is not None:
             sample_weight = self._validate_sample_weight(sample_weight, len(y))
 
@@ -250,8 +259,12 @@ class GBMRanker(_GBMEstimatorCore):
                     "eval_group must be provided when eval_set is used with GBMRanker"
                 )
             eval_X, eval_y = eval_set
+            validated_eval_y = self._validate_targets(eval_y)
+            if len(eval_X) != len(validated_eval_y):
+                raise ValueError("eval X and y must contain the same number of rows")
+            eval_group = self._validate_group(eval_group, len(validated_eval_y))
             eval_X_sorted, eval_y_sorted, eval_group_sorted, eval_sort_idx = (
-                self._sort_by_group(eval_X, eval_y, eval_group)
+                self._sort_by_group(eval_X, validated_eval_y, eval_group)
             )
             sorted_eval_set = (eval_X_sorted, eval_y_sorted)
             sorted_eval_group = eval_group_sorted

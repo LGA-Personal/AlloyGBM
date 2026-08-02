@@ -505,6 +505,11 @@ def test_public_ranker_keeps_mandatory_group_contract() -> None:
     fitted = GBMRanker(n_estimators=1).fit(X, y, group=[0, 0, 1, 1])
     assert fitted.predict(X).shape == (4,)
 
+    with pytest.raises(ValueError, match="same number"):
+        GBMRanker(n_estimators=1).fit(X, y, group=[0, 0, 1])
+    with pytest.raises(ValueError, match="non-negative"):
+        GBMRanker(n_estimators=1).fit(X, y, group=[0, 0, -1, -1])
+
 
 def test_group_aware_ranker_adapter_is_cloneable_and_deterministic() -> None:
     X, _ = _small_regression_data()
