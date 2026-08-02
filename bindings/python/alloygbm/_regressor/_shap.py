@@ -108,8 +108,7 @@ class _ShapMixin:
         The legacy non-binning path retains the best-effort exemption
         for linear leaves only.
         """
-        if not self._is_fitted:
-            raise RuntimeError("GBMRegressor must be fit before shap_values")
+        self._require_fitted()
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -232,10 +231,7 @@ class _ShapMixin:
         to the regressor feature's main effect (the diagonal of the interaction
         matrix), ensuring both row-marginal and full additivity are preserved.
         """
-        if not self._is_fitted:
-            raise RuntimeError(
-                "GBMRegressor must be fit before shap_interaction_values"
-            )
+        self._require_fitted()
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -339,8 +335,7 @@ class _ShapMixin:
         """Return feature importances for the provided rows."""
         if method != "shap":
             raise ValueError("unsupported feature importance method; expected 'shap'")
-        if not self._is_fitted:
-            raise RuntimeError("GBMRegressor must be fit before feature_importances")
+        self._require_fitted()
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
@@ -407,11 +402,10 @@ class _ShapMixin:
             shap_global_importance = _base._load_native_shap_global_importance()
             importance = shap_global_importance(self._artifact_bytes, rows)
         result = [(str(name), float(value)) for name, value in importance]
-        if self.feature_names_in_ is not None and len(result) == len(
-            self.feature_names_in_
-        ):
+        feature_names = getattr(self, "feature_names_in_", None)
+        if feature_names is not None and len(result) == len(feature_names):
             result = [
-                (self.feature_names_in_[i], score)
+                (feature_names[i], score)
                 for i, (_name, score) in enumerate(result)
             ]
         return result

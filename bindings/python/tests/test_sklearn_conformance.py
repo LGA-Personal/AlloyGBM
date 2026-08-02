@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import numpy as np
+import pytest
 from sklearn.base import (
     BaseEstimator,
     ClassifierMixin,
@@ -15,8 +17,19 @@ from sklearn.base import (
     is_classifier,
     is_regressor,
 )
+from sklearn.exceptions import NotFittedError
+from sklearn.utils.validation import check_is_fitted
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+
+
+def _small_regression_data() -> tuple[np.ndarray, np.ndarray]:
+    X = np.asarray(
+        [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+        dtype=np.float32,
+    )
+    y = np.asarray([0.0, 1.0, 1.0, 2.0], dtype=np.float32)
+    return X, y
 
 
 def test_regressor_mixin_precedes_base_estimator() -> None:
@@ -99,3 +112,90 @@ assert GBMRanker().get_params()["ranking_objective"] == "rank:ndcg"
     )
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("estimator", [GBMRegressor(), GBMClassifier(), GBMRanker()])
+def test_constructor_does_not_publish_learned_attributes(estimator: object) -> None:
+    learned = sorted(
+        name
+        for name in vars(estimator)
+        if name.endswith("_") and not name.startswith("_")
+    )
+
+    assert learned == []
+
+
+@pytest.mark.parametrize(
+    ("estimator", "operation"),
+    [
+        (GBMRegressor(), lambda model: model.predict([[0.0, 1.0]])),
+        (GBMRegressor(), lambda model: model.shap_values([[0.0, 1.0]])),
+        (GBMRegressor(), lambda model: model.feature_importances([[0.0, 1.0]])),
+        (GBMRegressor(), lambda model: model.artifact_bytes),
+        (GBMClassifier(), lambda model: model.predict([[0.0, 1.0]])),
+        (GBMClassifier(), lambda model: model.predict_proba([[0.0, 1.0]])),
+        (GBMRanker(), lambda model: model.predict([[0.0, 1.0]])),
+    ],
+)
+def test_unfitted_operations_raise_not_fitted_error(estimator, operation) -> None:
+    with pytest.raises(NotFittedError):
+        operation(estimator)
+
+    with pytest.raises(NotFittedError):
+        check_is_fitted(estimator)
+
+
+def test_successful_fit_and_load_publish_feature_schema(tmp_path: Path) -> None:
+    X, y = _small_regression_data()
+    model = GBMRegressor(n_estimators=1, max_depth=1).fit(X, y)
+
+    check_is_fitted(model)
+    assert model.n_features_in_ == 2
+    assert not hasattr(model, "feature_names_in_")
+
+    path = tmp_path / "schema.alloygbm"
+    model.save_model(str(path))
+    loaded = GBMRegressor.load_model(str(path))
+
+    check_is_fitted(loaded)
+    assert loaded.n_features_in_ == 2
+    assert not hasattr(loaded, "feature_names_in_")
+
+
+def test_feature_names_are_published_only_for_all_string_columns() -> None:
+    pd = pytest.importorskip("pandas")
+    _, y = _small_regression_data()
+
+    named = GBMRegressor(n_estimators=1, max_depth=1).fit(
+        pd.DataFrame([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], columns=["a", "b"]),
+        y,
+    )
+    mixed = GBMRegressor(n_estimators=1, max_depth=1).fit(
+        pd.DataFrame([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], columns=["a", 1]),
+        y,
+    )
+
+    np.testing.assert_array_equal(named.feature_names_in_, np.asarray(["a", "b"], dtype=object))
+    assert not hasattr(mixed, "feature_names_in_")
+
+
+def test_failed_fit_does_not_publish_partial_feature_schema() -> None:
+    pd = pytest.importorskip("pandas")
+    _, y = _small_regression_data()
+    X = pd.DataFrame(
+        [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+        columns=["a", "b"],
+    )
+    model = GBMRegressor(
+        categorical_feature_indices=[5],
+        n_estimators=1,
+        max_depth=1,
+    )
+
+    with pytest.raises(ValueError, match="feature bounds"):
+        model.fit(X, y, categorical_feature_values_list=[["x", "y", "x", "y"]])
+
+    assert not hasattr(model, "n_features_in_")
+    assert not hasattr(model, "feature_names_in_")
+    with pytest.raises(NotFittedError):
+        check_is_fitted(model)

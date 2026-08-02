@@ -26,28 +26,28 @@ class _PersistenceMixin:
         self._continuous_feature_maxs = None
         self._continuous_feature_sorted_values = None
         self._continuous_feature_quantile_cuts = None
-        self.feature_quantile_cut_methods_ = None
         self._continuous_feature_linear_rank_flags = None
-        self.feature_names_in_ = None
-        self.best_iteration_ = None
-        self.best_score_ = None
-        self.n_estimators_ = None
-        self.rounds_completed_ = None
-        self.stop_reason_ = None
-        self.diagnostics_per_round_ = None
-        self.resolved_training_policy_ = None
-        self.factor_exposure_diagnostics_ = None
-        self.feature_bundling_diagnostics_ = {
-            "active": False,
-            "original_feature_count": 0,
-            "effective_feature_count": 0,
-            "bundle_count": 0,
-            "bundled_feature_count": 0,
-            "skipped_feature_count": 0,
-            "observed_conflict_count": 0,
-        }
-        self.evals_result_ = None
-        self.fit_timing_ = None
+        self._native_cat_mappings_ = None
+        for attribute in (
+            "n_features_in_",
+            "feature_names_in_",
+            "feature_quantile_cut_methods_",
+            "best_iteration_",
+            "best_score_",
+            "n_estimators_",
+            "rounds_completed_",
+            "stop_reason_",
+            "diagnostics_per_round_",
+            "resolved_training_policy_",
+            "factor_exposure_diagnostics_",
+            "feature_bundling_diagnostics_",
+            "evals_result_",
+            "fit_timing_",
+            "classes_",
+            "n_classes_",
+        ):
+            if hasattr(self, attribute):
+                delattr(self, attribute)
         self._fit_neutralization = None
         self._fit_factor_neutralization_lambda = None
         self._fit_factor_penalty = None
@@ -79,7 +79,7 @@ class _PersistenceMixin:
             self.n_jobs = None
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
-        if not hasattr(self, "feature_bundling_diagnostics_"):
+        if self._is_fitted and not hasattr(self, "feature_bundling_diagnostics_"):
             self.feature_bundling_diagnostics_ = {
                 "active": False,
                 "original_feature_count": 0,
@@ -89,8 +89,19 @@ class _PersistenceMixin:
                 "skipped_feature_count": 0,
                 "observed_conflict_count": 0,
             }
-        if not hasattr(self, "resolved_training_policy_"):
+        if self._is_fitted and not hasattr(self, "resolved_training_policy_"):
             self.resolved_training_policy_ = None
+        if self._is_fitted:
+            self.n_features_in_ = int(self._n_features_in)
+            names = getattr(self, "feature_names_in_", None)
+            if names is not None:
+                import numpy as np
+
+                self.feature_names_in_ = np.asarray(names, dtype=object)
+            elif hasattr(self, "feature_names_in_"):
+                del self.feature_names_in_
+        else:
+            self._reset_fitted_state()
         self._native_predictor_handle = None
         self._float_thresholds_converted = False
         self._predictor_needs_rebuild = True
@@ -102,8 +113,7 @@ class _PersistenceMixin:
         metadata, training history) followed by the raw binary artifact.  Use
         :meth:`load_model` to restore.
         """
-        if not self._is_fitted:
-            raise ValueError("Model must be fitted before saving")
+        self._require_fitted()
         import json
 
         saved_params = self.get_params()
@@ -118,14 +128,22 @@ class _PersistenceMixin:
             "continuous_feature_maxs": self._continuous_feature_maxs,
             "continuous_feature_sorted_values": self._continuous_feature_sorted_values,
             "continuous_feature_quantile_cuts": self._continuous_feature_quantile_cuts,
-            "feature_quantile_cut_methods": self.feature_quantile_cut_methods_,
-            "feature_bundling_diagnostics": self.feature_bundling_diagnostics_,
+            "feature_quantile_cut_methods": getattr(
+                self, "feature_quantile_cut_methods_", None
+            ),
+            "feature_bundling_diagnostics": getattr(
+                self, "feature_bundling_diagnostics_", None
+            ),
             "continuous_feature_linear_rank_flags": self._continuous_feature_linear_rank_flags,
             "best_iteration": self.best_iteration_,
             "best_score": self.best_score_,
             "n_estimators_actual": self.n_estimators_,
             "evals_result": self.evals_result_,
-            "feature_names_in": self.feature_names_in_,
+            "feature_names_in": (
+                self.feature_names_in_.tolist()
+                if hasattr(self, "feature_names_in_")
+                else None
+            ),
             "resolved_training_policy": _resolved_training_policy_from_metadata(
                 self.resolved_training_policy_
             ),
@@ -194,6 +212,7 @@ class _PersistenceMixin:
         model = cls(**{k: v for k, v in params.items() if k in known})
         model._artifact_bytes = artifact_bytes
         model._n_features_in = metadata["n_features_in"]
+        model.n_features_in_ = int(model._n_features_in)
         model._uses_continuous_binning = metadata["uses_continuous_binning"]
         model._continuous_feature_mins = metadata.get("continuous_feature_mins")
         model._continuous_feature_maxs = metadata.get("continuous_feature_maxs")
@@ -225,7 +244,11 @@ class _PersistenceMixin:
         model.best_score_ = metadata.get("best_score")
         model.n_estimators_ = metadata.get("n_estimators_actual")
         model.evals_result_ = metadata.get("evals_result")
-        model.feature_names_in_ = metadata.get("feature_names_in")
+        saved_feature_names = metadata.get("feature_names_in")
+        if saved_feature_names is not None:
+            import numpy as np
+
+            model.feature_names_in_ = np.asarray(saved_feature_names, dtype=object)
         model.resolved_training_policy_ = _resolved_training_policy_from_metadata(
             metadata.get("resolved_training_policy")
         )
@@ -285,8 +308,7 @@ class _PersistenceMixin:
         The resulting file can be loaded with :meth:`predict_from_artifact` for
         lightweight deployment scenarios where retraining is not needed.
         """
-        if not self._is_fitted:
-            raise ValueError("Model must be fitted before saving artifact")
+        self._require_fitted()
         with open(path, "wb") as f:
             f.write(self._artifact_bytes)
 
@@ -297,8 +319,7 @@ class _PersistenceMixin:
         Can be stored externally (database, object store) and used with
         :meth:`predict_from_artifact` for serving without the full model.
         """
-        if not self._is_fitted:
-            raise ValueError("Model must be fitted to access artifact bytes")
+        self._require_fitted()
         return self._artifact_bytes
 
     @staticmethod

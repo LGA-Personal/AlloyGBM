@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+from sklearn.exceptions import NotFittedError
 
 
 def load_regressor_module():
@@ -273,22 +274,11 @@ class GBMRegressorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
             model.set_params(continuous_binning_max_bins=0)
 
-    def test_feature_bundling_contract_is_visible_before_fit(self) -> None:
+    def test_feature_bundling_contract_is_a_parameter_before_fit(self) -> None:
         model = GBMRegressor()
 
         self.assertIn("feature_bundling='off'", repr(model))
-        self.assertEqual(
-            model.feature_bundling_diagnostics_,
-            {
-                "active": False,
-                "original_feature_count": 0,
-                "effective_feature_count": 0,
-                "bundle_count": 0,
-                "bundled_feature_count": 0,
-                "skipped_feature_count": 0,
-                "observed_conflict_count": 0,
-            },
-        )
+        self.assertFalse(hasattr(model, "feature_bundling_diagnostics_"))
         with self.assertRaisesRegex(ValueError, "feature_bundling"):
             model.set_params(feature_bundling="unsafe")
 
@@ -299,7 +289,7 @@ class GBMRegressorContractTests(unittest.TestCase):
 
     def test_predict_requires_fit(self) -> None:
         model = GBMRegressor()
-        with self.assertRaisesRegex(RuntimeError, "must be fit"):
+        with self.assertRaises(NotFittedError):
             model.predict([])
 
     def test_predict_returns_numpy_array_from_cached_native_handle(self) -> None:
@@ -318,12 +308,12 @@ class GBMRegressorContractTests(unittest.TestCase):
 
     def test_shap_values_requires_fit(self) -> None:
         model = GBMRegressor()
-        with self.assertRaisesRegex(RuntimeError, "must be fit"):
+        with self.assertRaises(NotFittedError):
             model.shap_values([[1.0, 0.0]])
 
     def test_feature_importances_requires_fit(self) -> None:
         model = GBMRegressor()
-        with self.assertRaisesRegex(RuntimeError, "must be fit"):
+        with self.assertRaises(NotFittedError):
             model.feature_importances([[1.0, 0.0]])
 
     def test_fit_and_predict_use_native_bridges(self) -> None:
@@ -823,7 +813,7 @@ class GBMRegressorContractTests(unittest.TestCase):
     def test_set_params_binning_strategy_after_fit_requires_refit(self) -> None:
         model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
         model.set_params(continuous_binning_strategy="rank")
-        with self.assertRaisesRegex(RuntimeError, "must be fit"):
+        with self.assertRaises(NotFittedError):
             model.predict([[1.0, 0.0]])
 
     def test_shap_values_use_native_bridge_with_optional_expected_value(self) -> None:

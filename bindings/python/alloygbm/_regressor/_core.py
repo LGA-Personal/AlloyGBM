@@ -8,7 +8,7 @@ from numbers import Integral
 
 import numpy as np
 
-from .._sklearn_compat import _RegressorMixin
+from .._sklearn_compat import _RegressorMixin, _check_is_fitted
 from ._validation import _ValidationMixin, _resolved_training_policy_to_dict
 from ._quantization import _QuantizationMixin
 from ._shap import _ShapMixin
@@ -498,26 +498,8 @@ class _GBMEstimatorCore(
         self._continuous_feature_maxs: list[float] | None = None
         self._continuous_feature_sorted_values: list[list[float]] | None = None
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
-        self.feature_quantile_cut_methods_: list[str] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
-        self.feature_names_in_: list[str] | None = None
         self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
-        self.best_iteration_: int | None = None
-        self.best_score_: float | None = None
-        self.n_estimators_: int | None = None
-        self.evals_result_: dict[str, dict[str, list[float]]] | None = None
-        self.fit_timing_: dict[str, float] | None = None
-        self.diagnostics_per_round_: list[dict] | None = None
-        self.factor_exposure_diagnostics_: dict | None = None
-        self.feature_bundling_diagnostics_: dict[str, int | bool] = {
-            "active": False,
-            "original_feature_count": 0,
-            "effective_feature_count": 0,
-            "bundle_count": 0,
-            "bundled_feature_count": 0,
-            "skipped_feature_count": 0,
-            "observed_conflict_count": 0,
-        }
 
     def __repr__(self) -> str:
         return (
@@ -1330,6 +1312,8 @@ class _GBMEstimatorCore(
         """
         fit_start = time.perf_counter()
         self._fit_start_time = fit_start
+        if not self.warm_start:
+            self._reset_fitted_state()
         targets = self._validate_targets(y)
         obj = self._objective_name()
         if obj == "quantile":
@@ -1513,17 +1497,6 @@ class _GBMEstimatorCore(
             raise ValueError("eval_sample_weight requires eval_set to be provided")
         if eval_group is not None and eval_set is None:
             raise ValueError("eval_group requires eval_set to be provided")
-
-        # Capture feature names from DataFrame columns if available.
-        columns = getattr(X, "columns", None)
-        if columns is not None:
-            names = [str(c) for c in columns]
-            if len(names) == feature_count:
-                self.feature_names_in_ = names
-            else:
-                self.feature_names_in_ = None
-        else:
-            self.feature_names_in_ = None
 
         if has_categorical:
             assert effective_categorical_indices is not None
@@ -2139,6 +2112,7 @@ class _GBMEstimatorCore(
             "total_fit_seconds": float(total_fit_seconds),
         }
         self._record_fit_neutralization_contract()
+        self._publish_fitted_schema(X, feature_count)
         self._is_fitted = True
         self._record_post_fit_factor_exposure_diagnostics(
             X, transformed_factor_exposures
@@ -2195,6 +2169,10 @@ class _GBMEstimatorCore(
             "total_fit_seconds": float(total_fit_seconds),
         }
         self._record_fit_neutralization_contract()
+        if fit_X is not None:
+            self._publish_fitted_schema(fit_X, self._n_features_in)
+        else:
+            self.n_features_in_ = int(self._n_features_in)
         self._is_fitted = True
         if fit_X is not None:
             self._record_post_fit_factor_exposure_diagnostics(
@@ -2226,6 +2204,19 @@ class _GBMEstimatorCore(
             "skipped_feature_count": int(diagnostics.skipped_feature_count),
             "observed_conflict_count": int(diagnostics.observed_conflict_count),
         }
+
+    def _publish_fitted_schema(self, X: object, feature_count: int) -> None:
+        self.n_features_in_ = int(feature_count)
+        columns = getattr(X, "columns", None)
+        if columns is not None:
+            names = list(columns)
+            if len(names) == feature_count and all(
+                isinstance(name, str) for name in names
+            ):
+                self.feature_names_in_ = np.asarray(names, dtype=object)
+                return
+        if hasattr(self, "feature_names_in_"):
+            del self.feature_names_in_
 
     def _fit_with_legacy_native_bridge(
         self,
@@ -2636,6 +2627,7 @@ class _GBMEstimatorCore(
             "total_fit_seconds": float(total_fit_seconds),
         }
         self._record_fit_neutralization_contract()
+        self._publish_fitted_schema(X, feature_count)
         self._is_fitted = True
         self._record_post_fit_factor_exposure_diagnostics(
             X, transformed_factor_exposures
@@ -2650,8 +2642,7 @@ class _GBMEstimatorCore(
 
     def predict(self, X: object) -> np.ndarray:
         """Predict using the fitted native artifact."""
-        if not self._is_fitted:
-            raise RuntimeError("GBMRegressor must be fit before predict")
+        self._require_fitted()
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
         # Lazily reconstruct the native predictor after pickle roundtrip.
@@ -2894,6 +2885,12 @@ class _GBMEstimatorCore(
         predictions = self.predict(X)
         targets = self._validate_targets(y)
         return float(r2_score(targets, predictions))
+
+    def __sklearn_is_fitted__(self) -> bool:
+        return bool(self._is_fitted and self._artifact_bytes is not None)
+
+    def _require_fitted(self) -> None:
+        _check_is_fitted(self)
 
     def __sklearn_tags__(self):
         if not hasattr(super(), "__sklearn_tags__"):

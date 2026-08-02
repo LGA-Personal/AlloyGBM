@@ -226,8 +226,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
 
     def _predict_proba_multiclass(self, X: object) -> np.ndarray:
         """Multi-class prediction using native multi-class predictor."""
-        if not self._is_fitted:
-            raise RuntimeError("GBMClassifier must be fit before predict")
+        self._require_fitted()
         if self._artifact_bytes is None:
             raise RuntimeError("GBMClassifier native artifact is not available")
 
