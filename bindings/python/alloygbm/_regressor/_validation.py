@@ -137,8 +137,28 @@ class _ValidationMixin:
 
     @staticmethod
     def _validate_numeric_features(X: object) -> object:
+        preserves_input = isinstance(X, Sequence) or any(
+            hasattr(X, adapter) for adapter in ("to_numpy", "to_list", "tolist")
+        )
+        validation_input = X
+        if (
+            preserves_input
+            and not isinstance(X, Sequence)
+            and not hasattr(X, "shape")
+            and not hasattr(X, "__array__")
+            and not hasattr(X, "__array_namespace__")
+        ):
+            validation_input = GBMRegressor._coerce_sequence_like(X, "X")
+        elif (
+            not preserves_input
+            and X is not None
+            and not hasattr(X, "shape")
+            and not hasattr(X, "__array__")
+            and not hasattr(X, "__array_namespace__")
+        ):
+            validation_input = GBMRegressor._coerce_sequence_like(X, "X")
         validated = _check_array(
-            X,
+            validation_input,
             accept_sparse=False,
             dtype="numeric",
             ensure_all_finite="allow-nan",
@@ -146,9 +166,7 @@ class _ValidationMixin:
             ensure_min_samples=1,
             ensure_min_features=1,
         )
-        if hasattr(X, "columns") and hasattr(X, "to_numpy"):
-            return X
-        return validated
+        return X if preserves_input else validated
 
     def _prepare_factor_exposures(self, factor_exposures, n_rows: int):
         if self.neutralization == "none":
@@ -602,7 +620,16 @@ class _ValidationMixin:
     def _validate_targets(y: object) -> list[float]:
         import numpy as np
 
-        targets_like = _column_or_1d(y, warn=True)
+        target_input = y
+        if (
+            y is not None
+            and not isinstance(y, Sequence)
+            and not hasattr(y, "shape")
+            and not hasattr(y, "__array__")
+            and not hasattr(y, "__array_namespace__")
+        ):
+            target_input = GBMRegressor._coerce_sequence_like(y, "y")
+        targets_like = _column_or_1d(target_input, warn=True)
         if len(targets_like) == 0:
             raise ValueError("Found array with 0 sample(s) in y; a minimum of 1 is required")
         if np.iscomplexobj(targets_like):

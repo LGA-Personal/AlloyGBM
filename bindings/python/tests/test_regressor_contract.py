@@ -1060,7 +1060,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             )
             try:
                 model = GBMRegressor().fit([[1.0, 2.0], [3.0, 4.0]], [1.0, 2.0])
-                with self.assertRaisesRegex(ValueError, "feature count"):
+                with self.assertRaisesRegex(ValueError, "X has 1 features"):
                     model.predict([[1.0]])
             finally:
                 base_module._load_native_train_regression_artifact = (
