@@ -160,6 +160,84 @@ mod tests {
         assert!((gradient_gain(&inputs) - expected).abs() < 1e-6);
     }
 
+    // ── Cross-path parent-baseline invariant (guards DRO / PL optimization) ──
+    //
+    // The split gain's parent (no-split) term MUST be the parent node's OWN
+    // effective-gradient leaf gain, computed from the parent's aggregate stats
+    // — never the sum of the children's effective-gradient leaf gains.  Under a
+    // linear leaf transform (default Newton) `eff(g_l) + eff(g_r) == eff(g_l +
+    // g_r)`, so the two agree and the distinction is invisible.  Under any
+    // non-linear transform (L1 soft-threshold, DRO shrinkage — and, in future,
+    // PL ridge leaves) they diverge, and only `eff(parent_totals)` is correct.
+    //
+    // This pins morph's parent term to the standard-path building block
+    // `alloygbm_core::leaf_gain_term` (which the ordinary scanner already
+    // computes from `l1_threshold_gradient(total_grad)` = `eff(parent_totals)`),
+    // and proves it differs from the `eff(g_l) + eff(g_r)` baseline that would
+    // silently reappear if a future refactor reconstructed the parent from its
+    // children.  `gradient_gain` uses `g^2/(h+λ+ε)`; `2 * leaf_gain_term` is
+    // `2 * 0.5 * eff^2/(h+l2+ε) = eff^2/(h+l2+ε)`, with matching `ε = 1e-6`, so
+    // the two forms are exactly equal per side.
+    fn assert_parent_baseline_matches_standard(
+        l1_alpha: f32,
+        dro: Option<&alloygbm_core::DroConfig>,
+    ) {
+        use alloygbm_core::{leaf_effective_gradient, leaf_gain_term};
+        // Raw per-side aggregates chosen so the non-linear transform makes
+        // eff(left) + eff(right) != eff(parent).
+        let (gl, hl, cl, gsl) = (4.0_f32, 4.0_f32, 40_u32, 6.0_f32);
+        let (gr, hr, cr, gsr) = (-1.5_f32, 4.0_f32, 40_u32, 5.0_f32);
+        let (gp, hp, cp, gsp) = (gl + gr, hl + hr, cl + cr, gsl + gsr);
+        let lambda_l2 = 1.0_f32;
+
+        let eff = |g, gsq, c| leaf_effective_gradient(g, gsq, c, l1_alpha, dro);
+        let inputs = MorphGainInputs {
+            parent: side(eff(gp, gsp, cp), eff(gp, gsp, cp), hp, cp),
+            left: side(eff(gl, gsl, cl), eff(gl, gsl, cl), hl, cl),
+            right: side(eff(gr, gsr, cr), eff(gr, gsr, cr), hr, cr),
+            iteration: 3,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            lambda_l2,
+        };
+
+        // Standard-path decomposition: 2 * leaf_gain_term per side, parent from
+        // its own aggregates. `gradient_gain` must reproduce this exactly.
+        let side_term = |g, h, gsq, c| 2.0 * leaf_gain_term(g, h, gsq, c, l1_alpha, lambda_l2, dro);
+        let standard =
+            side_term(gl, hl, gsl, cl) + side_term(gr, hr, gsr, cr) - side_term(gp, hp, gsp, cp);
+        assert!(
+            (gradient_gain(&inputs) - standard).abs() < 1e-6,
+            "morph parent term must match core::leaf_gain_term on parent aggregates"
+        );
+
+        // The buggy sum-of-children parent baseline must be measurably different,
+        // so this test actually locks out the regression.
+        let buggy_parent = eff(gl, gsl, cl) + eff(gr, gsr, cr);
+        let buggy = side_term(gl, hl, gsl, cl) + side_term(gr, hr, gsr, cr)
+            - buggy_parent * buggy_parent / (hp + lambda_l2 + GAIN_EPSILON);
+        assert!(
+            (gradient_gain(&inputs) - buggy).abs() > 1e-4,
+            "under a non-linear transform the correct parent term must differ \
+             from the sum-of-children baseline"
+        );
+    }
+
+    #[test]
+    fn morph_parent_baseline_matches_standard_leaf_gain_under_l1() {
+        assert_parent_baseline_matches_standard(0.5, None);
+    }
+
+    #[test]
+    fn morph_parent_baseline_matches_standard_leaf_gain_under_dro() {
+        let dro = alloygbm_core::DroConfig {
+            radius: 0.5,
+            metric: alloygbm_core::DroMetric::Wasserstein,
+        };
+        assert_parent_baseline_matches_standard(0.0, Some(&dro));
+    }
+
     fn balanced_inputs(iteration: u32) -> MorphGainInputs {
         MorphGainInputs {
             parent: side(0.0, 0.0, 8.0, 100),
