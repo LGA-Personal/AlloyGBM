@@ -137,29 +137,24 @@ mod tests {
     #[test]
     fn standard_split_scan_scratch_never_allocates_gradient_square() {
         let capacities = std::thread::spawn(|| {
-            let initial = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
-                cell.borrow().cumulative_grad_sq.capacity()
-            });
+            let initial =
+                THREAD_SPLIT_SCAN_SCRATCH.with(|cell| cell.borrow().cumulative_grad_sq.capacity());
 
             with_split_scan_scratch(257, |_, _, _| {});
-            let after_first_standard = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
-                cell.borrow().cumulative_grad_sq.capacity()
-            });
+            let after_first_standard =
+                THREAD_SPLIT_SCAN_SCRATCH.with(|cell| cell.borrow().cumulative_grad_sq.capacity());
 
             with_split_scan_scratch(17, |_, _, _| {});
-            let after_second_standard = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
-                cell.borrow().cumulative_grad_sq.capacity()
-            });
+            let after_second_standard =
+                THREAD_SPLIT_SCAN_SCRATCH.with(|cell| cell.borrow().cumulative_grad_sq.capacity());
 
             with_dro_split_scan_scratch(19, |_, _, _, _| {});
-            let after_dro = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
-                cell.borrow().cumulative_grad_sq.capacity()
-            });
+            let after_dro =
+                THREAD_SPLIT_SCAN_SCRATCH.with(|cell| cell.borrow().cumulative_grad_sq.capacity());
 
             with_split_scan_scratch(513, |_, _, _| {});
-            let after_final_standard = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
-                cell.borrow().cumulative_grad_sq.capacity()
-            });
+            let after_final_standard =
+                THREAD_SPLIT_SCAN_SCRATCH.with(|cell| cell.borrow().cumulative_grad_sq.capacity());
 
             (
                 initial,

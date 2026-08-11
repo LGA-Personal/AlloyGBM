@@ -3189,15 +3189,7 @@ fn dro_simd_keeps_row_minimum_exact_above_f32_precision_limit() {
             },
         ],
     };
-    let options = dro_scan_options(
-        0.05,
-        0.0,
-        1.0,
-        16_777_217,
-        0.0,
-        0.0,
-        3,
-    );
+    let options = dro_scan_options(0.05, 0.0, 1.0, 16_777_217, 0.0, 0.0, 3);
 
     let (scalar, simd) = dro_simd_and_scalar_candidates(&feature, 23, options);
     let scalar = scalar.expect("exact row minimum should leave one valid threshold");

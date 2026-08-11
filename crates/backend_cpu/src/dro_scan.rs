@@ -261,8 +261,8 @@ pub(crate) fn best_split_dro_numeric_simd(
                             (half_v * effective_right_v * effective_right_v / right_denom) * two_v;
                         let gain_v = left_gain_term + right_gain_term - parent_gain_term_v;
 
-                        let valid_mask = left_hess_v.cmp_gt(min_hessian_v)
-                            & right_hess_v.cmp_gt(min_hessian_v);
+                        let valid_mask =
+                            left_hess_v.cmp_gt(min_hessian_v) & right_hess_v.cmp_gt(min_hessian_v);
                         let valid_mask = if options.min_leaf_magnitude > 0.0 {
                             let leaf_magnitude_ok = (effective_left_v.abs() / left_denom)
                                 .cmp_ge(min_leaf_magnitude_v)
@@ -283,8 +283,8 @@ pub(crate) fn best_split_dro_numeric_simd(
                                 || (effective_right_count_values[lane] as usize)
                                     < options.min_rows_per_leaf
                                 || (threshold_bin + 1 >= scan_limit
-                                && non_missing_count == cumulative_count[threshold_bin]
-                            ) {
+                                    && non_missing_count == cumulative_count[threshold_bin])
+                            {
                                 *gain = f32::NEG_INFINITY;
                             }
                         }
@@ -377,7 +377,12 @@ mod tests {
 
         reduce_dro_gain_lanes(
             [1.0, 1.0000020, f32::NEG_INFINITY, f32::NEG_INFINITY],
-            [1.0000015, f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            [
+                1.0000015,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
             0,
             2,
             &mut best_gain,
