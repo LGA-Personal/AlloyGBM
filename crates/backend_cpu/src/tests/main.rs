@@ -2881,3 +2881,637 @@ fn categorical_split_scanner_skips_candidates_below_min_rows_per_leaf() {
     assert!(split.left_stats.row_count >= 4);
     assert!(split.right_stats.row_count >= 4);
 }
+
+fn dro_scan_options(
+    radius: f32,
+    l1_alpha: f32,
+    l2_lambda: f32,
+    min_rows_per_leaf: usize,
+    min_child_hessian: f32,
+    min_leaf_magnitude: f32,
+    missing_bin_index: usize,
+) -> SplitSelectionOptions {
+    SplitSelectionOptions {
+        l1_alpha,
+        l2_lambda,
+        min_child_hessian,
+        min_rows_per_leaf,
+        min_leaf_magnitude,
+        dro_config: Some(alloygbm_core::DroConfig {
+            radius,
+            metric: alloygbm_core::DroMetric::Wasserstein,
+        }),
+        missing_bin_index,
+    }
+}
+
+fn dro_random_feature(bin_count: usize, seed: u32, missing_bin_index: usize) -> FeatureHistogram {
+    let mut state = 0xA341_316C_u32 ^ seed ^ bin_count as u32;
+    let bins = (0..bin_count)
+        .map(|index| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let gradient = ((state >> 8) as i16 as f32) / 4096.0;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let count = 1 + state % 13;
+            let hess_sum = 0.05 + (state % 2_000) as f32 / 1_000.0;
+            let variance_per_row = 0.01 + (state % 17) as f32 / 100.0;
+            let grad_sq_sum = gradient * gradient / count as f32 + variance_per_row;
+            let mut bin = HistogramBin {
+                grad_sum: gradient,
+                hess_sum,
+                grad_sq_sum: grad_sq_sum * count as f32,
+                count,
+            };
+            if index == missing_bin_index {
+                bin.grad_sum = -gradient * 1.7;
+                bin.hess_sum += 0.4;
+                bin.grad_sq_sum += 0.8 * count as f32;
+                bin.count += 3;
+            }
+            bin
+        })
+        .collect();
+    FeatureHistogram {
+        feature_index: seed + 3,
+        bins,
+    }
+}
+
+fn assert_dro_split_candidates_match(
+    scalar: Option<&SplitCandidate>,
+    simd: Option<&SplitCandidate>,
+) {
+    match (scalar, simd) {
+        (Some(scalar), Some(simd)) => {
+            assert_eq!(scalar.node_id, simd.node_id);
+            assert_eq!(scalar.feature_index, simd.feature_index);
+            assert_eq!(scalar.threshold_bin, simd.threshold_bin);
+            assert_eq!(scalar.default_left, simd.default_left);
+            let tolerance = 1e-5_f32.max(1e-5 * scalar.gain.abs());
+            assert!(
+                (scalar.gain - simd.gain).abs() <= tolerance,
+                "DRO gain drift: scalar={} simd={} tolerance={tolerance}",
+                scalar.gain,
+                simd.gain
+            );
+            assert_eq!(scalar.left_stats, simd.left_stats);
+            assert_eq!(scalar.right_stats, simd.right_stats);
+        }
+        (None, None) => {}
+        (scalar, simd) => panic!(
+            "DRO scalar/SIMD disagree on Some-ness: scalar={}, simd={}",
+            scalar.is_some(),
+            simd.is_some()
+        ),
+    }
+}
+
+fn dro_simd_and_scalar_candidates(
+    feature: &FeatureHistogram,
+    node_id: u32,
+    options: SplitSelectionOptions,
+) -> (Option<SplitCandidate>, Option<SplitCandidate>) {
+    let scalar = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_inner(
+            view,
+            node_id,
+            options,
+            GainStrategy::Standard,
+            None,
+        )
+    });
+    let simd = with_histogram_feature(feature, |view| {
+        crate::dro_scan::best_split_dro_numeric_simd(view, node_id, options)
+    });
+    assert_dro_split_candidates_match(scalar.as_ref(), simd.as_ref());
+    (scalar, simd)
+}
+
+#[test]
+fn dro_simd_matches_scalar_across_bin_counts_radii_regularization_and_missing_directions() {
+    for &bin_count in &[16_usize, 64, 255] {
+        for seed in 0..4_u32 {
+            let missing_bin_index = if seed % 2 == 0 {
+                bin_count - 1
+            } else {
+                bin_count
+            };
+            let feature = dro_random_feature(bin_count, seed, missing_bin_index);
+            for &radius in &[0.001_f32, 0.05, 0.5] {
+                for &l1_alpha in &[0.0_f32, 0.1, 1.0] {
+                    let options =
+                        dro_scan_options(radius, l1_alpha, 0.7, 1, 0.0, 0.0, missing_bin_index);
+                    dro_simd_and_scalar_candidates(&feature, 17, options);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dro_simd_routes_missing_mass_left_and_right_with_exact_child_statistics() {
+    let make_feature = |missing_gradient: f32| FeatureHistogram {
+        feature_index: 4,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 10.0,
+                hess_sum: 10.0,
+                grad_sq_sum: 10.0,
+                count: 10,
+            },
+            HistogramBin {
+                grad_sum: -10.0,
+                hess_sum: 10.0,
+                grad_sq_sum: 10.0,
+                count: 10,
+            },
+            HistogramBin {
+                grad_sum: missing_gradient,
+                hess_sum: 10.0,
+                grad_sq_sum: 10.0,
+                count: 10,
+            },
+        ],
+    };
+    let options = dro_scan_options(0.05, 0.0, 1.0, 1, 0.0, 0.0, 2);
+
+    let (missing_left, _) = dro_simd_and_scalar_candidates(&make_feature(10.0), 3, options);
+    assert!(
+        missing_left
+            .as_ref()
+            .expect("missing-left split")
+            .default_left
+    );
+
+    let (missing_right, _) = dro_simd_and_scalar_candidates(&make_feature(-10.0), 3, options);
+    assert!(
+        !missing_right
+            .as_ref()
+            .expect("missing-right split")
+            .default_left
+    );
+}
+
+// Golden-reference parent-baseline invariant for the DRO scanner.
+//
+// The scalar/SIMD parity tests cross-check the two scanners against each other,
+// but that shares a blind spot: a parent-term regression applied to *both*
+// paths would still pass.  This test instead pins the DRO SIMD gain to an
+// independent `alloygbm_core::leaf_gain_term` reference whose parent term is
+// computed from the node's OWN aggregates — never `eff(left) + eff(right)` —
+// and proves that the sum-of-children baseline is measurably different.  Under
+// DRO's non-linear shrinkage the two diverge (they coincide only for a linear
+// leaf transform), so this guards the invariant for the DRO path and the
+// upcoming PL work.  Mirrors `morph_parent_baseline_matches_standard_leaf_gain_*`.
+#[test]
+fn dro_simd_parent_baseline_matches_core_leaf_gain_not_sum_of_children() {
+    use alloygbm_core::{DroConfig, DroMetric, leaf_effective_gradient, leaf_gain_term};
+
+    // Two data bins whose per-side variances differ enough that DRO shrinkage
+    // makes eff(parent) != eff(l) + eff(r) while leaving all three effective
+    // gradients clearly nonzero — so the test is sensitive to *any* parent
+    // miscalculation, not only the exact sum-of-children value.
+    let feature = FeatureHistogram {
+        feature_index: 7,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 8.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 21.6,
+                count: 40,
+            },
+            HistogramBin {
+                grad_sum: 1.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 4.025,
+                count: 40,
+            },
+        ],
+    };
+    let (radius, l1, l2) = (0.1_f32, 0.0_f32, 0.7_f32);
+    let dro = DroConfig {
+        radius,
+        metric: DroMetric::Wasserstein,
+    };
+    // `missing_bin_index` past the two bins => no missing mass, single interior
+    // split at threshold 0 (left = bin 0, right = bin 1).
+    let options = dro_scan_options(radius, l1, l2, 1, 0.0, 0.0, 5);
+    let candidate = with_histogram_feature(&feature, |view| {
+        crate::dro_scan::best_split_dro_numeric_simd(view, 17, options)
+    })
+    .expect("dro split exists");
+    assert_eq!(candidate.threshold_bin, 0);
+
+    // Independent reference: 2*leaf_gain_term per side, parent from its own
+    // aggregates. `leaf_gain_term` is `0.5 * eff^2/(h+l2+eps)`, so `2*` matches
+    // the scanner's `eff^2/(h+l2+eps)` gain term exactly.
+    let lgt = |g, h, gsq, c| leaf_gain_term(g, h, gsq, c, l1, l2, Some(&dro));
+    let (gp, hp, gsp, cp) = (8.0_f32 + 1.0, 4.0_f32 + 4.0, 21.6_f32 + 4.025, 80_u32);
+    let reference =
+        2.0 * lgt(8.0, 4.0, 21.6, 40) + 2.0 * lgt(1.0, 4.0, 4.025, 40) - 2.0 * lgt(gp, hp, gsp, cp);
+    assert!(
+        (candidate.gain - reference).abs() <= 1e-5 * reference.abs().max(1.0),
+        "DRO SIMD gain must equal core::leaf_gain_term with the parent from totals: \
+         got {} expected {}",
+        candidate.gain,
+        reference,
+    );
+
+    // The buggy sum-of-children parent baseline must differ, so this actually
+    // locks out the regression rather than tautologically passing.
+    let eff = |g, gsq, c| leaf_effective_gradient(g, gsq, c, l1, Some(&dro));
+    let buggy_parent = eff(8.0, 21.6, 40) + eff(1.0, 4.025, 40);
+    let buggy = 2.0 * lgt(8.0, 4.0, 21.6, 40) + 2.0 * lgt(1.0, 4.0, 4.025, 40)
+        - buggy_parent * buggy_parent / (hp + l2 + 1e-6);
+    assert!(
+        (reference - buggy).abs() > 1e-4,
+        "fixture must distinguish the sum-of-children parent regression",
+    );
+}
+
+#[test]
+fn dro_simd_handles_tail_lengths_zero_variance_and_cancellation() {
+    for tail in 1..=3_usize {
+        let bin_count = 4 + tail;
+        let feature = dro_random_feature(bin_count, tail as u32 + 40, bin_count);
+        dro_simd_and_scalar_candidates(
+            &feature,
+            19,
+            dro_scan_options(0.05, 0.1, 1.0, 1, 0.0, 0.0, bin_count),
+        );
+    }
+
+    let cancellation = FeatureHistogram {
+        feature_index: 5,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 1_000.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 250_000.0,
+                count: 4,
+            },
+            HistogramBin {
+                grad_sum: -800.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 160_000.0,
+                count: 4,
+            },
+            HistogramBin {
+                grad_sum: 200.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 10_000.0,
+                count: 4,
+            },
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 0.0,
+                count: 4,
+            },
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                count: 0,
+            },
+        ],
+    };
+    dro_simd_and_scalar_candidates(
+        &cancellation,
+        23,
+        dro_scan_options(0.5, 1.0, 2.0, 2, 0.5, 0.001, 5),
+    );
+}
+
+#[test]
+fn dro_simd_applies_minimum_constraints_and_rejects_invalid_edges() {
+    let feature = FeatureHistogram {
+        feature_index: 6,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 3.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 9.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 1.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -2.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 4.0,
+                count: 10,
+            },
+        ],
+    };
+    let (_, simd) = dro_simd_and_scalar_candidates(
+        &feature,
+        29,
+        dro_scan_options(0.05, 0.0, 1.0, 2, 0.0, 0.0, 3),
+    );
+    let split = simd.expect("the middle split meets the row minimum");
+    assert!(
+        split.threshold_bin < 2,
+        "the final edge threshold must be rejected"
+    );
+
+    let (_, no_rows) = dro_simd_and_scalar_candidates(
+        &feature,
+        29,
+        dro_scan_options(0.05, 0.0, 1.0, 20, 0.0, 0.0, 3),
+    );
+    assert!(no_rows.is_none());
+
+    let (_, no_hessian) = dro_simd_and_scalar_candidates(
+        &feature,
+        29,
+        dro_scan_options(0.05, 0.0, 1.0, 1, 1.1, 0.0, 3),
+    );
+    assert!(no_hessian.is_none());
+
+    let (_, no_leaf_magnitude) = dro_simd_and_scalar_candidates(
+        &feature,
+        29,
+        dro_scan_options(0.05, 0.0, 1.0, 1, 0.0, 100.0, 3),
+    );
+    assert!(no_leaf_magnitude.is_none());
+}
+
+#[test]
+fn dro_simd_keeps_row_minimum_exact_above_f32_precision_limit() {
+    let feature = FeatureHistogram {
+        feature_index: 21,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 100.0,
+                hess_sum: 16_777_216.0,
+                grad_sq_sum: 10_000.0,
+                count: 16_777_216,
+            },
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -100.0,
+                hess_sum: 16_777_217.0,
+                grad_sq_sum: 10_000.0,
+                count: 16_777_217,
+            },
+        ],
+    };
+    let options = dro_scan_options(0.05, 0.0, 1.0, 16_777_217, 0.0, 0.0, 3);
+
+    let (scalar, simd) = dro_simd_and_scalar_candidates(&feature, 23, options);
+    let scalar = scalar.expect("exact row minimum should leave one valid threshold");
+    assert_eq!(scalar.threshold_bin, 1);
+    assert_dro_split_candidates_match(Some(&scalar), simd.as_ref());
+}
+
+#[test]
+fn dro_simd_masks_non_finite_gain_and_requires_gradient_square_plane() {
+    let non_finite = FeatureHistogram {
+        feature_index: 7,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 1.0,
+                hess_sum: -1e-6,
+                grad_sq_sum: 1.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 1.0,
+                count: 5,
+            },
+            HistogramBin {
+                grad_sum: 0.2,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.2,
+                count: 5,
+            },
+        ],
+    };
+    dro_simd_and_scalar_candidates(
+        &non_finite,
+        31,
+        dro_scan_options(0.05, 0.0, 0.0, 1, -1.0, 0.0, 3),
+    );
+
+    let bundle = HistogramBundle::from_feature_histograms(0, vec![non_finite], false)
+        .expect("histogram without gradient-square plane");
+    let view = bundle
+        .feature(0)
+        .expect("feature without gradient-square plane");
+    assert!(
+        crate::dro_scan::best_split_dro_numeric_simd(
+            view,
+            31,
+            dro_scan_options(0.05, 0.0, 0.0, 1, 0.0, 0.0, 3),
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn dro_simd_nested_rayon_calls_keep_thread_local_scratch_isolated() {
+    let features = (0..16_u32)
+        .map(|feature_index| dro_random_feature(17, feature_index + 100, 17))
+        .map(|mut feature| {
+            feature.feature_index %= 16;
+            feature
+        })
+        .collect::<Vec<_>>();
+    let histograms = HistogramBundle::from_feature_histograms(7, features, true)
+        .expect("DRO nested parallel histogram fixture");
+    let options = dro_scan_options(0.05, 0.1, 0.5, 1, 0.0, 0.0, 17);
+    let expected = histograms
+        .features()
+        .filter_map(|view| {
+            CpuBackend::best_split_for_feature_inner(
+                view,
+                histograms.node_id,
+                options,
+                GainStrategy::Standard,
+                None,
+            )
+        })
+        .reduce(|left, right| {
+            if gain_materially_exceeds(right.gain, left.gain) {
+                right
+            } else {
+                left
+            }
+        });
+
+    let nested_histograms = histograms.clone();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("DRO nested split test pool");
+    let actual = pool.install(|| {
+        CpuBackend::best_split_with_options_internal(&nested_histograms, options, &[], &[], None)
+    });
+    assert_dro_split_candidates_match(expected.as_ref(), actual.as_ref());
+}
+
+#[test]
+fn dro_routing_uses_dedicated_numeric_scanner_and_radius_zero_uses_standard_simd() {
+    let feature = dro_random_feature(32, 91, 31);
+    let active = dro_scan_options(0.05, 0.1, 0.5, 1, 0.0, 0.0, 31);
+    let active_production = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature(view, 11, active, None)
+    });
+    let active_simd = with_histogram_feature(&feature, |view| {
+        crate::dro_scan::best_split_dro_numeric_simd(view, 11, active)
+    });
+    assert_dro_split_candidates_match(active_simd.as_ref(), active_production.as_ref());
+
+    let radius_zero = dro_scan_options(0.0, 0.1, 0.5, 1, 0.0, 0.0, 31);
+    let routed = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature(view, 11, radius_zero, None)
+    });
+    let standard_simd = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 11, radius_zero)
+    });
+    assert_split_candidates_match(routed.as_ref(), standard_simd.as_ref());
+}
+
+#[test]
+fn dro_factor_and_morph_combinations_retain_scalar_fallbacks() {
+    let mut feature = dro_random_feature(8, 113, 7);
+    feature.feature_index = 0;
+    let options = dro_scan_options(0.05, 0.1, 0.5, 1, 0.0, 0.0, 7);
+    let matrix = sample_binned_matrix();
+    let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, 1.0, -1.0, -1.0])
+        .expect("factor exposure fixture");
+    let node = sample_node();
+    let factor_context = FactorSplitContext {
+        binned_matrix: &matrix,
+        exposures: &exposures,
+        row_indices: &node.row_indices,
+        factor_penalty: 0.1,
+    };
+    let factor_routed = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature(view, 13, options, Some(&factor_context))
+    });
+    let factor_scalar = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature_inner(
+            view,
+            13,
+            options,
+            GainStrategy::Standard,
+            Some(&factor_context),
+        )
+    });
+    assert_dro_split_candidates_match(factor_scalar.as_ref(), factor_routed.as_ref());
+
+    let config = alloygbm_core::MorphConfig {
+        morph_warmup_iters: 0,
+        ..alloygbm_core::MorphConfig::default()
+    };
+    let morph = MorphContext {
+        iteration: 20,
+        total_iterations: 100,
+        grad_mean: 0.0,
+        grad_std: 1.0,
+        config,
+        precomputed: alloygbm_core::MorphPrecomputed::for_iteration(20, 100, &config),
+    };
+    let morph_routed = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_morph_numeric_feature(view, 13, &options, &morph, None)
+    });
+    let morph_scalar = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature_inner(
+            view,
+            13,
+            options,
+            GainStrategy::Morph(&morph),
+            None,
+        )
+    });
+    assert_dro_split_candidates_match(morph_scalar.as_ref(), morph_routed.as_ref());
+}
+
+#[test]
+fn dro_categorical_production_dispatch_retains_scalar_fallback() {
+    use alloygbm_engine::CategoricalFeatureInfo;
+
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: -4.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 8.0,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: -3.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 4.5,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: 3.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 4.5,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: 4.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 8.0,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: 0.75,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.75 * 0.75,
+                count: 3,
+            },
+        ],
+    };
+    let histograms = HistogramBundle::from_feature_histograms(0, vec![feature.clone()], true)
+        .expect("valid categorical DRO histogram bundle");
+    let options = SplitSelectionOptions {
+        l2_lambda: 0.7,
+        l1_alpha: 0.25,
+        min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
+        min_leaf_magnitude: 0.05,
+        dro_config: Some(alloygbm_core::DroConfig {
+            radius: 0.05,
+            metric: alloygbm_core::DroMetric::Wasserstein,
+        }),
+        missing_bin_index: 4,
+    };
+    let categorical_features = [CategoricalFeatureInfo {
+        feature_index: 0,
+        num_categories: 4,
+    }];
+
+    let scalar = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_categorical_feature(view, 0, options, 4, None)
+    });
+    let production = CpuBackend::best_split_with_options_internal(
+        &histograms,
+        options,
+        &[],
+        &categorical_features,
+        None,
+    );
+
+    assert_split_candidates_match(scalar.as_ref(), production.as_ref());
+    let scalar = scalar.expect("categorical DRO oracle should produce a split");
+    let production = production.expect("categorical DRO production dispatch should split");
+    assert!(production.is_categorical);
+    assert_eq!(scalar.categorical_bitset, production.categorical_bitset);
+}

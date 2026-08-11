@@ -1,7 +1,7 @@
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{
-    BinnedMatrix, FeatureHistogram, FeatureTile, GradientPair, HistogramBin, HistogramBundle,
-    MorphConfig, MorphPrecomputed, NodeSlice,
+    BinnedMatrix, DroConfig, DroMetric, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
+    HistogramBundle, MorphConfig, MorphPrecomputed, NodeSlice,
 };
 use alloygbm_engine::{BackendOps, MorphContext, SplitSelectionOptions};
 use std::hint::black_box;
@@ -140,7 +140,7 @@ fn build_histograms_baseline_reference(
 
 fn main() {
     let backend = CpuBackend;
-    println!("production_base: 77dbf6d");
+    println!("production_base: 2b2e3ef");
     println!("runtime_target_arch: {}", std::env::consts::ARCH);
     println!("runtime_avx2_enabled: {}", runtime_avx2_enabled());
     println!(
@@ -239,6 +239,33 @@ fn main() {
             &medium_fixture.feature_tiles,
         )
         .expect("medium split benchmark histogram precompute should succeed");
+    let dro_histograms_16 = backend
+        .build_histograms_with_grad_sq(
+            &morph_16_fixture.binned_matrix,
+            &morph_16_fixture.gradients,
+            &morph_16_fixture.node,
+            &morph_16_fixture.feature_tiles,
+            true,
+        )
+        .expect("16-bin DRO split benchmark histogram precompute should succeed");
+    let dro_histograms_64 = backend
+        .build_histograms_with_grad_sq(
+            &small_fixture.binned_matrix,
+            &small_fixture.gradients,
+            &small_fixture.node,
+            &small_fixture.feature_tiles,
+            true,
+        )
+        .expect("64-bin DRO split benchmark histogram precompute should succeed");
+    let dro_histograms_255 = backend
+        .build_histograms_with_grad_sq(
+            &medium_fixture.binned_matrix,
+            &medium_fixture.gradients,
+            &medium_fixture.node,
+            &medium_fixture.feature_tiles,
+            true,
+        )
+        .expect("255-bin DRO split benchmark histogram precompute should succeed");
     run_case("best_split_small", 12, 500, || {
         let split = backend
             .best_split(&split_histograms_small)
@@ -249,6 +276,34 @@ fn main() {
         let split = backend
             .best_split(&split_histograms_medium)
             .expect("best split benchmark should succeed");
+        black_box(split);
+    });
+
+    let dro_options = SplitSelectionOptions {
+        l1_alpha: 0.1,
+        l2_lambda: 1.0,
+        dro_config: Some(DroConfig {
+            radius: 0.05,
+            metric: DroMetric::Wasserstein,
+        }),
+        ..SplitSelectionOptions::default()
+    };
+    run_case("best_split_dro_16", 12, 500, || {
+        let split = backend
+            .best_split_with_options(&dro_histograms_16, dro_options, &[], &[])
+            .expect("16-bin DRO split benchmark should succeed");
+        black_box(split);
+    });
+    run_case("best_split_dro_64", 12, 500, || {
+        let split = backend
+            .best_split_with_options(&dro_histograms_64, dro_options, &[], &[])
+            .expect("64-bin DRO split benchmark should succeed");
+        black_box(split);
+    });
+    run_case("best_split_dro_255", 12, 500, || {
+        let split = backend
+            .best_split_with_options(&dro_histograms_255, dro_options, &[], &[])
+            .expect("255-bin DRO split benchmark should succeed");
         black_box(split);
     });
 

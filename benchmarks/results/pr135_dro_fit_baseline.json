@@ -1,0 +1,1609 @@
+{
+  "architecture": "arm64",
+  "arguments": {
+    "arms": [
+      "standard",
+      "dro"
+    ],
+    "quick": false,
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "git_head": "2b2e3efb9952ee0766a939f77364879a29af5282",
+  "packages": {
+    "alloygbm": "0.12.10",
+    "numpy": "2.5.0",
+    "scikit-learn": "1.9.0"
+  },
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "production_base": "2b2e3ef",
+  "python": "3.13.5",
+  "records": [
+    {
+      "arm": "dro",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.3950003331992775,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00021108402870595455,
+      "native_bridge_prepare_seconds": 0.001533292,
+      "native_train_seconds": 0.392042209,
+      "predict_seconds": 0.0010651249904185534,
+      "primary_metric": "log_loss",
+      "primary_value": 0.14763940084435773,
+      "secondary_metrics": {
+        "accuracy": 0.9365853658536586
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "dro",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.4062968341168016,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0003505831118673086,
+      "native_bridge_prepare_seconds": 0.00158175,
+      "native_train_seconds": 0.403171042,
+      "predict_seconds": 0.001062542200088501,
+      "primary_metric": "log_loss",
+      "primary_value": 0.16368423674306246,
+      "secondary_metrics": {
+        "accuracy": 0.9231707317073171
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "dro",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.40646974998526275,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00017141690477728844,
+      "native_bridge_prepare_seconds": 0.001531875,
+      "native_train_seconds": 0.403718666,
+      "predict_seconds": 0.0012997500598430634,
+      "primary_metric": "log_loss",
+      "primary_value": 0.13864593664910435,
+      "secondary_metrics": {
+        "accuracy": 0.9390243902439024
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "dro",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.39816224994137883,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0003281249664723873,
+      "native_bridge_prepare_seconds": 0.001679041,
+      "native_train_seconds": 0.395031209,
+      "predict_seconds": 0.0009286249987781048,
+      "primary_metric": "log_loss",
+      "primary_value": 0.14401452767181588,
+      "secondary_metrics": {
+        "accuracy": 0.9353658536585366
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "dro",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.3925020000897348,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001743328757584095,
+      "native_bridge_prepare_seconds": 0.001773541,
+      "native_train_seconds": 0.389545125,
+      "predict_seconds": 0.0010072921868413687,
+      "primary_metric": "log_loss",
+      "primary_value": 0.15141786733303425,
+      "secondary_metrics": {
+        "accuracy": 0.9280487804878049
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "dro",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 4.1179688749834895,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00015379092656075954,
+      "native_bridge_prepare_seconds": 0.002393625,
+      "native_train_seconds": 4.113542958,
+      "predict_seconds": 0.001664457842707634,
+      "primary_metric": "log_loss",
+      "primary_value": 0.988870052809733,
+      "secondary_metrics": {
+        "accuracy": 0.5756097560975609
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "dro",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 4.118764166953042,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00015904102474451065,
+      "native_bridge_prepare_seconds": 0.002371709,
+      "native_train_seconds": 4.114140709,
+      "predict_seconds": 0.0021347501315176487,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9443330014456333,
+      "secondary_metrics": {
+        "accuracy": 0.6365853658536585
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "dro",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 4.115603040903807,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001394590362906456,
+      "native_bridge_prepare_seconds": 0.00237025,
+      "native_train_seconds": 4.111234292,
+      "predict_seconds": 0.0017617919947952032,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9463834370106965,
+      "secondary_metrics": {
+        "accuracy": 0.624390243902439
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "dro",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 4.169035416096449,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00013425014913082123,
+      "native_bridge_prepare_seconds": 0.002449959,
+      "native_train_seconds": 4.164605542,
+      "predict_seconds": 0.001798124983906746,
+      "primary_metric": "log_loss",
+      "primary_value": 1.0192273293581573,
+      "secondary_metrics": {
+        "accuracy": 0.573170731707317
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "dro",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 4.09207404195331,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001453340519219637,
+      "native_bridge_prepare_seconds": 0.002344875,
+      "native_train_seconds": 4.087732416,
+      "predict_seconds": 0.0018869999330490828,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9758004494116171,
+      "secondary_metrics": {
+        "accuracy": 0.624390243902439
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.4201259578112513,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00021750014275312424,
+      "native_bridge_prepare_seconds": 0.001166792,
+      "native_train_seconds": 0.417726042,
+      "predict_seconds": 0.0004265410825610161,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9790937949390199,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.42142358398996294,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00022129202261567116,
+      "native_bridge_prepare_seconds": 0.001177416,
+      "native_train_seconds": 0.41913325,
+      "predict_seconds": 0.0003782501444220543,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9823322070788296,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.42126549989916384,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.0002223749179393053,
+      "native_bridge_prepare_seconds": 0.00117,
+      "native_train_seconds": 0.418991667,
+      "predict_seconds": 0.0003576250746846199,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.4212145828641951,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00022262497805058956,
+      "native_bridge_prepare_seconds": 0.00123075,
+      "native_train_seconds": 0.418896333,
+      "predict_seconds": 0.0003414168022572994,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9595300823791906,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.4294428750872612,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00023358408361673355,
+      "native_bridge_prepare_seconds": 0.0012535,
+      "native_train_seconds": 0.427015083,
+      "predict_seconds": 0.0003510420210659504,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9804362874401706,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.27812333311885595,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00015474995598196983,
+      "native_bridge_prepare_seconds": 0.000693708,
+      "native_train_seconds": 0.276414166,
+      "predict_seconds": 0.0003049168735742569,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9076147575563783,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.24651458393782377,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00015258300118148327,
+      "native_bridge_prepare_seconds": 0.000683875,
+      "native_train_seconds": 0.244787375,
+      "predict_seconds": 0.0003498750738799572,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9281359358057334,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.2443994169589132,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00014866678975522518,
+      "native_bridge_prepare_seconds": 0.00069925,
+      "native_train_seconds": 0.24271725,
+      "predict_seconds": 0.0002823341637849808,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9094848178187473,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.24323916691355407,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00015174993313848972,
+      "native_bridge_prepare_seconds": 0.000688917,
+      "native_train_seconds": 0.241552917,
+      "predict_seconds": 0.00032308301888406277,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.8959345333962053,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.24435175000689924,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00014554103836417198,
+      "native_bridge_prepare_seconds": 0.000680208,
+      "native_train_seconds": 0.242696458,
+      "predict_seconds": 0.00030391616746783257,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9194545512682838,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.34932220890186727,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00012450013309717178,
+      "native_bridge_prepare_seconds": 0.000781333,
+      "native_train_seconds": 0.347662834,
+      "predict_seconds": 0.0004414170980453491,
+      "primary_metric": "rmse",
+      "primary_value": 1.485249878956052,
+      "secondary_metrics": {
+        "mae": 1.1362512435809504
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.3662526661064476,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001471671275794506,
+      "native_bridge_prepare_seconds": 0.000785083,
+      "native_train_seconds": 0.364586333,
+      "predict_seconds": 0.00037454208359122276,
+      "primary_metric": "rmse",
+      "primary_value": 1.514750246133694,
+      "secondary_metrics": {
+        "mae": 1.1625956780163618
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.3687457910273224,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.000124374870210886,
+      "native_bridge_prepare_seconds": 0.000771,
+      "native_train_seconds": 0.367101333,
+      "predict_seconds": 0.0003657909110188484,
+      "primary_metric": "rmse",
+      "primary_value": 1.4812307616229368,
+      "secondary_metrics": {
+        "mae": 1.1834973423804225
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.3481834998819977,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00011758296750485897,
+      "native_bridge_prepare_seconds": 0.000771459,
+      "native_train_seconds": 0.346566208,
+      "predict_seconds": 0.0003814171068370342,
+      "primary_metric": "rmse",
+      "primary_value": 1.456438457367796,
+      "secondary_metrics": {
+        "mae": 1.1423531489969208
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.3565371669828892,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00011012493632733822,
+      "native_bridge_prepare_seconds": 0.000776958,
+      "native_train_seconds": 0.354914125,
+      "predict_seconds": 0.0003748750314116478,
+      "primary_metric": "rmse",
+      "primary_value": 1.4370265305827608,
+      "secondary_metrics": {
+        "mae": 1.1133222390693136
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.09958216710947454,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 8.450006134808064e-05,
+      "native_bridge_prepare_seconds": 7.375e-05,
+      "native_train_seconds": 0.098857875,
+      "predict_seconds": 0.0003635829780250788,
+      "primary_metric": "rmse",
+      "primary_value": 0.749862345528961,
+      "secondary_metrics": {
+        "mae": 0.5921236412177677
+      },
+      "seed": 0,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.09886183287017047,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00022962503135204315,
+      "native_bridge_prepare_seconds": 0.000135333,
+      "native_train_seconds": 0.097844416,
+      "predict_seconds": 0.0003452918026596308,
+      "primary_metric": "rmse",
+      "primary_value": 1.0312663952632368,
+      "secondary_metrics": {
+        "mae": 0.732195376760501
+      },
+      "seed": 1,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.09869812498800457,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 8.254102431237698e-05,
+      "native_bridge_prepare_seconds": 7.1792e-05,
+      "native_train_seconds": 0.098028,
+      "predict_seconds": 0.0003362910356372595,
+      "primary_metric": "rmse",
+      "primary_value": 1.292090455085957,
+      "secondary_metrics": {
+        "mae": 0.9972622611676343
+      },
+      "seed": 2,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.09879741608165205,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 7.591699250042439e-05,
+      "native_bridge_prepare_seconds": 6.9333e-05,
+      "native_train_seconds": 0.098089625,
+      "predict_seconds": 0.00035445811226963997,
+      "primary_metric": "rmse",
+      "primary_value": 1.6051823345098204,
+      "secondary_metrics": {
+        "mae": 1.2026398472953588
+      },
+      "seed": 3,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.12455183314159513,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 8.383393287658691e-05,
+      "native_bridge_prepare_seconds": 7.2916e-05,
+      "native_train_seconds": 0.123868334,
+      "predict_seconds": 0.0003669590223580599,
+      "primary_metric": "rmse",
+      "primary_value": 0.9982735673139733,
+      "secondary_metrics": {
+        "mae": 0.7849760643348418
+      },
+      "seed": 4,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.7315872919280082,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.074993431568146e-05,
+      "native_bridge_prepare_seconds": 0.000987,
+      "native_train_seconds": 1.729008417,
+      "predict_seconds": 0.00036533293314278126,
+      "primary_metric": "rmse",
+      "primary_value": 0.8086834759653558,
+      "secondary_metrics": {
+        "mae": 0.631884694666951
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.6904195831157267,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.783310815691948e-05,
+      "native_bridge_prepare_seconds": 0.001008042,
+      "native_train_seconds": 1.68803275,
+      "predict_seconds": 0.00043137487955391407,
+      "primary_metric": "rmse",
+      "primary_value": 0.7770886414729873,
+      "secondary_metrics": {
+        "mae": 0.5751295594636758
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.7293567499145865,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.633391164243221e-05,
+      "native_bridge_prepare_seconds": 0.0010565,
+      "native_train_seconds": 1.7269779170000001,
+      "predict_seconds": 0.0003708330914378166,
+      "primary_metric": "rmse",
+      "primary_value": 0.9321669127442196,
+      "secondary_metrics": {
+        "mae": 0.7265146000900131
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.7435875828377903,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.491690434515476e-05,
+      "native_bridge_prepare_seconds": 0.0009985,
+      "native_train_seconds": 1.7412412499999999,
+      "predict_seconds": 0.00038616685196757317,
+      "primary_metric": "rmse",
+      "primary_value": 1.305207829150262,
+      "secondary_metrics": {
+        "mae": 0.9703598841442727
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 1.691525666974485,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.600003249943256e-05,
+      "native_bridge_prepare_seconds": 0.0010145,
+      "native_train_seconds": 1.6890998750000001,
+      "predict_seconds": 0.00041816686280071735,
+      "primary_metric": "rmse",
+      "primary_value": 0.7708946017006256,
+      "secondary_metrics": {
+        "mae": 0.6134751430017786
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.2665758340153843,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00023399991914629936,
+      "native_bridge_prepare_seconds": 0.001717292,
+      "native_train_seconds": 0.263977791,
+      "predict_seconds": 0.0009180000051856041,
+      "primary_metric": "rmse",
+      "primary_value": 1.3080714148557837,
+      "secondary_metrics": {
+        "mae": 1.0318696570813957
+      },
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.2602798747830093,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00025575002655386925,
+      "native_bridge_prepare_seconds": 0.001645625,
+      "native_train_seconds": 0.257734958,
+      "predict_seconds": 0.0007508751004934311,
+      "primary_metric": "rmse",
+      "primary_value": 1.252980941829231,
+      "secondary_metrics": {
+        "mae": 0.9798436544453719
+      },
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.26452354108914733,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00022970815189182758,
+      "native_bridge_prepare_seconds": 0.0017345,
+      "native_train_seconds": 0.261895041,
+      "predict_seconds": 0.0007421660702675581,
+      "primary_metric": "rmse",
+      "primary_value": 1.4238602417710622,
+      "secondary_metrics": {
+        "mae": 1.1107769907623202
+      },
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.2593508749268949,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.000219833105802536,
+      "native_bridge_prepare_seconds": 0.001641042,
+      "native_train_seconds": 0.256853167,
+      "predict_seconds": 0.0007609578315168619,
+      "primary_metric": "rmse",
+      "primary_value": 1.4996367044221124,
+      "secondary_metrics": {
+        "mae": 1.1704007243786445
+      },
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.2557727920357138,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00023337500169873238,
+      "native_bridge_prepare_seconds": 0.00157575,
+      "native_train_seconds": 0.253192959,
+      "predict_seconds": 0.0009791250340640545,
+      "primary_metric": "rmse",
+      "primary_value": 1.719026981137675,
+      "secondary_metrics": {
+        "mae": 1.341503636583929
+      },
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.0281082498840988,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0003202499356120825,
+      "native_bridge_prepare_seconds": 0.013272167,
+      "native_train_seconds": 1.01309325,
+      "predict_seconds": 0.0006199588533490896,
+      "primary_metric": "rmse",
+      "primary_value": 0.8594402773739446,
+      "secondary_metrics": {
+        "mae": 0.6645222696932539
+      },
+      "seed": 0,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.0325820839498192,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0003788329195231199,
+      "native_bridge_prepare_seconds": 0.013082959,
+      "native_train_seconds": 1.01782725,
+      "predict_seconds": 0.0008183750323951244,
+      "primary_metric": "rmse",
+      "primary_value": 0.5705739574713808,
+      "secondary_metrics": {
+        "mae": 0.43774230067934694
+      },
+      "seed": 1,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.0253616659902036,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00032237498089671135,
+      "native_bridge_prepare_seconds": 0.013081625,
+      "native_train_seconds": 1.010712792,
+      "predict_seconds": 0.0006896660197526217,
+      "primary_metric": "rmse",
+      "primary_value": 0.43156246715972174,
+      "secondary_metrics": {
+        "mae": 0.33536587666468426
+      },
+      "seed": 2,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.02922874991782,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0005119999404996634,
+      "native_bridge_prepare_seconds": 0.013104709,
+      "native_train_seconds": 1.014276625,
+      "predict_seconds": 0.0006997918244451284,
+      "primary_metric": "rmse",
+      "primary_value": 1.2571952465738643,
+      "secondary_metrics": {
+        "mae": 0.9680945444749833
+      },
+      "seed": 3,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "dro",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 1.0257999578025192,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0003591671120375395,
+      "native_bridge_prepare_seconds": 0.013951375,
+      "native_train_seconds": 1.010224959,
+      "predict_seconds": 0.0006507921498268843,
+      "primary_metric": "rmse",
+      "primary_value": 0.9766401116532649,
+      "secondary_metrics": {
+        "mae": 0.739174643700773
+      },
+      "seed": 4,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.225810875184834,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00018470804207026958,
+      "native_bridge_prepare_seconds": 0.001541042,
+      "native_train_seconds": 0.223011833,
+      "predict_seconds": 0.0010402500629425049,
+      "primary_metric": "log_loss",
+      "primary_value": 0.1478418107030972,
+      "secondary_metrics": {
+        "accuracy": 0.9353658536585366
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "standard",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.23663825006224215,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00017441692762076855,
+      "native_bridge_prepare_seconds": 0.001667417,
+      "native_train_seconds": 0.233719334,
+      "predict_seconds": 0.0014843749813735485,
+      "primary_metric": "log_loss",
+      "primary_value": 0.16371057114652776,
+      "secondary_metrics": {
+        "accuracy": 0.9195121951219513
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "standard",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.23157966695725918,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0002781250514090061,
+      "native_bridge_prepare_seconds": 0.001552375,
+      "native_train_seconds": 0.228467083,
+      "predict_seconds": 0.0009285828564316034,
+      "primary_metric": "log_loss",
+      "primary_value": 0.14008119795704727,
+      "secondary_metrics": {
+        "accuracy": 0.9390243902439024
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "standard",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.231102708959952,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001954999752342701,
+      "native_bridge_prepare_seconds": 0.001596708,
+      "native_train_seconds": 0.228158833,
+      "predict_seconds": 0.0009307500440627337,
+      "primary_metric": "log_loss",
+      "primary_value": 0.14712560655433918,
+      "secondary_metrics": {
+        "accuracy": 0.9317073170731708
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "standard",
+      "dataset": "binary-imbalanced",
+      "fit_seconds": 0.230661875102669,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001816251315176487,
+      "native_bridge_prepare_seconds": 0.0015215,
+      "native_train_seconds": 0.227889333,
+      "predict_seconds": 0.0010642500128597021,
+      "primary_metric": "log_loss",
+      "primary_value": 0.1523824256473676,
+      "secondary_metrics": {
+        "accuracy": 0.926829268292683
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "binary"
+    },
+    {
+      "arm": "standard",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.1086317501030862,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00013170810416340828,
+      "native_bridge_prepare_seconds": 0.002362375,
+      "native_train_seconds": 2.104026167,
+      "predict_seconds": 0.0018645829986780882,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9930867588771082,
+      "secondary_metrics": {
+        "accuracy": 0.5975609756097561
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "standard",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.1067500410135835,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00013950001448392868,
+      "native_bridge_prepare_seconds": 0.0025205,
+      "native_train_seconds": 2.101911916,
+      "predict_seconds": 0.0018032500520348549,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9384862951968505,
+      "secondary_metrics": {
+        "accuracy": 0.651219512195122
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "standard",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.1017200408969074,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00013879104517400265,
+      "native_bridge_prepare_seconds": 0.002387542,
+      "native_train_seconds": 2.097287958,
+      "predict_seconds": 0.0017156251706182957,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9412856458921375,
+      "secondary_metrics": {
+        "accuracy": 0.6268292682926829
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "standard",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.122481750091538,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00015074992552399635,
+      "native_bridge_prepare_seconds": 0.002357083,
+      "native_train_seconds": 2.117676,
+      "predict_seconds": 0.001696708146482706,
+      "primary_metric": "log_loss",
+      "primary_value": 1.0295149442468967,
+      "secondary_metrics": {
+        "accuracy": 0.5658536585365853
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "standard",
+      "dataset": "multiclass-wide",
+      "fit_seconds": 2.0996500418987125,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00013924995437264442,
+      "native_bridge_prepare_seconds": 0.002380916,
+      "native_train_seconds": 2.095269,
+      "predict_seconds": 0.001589084044098854,
+      "primary_metric": "log_loss",
+      "primary_value": 0.9769897175539194,
+      "secondary_metrics": {
+        "accuracy": 0.5975609756097561
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "multiclass"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.32192529109306633,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00021358300000429153,
+      "native_bridge_prepare_seconds": 0.00119375,
+      "native_train_seconds": 0.319618833,
+      "predict_seconds": 0.00037595792673528194,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9790937949390199,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.3482095829676837,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00022266688756644726,
+      "native_bridge_prepare_seconds": 0.001164209,
+      "native_train_seconds": 0.34594425,
+      "predict_seconds": 0.000321707921102643,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9823322070788296,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.3163862079381943,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.0002475001383572817,
+      "native_bridge_prepare_seconds": 0.001163833,
+      "native_train_seconds": 0.314112958,
+      "predict_seconds": 0.0003571249544620514,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.3215891669970006,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.0002252080012112856,
+      "native_bridge_prepare_seconds": 0.001178208,
+      "native_train_seconds": 0.31931375,
+      "predict_seconds": 0.0003944169729948044,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 1.0,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-large-query",
+      "fit_seconds": 0.3209735001437366,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00021258415654301643,
+      "native_bridge_prepare_seconds": 0.001165917,
+      "native_train_seconds": 0.318732,
+      "predict_seconds": 0.00040195812471210957,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9745516847204193,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.13653712486848235,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.0001574999187141657,
+      "native_bridge_prepare_seconds": 0.0006855,
+      "native_train_seconds": 0.134622459,
+      "predict_seconds": 0.0003552499692887068,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9112385389863998,
+      "secondary_metrics": {},
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.13392029190436006,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00014545791782438755,
+      "native_bridge_prepare_seconds": 0.0006805,
+      "native_train_seconds": 0.132282292,
+      "predict_seconds": 0.00025637494400143623,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9308481960438412,
+      "secondary_metrics": {},
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.1327168750576675,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00016191601753234863,
+      "native_bridge_prepare_seconds": 0.000702834,
+      "native_train_seconds": 0.1309835,
+      "predict_seconds": 0.00032529188320040703,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9141277989608826,
+      "secondary_metrics": {},
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.1344713750295341,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00016204197891056538,
+      "native_bridge_prepare_seconds": 0.000699084,
+      "native_train_seconds": 0.132779125,
+      "predict_seconds": 0.0003247079439461231,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.8960375636621171,
+      "secondary_metrics": {},
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "rank-small-query",
+      "fit_seconds": 0.13502099993638694,
+      "higher_is_better": true,
+      "input_adaptation_seconds": 0.00015925010666251183,
+      "native_bridge_prepare_seconds": 0.000680083,
+      "native_train_seconds": 0.133302458,
+      "predict_seconds": 0.00031141703948378563,
+      "primary_metric": "ndcg_at_10",
+      "primary_value": 0.9220906795189129,
+      "secondary_metrics": {},
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "ranking"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.2031329998280853,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00025725015439093113,
+      "native_bridge_prepare_seconds": 0.000821791,
+      "native_train_seconds": 0.201218208,
+      "predict_seconds": 0.0003303338307887316,
+      "primary_metric": "rmse",
+      "primary_value": 1.4609596427177727,
+      "secondary_metrics": {
+        "mae": 1.1247369783249026
+      },
+      "seed": 0,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.2116096660029143,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001265830360352993,
+      "native_bridge_prepare_seconds": 0.000780542,
+      "native_train_seconds": 0.209992792,
+      "predict_seconds": 0.0004102499224245548,
+      "primary_metric": "rmse",
+      "primary_value": 1.5108622426760336,
+      "secondary_metrics": {
+        "mae": 1.156455812826412
+      },
+      "seed": 1,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.23399687511846423,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.000151375075802207,
+      "native_bridge_prepare_seconds": 0.00080375,
+      "native_train_seconds": 0.232255583,
+      "predict_seconds": 0.00037550018168985844,
+      "primary_metric": "rmse",
+      "primary_value": 1.4699700335211927,
+      "secondary_metrics": {
+        "mae": 1.1776005302442283
+      },
+      "seed": 2,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.20399441593326628,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0001307909842580557,
+      "native_bridge_prepare_seconds": 0.00077775,
+      "native_train_seconds": 0.202358959,
+      "predict_seconds": 0.0004582079127430916,
+      "primary_metric": "rmse",
+      "primary_value": 1.4589169564484883,
+      "secondary_metrics": {
+        "mae": 1.1435935372049444
+      },
+      "seed": 3,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-noisy",
+      "fit_seconds": 0.20643708296120167,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00012366706505417824,
+      "native_bridge_prepare_seconds": 0.000758167,
+      "native_train_seconds": 0.204783542,
+      "predict_seconds": 0.00041566602885723114,
+      "primary_metric": "rmse",
+      "primary_value": 1.4262569412762998,
+      "secondary_metrics": {
+        "mae": 1.1036543086375588
+      },
+      "seed": 4,
+      "shape": "medium",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.05298175010830164,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0002055000513792038,
+      "native_bridge_prepare_seconds": 0.000120166,
+      "native_train_seconds": 0.051706584,
+      "predict_seconds": 0.0003383748698979616,
+      "primary_metric": "rmse",
+      "primary_value": 0.7264950677316316,
+      "secondary_metrics": {
+        "mae": 0.5808218877500622
+      },
+      "seed": 0,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.05344050005078316,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 8.741719648241997e-05,
+      "native_bridge_prepare_seconds": 7.3625e-05,
+      "native_train_seconds": 0.052746125,
+      "predict_seconds": 0.00034441612660884857,
+      "primary_metric": "rmse",
+      "primary_value": 0.9920381832873195,
+      "secondary_metrics": {
+        "mae": 0.6965767437359318
+      },
+      "seed": 1,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.053287666058167815,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 8.02499707788229e-05,
+      "native_bridge_prepare_seconds": 6.9708e-05,
+      "native_train_seconds": 0.0526235,
+      "predict_seconds": 0.0003410410135984421,
+      "primary_metric": "rmse",
+      "primary_value": 1.2890294072057644,
+      "secondary_metrics": {
+        "mae": 0.9938419250283914
+      },
+      "seed": 2,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.05339529109187424,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 7.970817387104034e-05,
+      "native_bridge_prepare_seconds": 7.1792e-05,
+      "native_train_seconds": 0.05269875,
+      "predict_seconds": 0.00036812503822147846,
+      "primary_metric": "rmse",
+      "primary_value": 1.5970829494026295,
+      "secondary_metrics": {
+        "mae": 1.2103225379250944
+      },
+      "seed": 3,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-narrow",
+      "fit_seconds": 0.05241145892068744,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 8.541694842278957e-05,
+      "native_bridge_prepare_seconds": 6.8708e-05,
+      "native_train_seconds": 0.051724042,
+      "predict_seconds": 0.00035324995405972004,
+      "primary_metric": "rmse",
+      "primary_value": 0.990928318952783,
+      "secondary_metrics": {
+        "mae": 0.764498183329124
+      },
+      "seed": 4,
+      "shape": "small-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.824027833994478,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.887502528727055e-05,
+      "native_bridge_prepare_seconds": 0.001015666,
+      "native_train_seconds": 0.821682917,
+      "predict_seconds": 0.00038524996489286423,
+      "primary_metric": "rmse",
+      "primary_value": 0.7957112585625205,
+      "secondary_metrics": {
+        "mae": 0.6163226379721891
+      },
+      "seed": 0,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8118370829615742,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00010266597382724285,
+      "native_bridge_prepare_seconds": 0.000985542,
+      "native_train_seconds": 0.80953175,
+      "predict_seconds": 0.0003713339101523161,
+      "primary_metric": "rmse",
+      "primary_value": 0.7860558739332342,
+      "secondary_metrics": {
+        "mae": 0.5809064098984891
+      },
+      "seed": 1,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8279418339952826,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.950017556548119e-05,
+      "native_bridge_prepare_seconds": 0.001009833,
+      "native_train_seconds": 0.825576542,
+      "predict_seconds": 0.00038233306258916855,
+      "primary_metric": "rmse",
+      "primary_value": 0.9399897175000537,
+      "secondary_metrics": {
+        "mae": 0.7313767095183721
+      },
+      "seed": 2,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8245220000389963,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 9.437510743737221e-05,
+      "native_bridge_prepare_seconds": 0.000985041,
+      "native_train_seconds": 0.822178875,
+      "predict_seconds": 0.0004141249228268862,
+      "primary_metric": "rmse",
+      "primary_value": 1.3056400121856233,
+      "secondary_metrics": {
+        "mae": 0.9635235913301585
+      },
+      "seed": 3,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-small-wide",
+      "fit_seconds": 0.8046558341011405,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00010645808652043343,
+      "native_bridge_prepare_seconds": 0.001055375,
+      "native_train_seconds": 0.802242917,
+      "predict_seconds": 0.00036145816557109356,
+      "primary_metric": "rmse",
+      "primary_value": 0.7886236983284293,
+      "secondary_metrics": {
+        "mae": 0.6333372092103673
+      },
+      "seed": 4,
+      "shape": "small-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.14223116589710116,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00022062519565224648,
+      "native_bridge_prepare_seconds": 0.001568,
+      "native_train_seconds": 0.139804375,
+      "predict_seconds": 0.0007947911508381367,
+      "primary_metric": "rmse",
+      "primary_value": 1.2991659937929614,
+      "secondary_metrics": {
+        "mae": 1.0212696765784157
+      },
+      "seed": 0,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.14285458298400044,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00023658387362957,
+      "native_bridge_prepare_seconds": 0.001605917,
+      "native_train_seconds": 0.140364625,
+      "predict_seconds": 0.0007135840132832527,
+      "primary_metric": "rmse",
+      "primary_value": 1.2502407868120866,
+      "secondary_metrics": {
+        "mae": 0.9785853541397067
+      },
+      "seed": 1,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.14214320806786418,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00022379099391400814,
+      "native_bridge_prepare_seconds": 0.001579292,
+      "native_train_seconds": 0.139722375,
+      "predict_seconds": 0.0007226660382002592,
+      "primary_metric": "rmse",
+      "primary_value": 1.4145456130777323,
+      "secondary_metrics": {
+        "mae": 1.1009283558811591
+      },
+      "seed": 2,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.14269216707907617,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0002323330845683813,
+      "native_bridge_prepare_seconds": 0.001574458,
+      "native_train_seconds": 0.1401055,
+      "predict_seconds": 0.0009867919143289328,
+      "primary_metric": "rmse",
+      "primary_value": 1.4953930349897446,
+      "secondary_metrics": {
+        "mae": 1.1676734245139049
+      },
+      "seed": 3,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-narrow",
+      "fit_seconds": 0.14087704103440046,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00023758318275213242,
+      "native_bridge_prepare_seconds": 0.001586958,
+      "native_train_seconds": 0.138423,
+      "predict_seconds": 0.0007553331088274717,
+      "primary_metric": "rmse",
+      "primary_value": 1.7057893506614734,
+      "secondary_metrics": {
+        "mae": 1.3194149793557541
+      },
+      "seed": 4,
+      "shape": "tall-narrow",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5240241659339517,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0004056671168655157,
+      "native_bridge_prepare_seconds": 0.013596708,
+      "native_train_seconds": 0.508592875,
+      "predict_seconds": 0.0007274998351931572,
+      "primary_metric": "rmse",
+      "primary_value": 0.8555708253227705,
+      "secondary_metrics": {
+        "mae": 0.6642916235158502
+      },
+      "seed": 0,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5211553750559688,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0003173749428242445,
+      "native_bridge_prepare_seconds": 0.013244125,
+      "native_train_seconds": 0.506350834,
+      "predict_seconds": 0.000975665869191289,
+      "primary_metric": "rmse",
+      "primary_value": 0.568585384146392,
+      "secondary_metrics": {
+        "mae": 0.4374853210154946
+      },
+      "seed": 1,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5261294159572572,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.00033316691406071186,
+      "native_bridge_prepare_seconds": 0.013097792,
+      "native_train_seconds": 0.511428625,
+      "predict_seconds": 0.0006168750114738941,
+      "primary_metric": "rmse",
+      "primary_value": 0.4284481781447995,
+      "secondary_metrics": {
+        "mae": 0.33282171790726717
+      },
+      "seed": 2,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5240965420380235,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0002989999484270811,
+      "native_bridge_prepare_seconds": 0.013527875,
+      "native_train_seconds": 0.508908,
+      "predict_seconds": 0.0008821669034659863,
+      "primary_metric": "rmse",
+      "primary_value": 1.2553864852511691,
+      "secondary_metrics": {
+        "mae": 0.9671058722790455
+      },
+      "seed": 3,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    },
+    {
+      "arm": "standard",
+      "dataset": "reg-tall-wide",
+      "fit_seconds": 0.5214299589861184,
+      "higher_is_better": false,
+      "input_adaptation_seconds": 0.0003239160869270563,
+      "native_bridge_prepare_seconds": 0.013497208,
+      "native_train_seconds": 0.506352375,
+      "predict_seconds": 0.0007472920697182417,
+      "primary_metric": "rmse",
+      "primary_value": 0.9760170818470606,
+      "secondary_metrics": {
+        "mae": 0.7405162864155008
+      },
+      "seed": 4,
+      "shape": "tall-wide",
+      "task_family": "regression"
+    }
+  ],
+  "schema_version": 1
+}

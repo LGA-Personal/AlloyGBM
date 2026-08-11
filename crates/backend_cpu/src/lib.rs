@@ -15,6 +15,7 @@ mod backend_ops;
 mod factor_split;
 mod morph;
 pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+mod dro_scan;
 mod morph_scan;
 
 mod pl_histogram;
@@ -595,7 +596,7 @@ impl CpuBackend {
         options: SplitSelectionOptions,
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
-        if options.dro_config.is_some() || factor_context.is_some() {
+        if factor_context.is_some() {
             return Self::best_split_for_feature_inner(
                 feature_histogram,
                 node_id,
@@ -603,6 +604,9 @@ impl CpuBackend {
                 GainStrategy::Standard,
                 factor_context,
             );
+        }
+        if options.requires_grad_sq() {
+            return dro_scan::best_split_dro_numeric_simd(feature_histogram, node_id, options);
         }
         // Standard-path bin-scan goes through the SIMD-vectorized fast path.
         // The morph path retains the scalar implementation because its gain

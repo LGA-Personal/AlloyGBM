@@ -1,0 +1,59 @@
+{
+  "baseline_key_count": 90,
+  "candidate_key_count": 90,
+  "dro_fit_improvement": 0.26324364062948846,
+  "dro_fit_median_ratio": 0.7367563593705115,
+  "dro_shape_time_ratios": {
+    "medium": 0.7748868378836764,
+    "small-narrow": 0.7367563593705115,
+    "small-wide": 0.6816251157225519,
+    "tall-narrow": 0.7458445337513996,
+    "tall-wide": 0.6867670726320811
+  },
+  "key_coverage_exact": true,
+  "passed": true,
+  "quality_equivalent": true,
+  "reasons": [],
+  "rejected_trials": [
+    {
+      "dro_fit_improvement": 0.07260816158896133,
+      "label": "initial four-lane scanner",
+      "reason": "retained only as rejected prototype after the approved optimization sequence",
+      "scanner_medians_ns_per_iter": {
+        "16": 22363.92,
+        "255": 175467.25,
+        "64": 23755.75
+      },
+      "standard_fit_median_ratio": 1.0029747591263045,
+      "worst_standard_record_ratio": 1.0908616563553857
+    },
+    {
+      "dro_fit_improvement": 0.08088881753082167,
+      "label": "invariant-hoisting scanner",
+      "reason": "retained only as rejected prototype after the approved optimization sequence",
+      "scanner_medians_ns_per_iter": {
+        "16": 22284.17,
+        "255": 164909.5,
+        "64": 23753.08
+      },
+      "standard_fit_median_ratio": 0.9998339873978035,
+      "worst_standard_record_ratio": 1.1613111658381674
+    }
+  ],
+  "scanner_gate_passed": false,
+  "standard_case_time_ratios": {
+    "binary-imbalanced": 0.9926318906083195,
+    "multiclass-wide": 0.999335545761092,
+    "rank-large-query": 0.9782271369918667,
+    "rank-small-query": 0.9933936216764131,
+    "reg-noisy": 1.0062834461229062,
+    "reg-small-narrow": 1.0118127810132336,
+    "reg-small-wide": 1.0095632488982489,
+    "reg-tall-narrow": 1.003165917495508,
+    "reg-tall-wide": 1.0069505305781137
+  },
+  "standard_fit_median_ratio": 1.003165917495508,
+  "worst_dro_shape_ratio": 0.7748868378836764,
+  "worst_standard_case_ratio": 1.0118127810132336,
+  "worst_standard_record_ratio": 1.127643406501662
+}
