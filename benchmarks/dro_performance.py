@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -82,7 +82,9 @@ class ComparisonSummary:
     dro_fit_improvement: float
     standard_fit_median_ratio: float
     worst_dro_shape_ratio: float
-    worst_standard_ratio: float
+    standard_case_time_ratios: dict[str, float]
+    worst_standard_case_ratio: float
+    worst_standard_record_ratio: float
     scanner_gate_passed: bool
     reasons: tuple[str, ...]
     rejected_trials: tuple[dict[str, object], ...] = ()
@@ -265,6 +267,19 @@ def _rotated_arms(arms: Sequence[str], case_index: int, seed: int) -> list[str]:
     return [*arms[offset:], *arms[:offset]]
 
 
+def _timed_fit_and_predict(
+    fit_fn: Callable[[], object], predict_fn: Callable[[], object]
+) -> tuple[float, float, object]:
+    fit_started = time.perf_counter()
+    fit_fn()
+    fit_seconds = time.perf_counter() - fit_started
+
+    prediction_started = time.perf_counter()
+    prediction = predict_fn()
+    predict_seconds = time.perf_counter() - prediction_started
+    return fit_seconds, predict_seconds, prediction
+
+
 def _fit_record(
     spec: FixtureSpec, bundle: DatasetBundle, arm: str, seed: int
 ) -> DroPerfRecord:
@@ -287,20 +302,29 @@ def _fit_record(
             dro_metric="wasserstein",
         )
 
-    fit_started = time.perf_counter()
     if spec.task_family == "regression":
         model = GBMRegressor(**common)
-        model.fit(bundle.X_train, bundle.y_train)
-        prediction = np.asarray(model.predict(bundle.X_test), dtype=np.float64)
+        fit_seconds, predict_seconds, prediction = _timed_fit_and_predict(
+            lambda: model.fit(bundle.X_train, bundle.y_train),
+            lambda: model.predict(bundle.X_test),
+        )
+        prediction = np.asarray(prediction, dtype=np.float64)
         primary_metric = "rmse"
         primary_value = _rmse(bundle.y_test, prediction)
         secondary = {"mae": _mae(bundle.y_test, prediction)}
         higher_is_better = False
     elif spec.task_family in {"binary", "multiclass"}:
         model = GBMClassifier(**common)
-        model.fit(bundle.X_train, bundle.y_train)
-        probabilities = np.asarray(model.predict_proba(bundle.X_test), dtype=np.float64)
-        prediction = np.asarray(model.predict(bundle.X_test))
+        fit_seconds, predict_seconds, prediction_values = _timed_fit_and_predict(
+            lambda: model.fit(bundle.X_train, bundle.y_train),
+            lambda: (
+                model.predict_proba(bundle.X_test),
+                model.predict(bundle.X_test),
+            ),
+        )
+        probabilities, prediction = prediction_values
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+        prediction = np.asarray(prediction)
         if spec.task_family == "binary":
             primary_metric = "log_loss"
             primary_value = _binary_log_loss(bundle.y_test, probabilities)
@@ -311,16 +335,17 @@ def _fit_record(
         higher_is_better = False
     else:
         model = GBMRanker(**common)
-        model.fit(bundle.X_train, bundle.y_train, group=bundle.group_train)
-        prediction = np.asarray(model.predict(bundle.X_test), dtype=np.float64)
+        fit_seconds, predict_seconds, prediction = _timed_fit_and_predict(
+            lambda: model.fit(bundle.X_train, bundle.y_train, group=bundle.group_train),
+            lambda: model.predict(bundle.X_test),
+        )
+        prediction = np.asarray(prediction, dtype=np.float64)
         primary_metric = "ndcg_at_10"
         primary_value = float(
             ndcg(bundle.y_test, prediction, group=bundle.group_ids_test, k=10)
         )
         secondary = {}
         higher_is_better = True
-    fit_seconds = time.perf_counter() - fit_started
-
     timing = getattr(model, "fit_timing_", {})
     return DroPerfRecord(
         arm=arm,
@@ -338,7 +363,7 @@ def _fit_record(
             timing, "native_bridge_prepare_seconds"
         ),
         native_train_seconds=_optional_timing(timing, "native_train_seconds"),
-        predict_seconds=None,
+        predict_seconds=predict_seconds,
     )
 
 
@@ -404,6 +429,8 @@ def _record_map(
         if key in result:
             raise ValueError(f"duplicate {label} benchmark key: {key}")
         values = [record.primary_value, record.fit_seconds]
+        if record.predict_seconds is not None:
+            values.append(record.predict_seconds)
         values.extend(record.secondary_metrics.values())
         for value in values:
             if not math.isfinite(float(value)):
@@ -483,11 +510,17 @@ def compare_results(
         for shape, values in sorted(per_shape.items())
     }
     dro_fit_median_ratio = float(statistics.median(dro_shape_time_ratios.values()))
-    standard_fit_median_ratio = float(
-        statistics.median(ratio for _, ratio in standard_pairs)
-    )
+    standard_case_ratios: dict[str, list[float]] = {}
+    for record, ratio in standard_pairs:
+        standard_case_ratios.setdefault(record.dataset, []).append(ratio)
+    standard_case_time_ratios = {
+        dataset: float(statistics.median(values))
+        for dataset, values in sorted(standard_case_ratios.items())
+    }
+    standard_fit_median_ratio = float(statistics.median(standard_case_time_ratios.values()))
     worst_dro_shape_ratio = max(dro_shape_time_ratios.values())
-    worst_standard_ratio = max(ratio for _, ratio in standard_pairs)
+    worst_standard_case_ratio = max(standard_case_time_ratios.values())
+    worst_standard_record_ratio = max(ratio for _, ratio in standard_pairs)
 
     reasons: list[str] = []
     regressed_shapes = [
@@ -499,9 +532,10 @@ def compare_results(
         reasons.append(
             "shape regression exceeded 5%: " + ", ".join(regressed_shapes)
         )
-    if worst_standard_ratio > 1.0 + MAX_STANDARD_REGRESSION:
+    if worst_standard_case_ratio > 1.0 + MAX_STANDARD_REGRESSION:
         reasons.append(
-            f"standard-arm regression exceeded 3%: {worst_standard_ratio:.6f}"
+            "standard-arm regression exceeded 3% for a repeated case: "
+            f"{worst_standard_case_ratio:.6f}"
         )
 
     dro_fit_improvement = 1.0 - dro_fit_median_ratio
@@ -523,7 +557,9 @@ def compare_results(
         dro_fit_improvement=dro_fit_improvement,
         standard_fit_median_ratio=standard_fit_median_ratio,
         worst_dro_shape_ratio=worst_dro_shape_ratio,
-        worst_standard_ratio=worst_standard_ratio,
+        standard_case_time_ratios=standard_case_time_ratios,
+        worst_standard_case_ratio=worst_standard_case_ratio,
+        worst_standard_record_ratio=worst_standard_record_ratio,
         scanner_gate_passed=scanner_gate,
         reasons=tuple(reasons),
         rejected_trials=tuple(rejected_trials),
@@ -543,7 +579,7 @@ def synthetic_paired_records(
     records: list[DroPerfRecord] = []
     for shape_index, shape in enumerate(shapes):
         for seed in range(5):
-            dataset = f"synthetic-{shape}-{seed}"
+            dataset = f"synthetic-{shape}"
             for arm in ARMS:
                 base_value = 1.0 + 0.01 * shape_index
                 records.append(

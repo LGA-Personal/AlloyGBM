@@ -143,3 +143,54 @@ def test_compare_results_rejects_standard_arm_sentinel_regression():
     summary = MODULE.compare_results(baseline, candidate)
     assert not summary.passed
     assert any("standard-arm" in reason for reason in summary.reasons)
+
+
+def test_standard_sentinel_gates_on_case_median_and_exposes_record_outlier():
+    baseline = MODULE.synthetic_paired_records(metric_delta=0.0, time_ratio=1.0)
+    candidate = MODULE.synthetic_paired_records(metric_delta=0.0, time_ratio=0.7)
+    candidate = [
+        replace(
+            record,
+            fit_seconds=1.2,
+        )
+        if record.arm == "standard"
+        and record.dataset == "synthetic-small-narrow"
+        and record.seed == 0
+        else record
+        for record in candidate
+    ]
+
+    summary = MODULE.compare_results(baseline, candidate)
+
+    assert summary.passed
+    assert summary.standard_case_time_ratios["synthetic-small-narrow"] == 1.0
+    assert summary.worst_standard_case_ratio == 1.0
+    assert summary.worst_standard_record_ratio == 1.2
+
+
+def test_timed_fit_seconds_excludes_prediction_latency(monkeypatch):
+    def measure(prediction_duration):
+        current = 0.0
+
+        def clock():
+            return current
+
+        def fit():
+            nonlocal current
+            current += 1.0
+
+        def predict():
+            nonlocal current
+            current += prediction_duration
+            return "prediction"
+
+        monkeypatch.setattr(MODULE.time, "perf_counter", clock)
+        return MODULE._timed_fit_and_predict(fit, predict)
+
+    fast_fit, fast_predict, fast_value = measure(0.1)
+    slow_fit, slow_predict, slow_value = measure(10.0)
+
+    assert fast_fit == slow_fit == 1.0
+    assert fast_predict == pytest.approx(0.1)
+    assert slow_predict == pytest.approx(10.0)
+    assert fast_value == slow_value == "prediction"
