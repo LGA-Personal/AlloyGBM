@@ -10,24 +10,22 @@ const EPSILON: f32 = 1e-6;
 /// Apply the DRO radius term to four gradient prefixes in the scalar helper's
 /// f64 arithmetic, then cross the same f32 soft-threshold boundary per lane.
 #[inline]
-pub(crate) fn dro_effective_gradient_f64x4(
+fn dro_effective_gradient_f64x4(
     grad_values: [f32; 4],
     grad_sq_values: [f32; 4],
     row_counts: [u32; 4],
-    radius: f32,
-    l1_alpha: f32,
+    radius: f64x4,
+    l1_threshold: f32,
 ) -> [f32; 4] {
     let gradients = f64x4::from(grad_values.map(f64::from));
     let gradient_squares = f64x4::from(grad_sq_values.map(f64::from));
     let counts = f64x4::from(row_counts.map(|count| count.max(1) as f64));
     let means = gradients / counts;
     let variance = (gradient_squares / counts - means * means).max(f64x4::ZERO);
-    let radius_terms =
-        (f64x4::splat(f64::from(radius)) * counts.sqrt() * variance.sqrt()).to_array();
-    let l1_alpha = l1_alpha.max(0.0);
+    let radius_terms = (radius * counts.sqrt() * variance.sqrt()).to_array();
 
     std::array::from_fn(|lane| {
-        let threshold = l1_alpha + radius_terms[lane] as f32;
+        let threshold = l1_threshold + radius_terms[lane] as f32;
         let gradient = grad_values[lane];
         if gradient > threshold {
             gradient - threshold
@@ -101,6 +99,18 @@ pub(crate) fn best_split_dro_numeric_simd(
         return None;
     }
 
+    let radius_v = f64x4::splat(f64::from(dro_config.radius));
+    let l1_threshold = options.l1_alpha.max(0.0);
+    let parent_gain_term_v = f32x4::splat(parent_gain_term);
+    let lambda_v = f32x4::splat(options.l2_lambda);
+    let epsilon_v = f32x4::splat(EPSILON);
+    let min_hessian_v = f32x4::splat(options.min_child_hessian);
+    let min_rows_v = f32x4::splat(options.min_rows_per_leaf as f32);
+    let min_leaf_magnitude_v = f32x4::splat(options.min_leaf_magnitude);
+    let half_v = f32x4::splat(0.5);
+    let two_v = f32x4::splat(2.0);
+    let negative_infinity_v = f32x4::splat(f32::NEG_INFINITY);
+
     with_dro_split_scan_scratch(
         scan_limit,
         |cumulative_grad, cumulative_hess, cumulative_grad_sq, cumulative_count| {
@@ -119,147 +129,154 @@ pub(crate) fn best_split_dro_numeric_simd(
                 cumulative_count[index] = count;
             }
 
-            let parent_gain_term_v = f32x4::splat(parent_gain_term);
-            let lambda_v = f32x4::splat(options.l2_lambda);
-            let epsilon_v = f32x4::splat(EPSILON);
-            let min_hessian_v = f32x4::splat(options.min_child_hessian);
-            let min_rows_v = f32x4::splat(options.min_rows_per_leaf as f32);
-            let min_leaf_magnitude_v = f32x4::splat(options.min_leaf_magnitude);
-            let negative_infinity_v = f32x4::splat(f32::NEG_INFINITY);
-
             let mut best_gain = 0.0_f32;
             let mut best_threshold = usize::MAX;
             let mut best_default_left = false;
 
-            let mut chunk_start = 0usize;
-            while chunk_start < scan_limit {
-                let chunk_end = (chunk_start + 4).min(scan_limit);
-                let chunk_len = chunk_end - chunk_start;
-                let mut left_grad_values = [0.0_f32; 4];
-                let mut left_hess_values = [0.0_f32; 4];
-                let mut left_grad_sq_values = [0.0_f32; 4];
-                let mut left_count_values = [0_u32; 4];
-                for lane in 0..chunk_len {
-                    let index = chunk_start + lane;
-                    left_grad_values[lane] = cumulative_grad[index];
-                    left_hess_values[lane] = cumulative_hess[index];
-                    left_grad_sq_values[lane] = cumulative_grad_sq[index];
-                    left_count_values[lane] = cumulative_count[index];
+            let mut block_start = 0usize;
+            while block_start < scan_limit {
+                let block_end = (block_start + 8).min(scan_limit);
+                let group_count = (block_end - block_start).div_ceil(4);
+                let mut left_grad_blocks = [[0.0_f32; 4]; 2];
+                let mut left_hess_blocks = [[0.0_f32; 4]; 2];
+                let mut left_grad_sq_blocks = [[0.0_f32; 4]; 2];
+                let mut left_count_blocks = [[0_u32; 4]; 2];
+                for group in 0..group_count {
+                    let chunk_start = block_start + group * 4;
+                    let chunk_len = (block_end - chunk_start).min(4);
+                    for lane in 0..chunk_len {
+                        let index = chunk_start + lane;
+                        left_grad_blocks[group][lane] = cumulative_grad[index];
+                        left_hess_blocks[group][lane] = cumulative_hess[index];
+                        left_grad_sq_blocks[group][lane] = cumulative_grad_sq[index];
+                        left_count_blocks[group][lane] = cumulative_count[index];
+                    }
                 }
 
-                let right_grad_values =
-                    std::array::from_fn(|lane| non_missing_grad - left_grad_values[lane]);
-                let right_hess_values =
-                    std::array::from_fn(|lane| non_missing_hess - left_hess_values[lane]);
-                let right_grad_sq_values =
-                    std::array::from_fn(|lane| non_missing_grad_sq - left_grad_sq_values[lane]);
-                let right_count_values = std::array::from_fn(|lane| {
-                    non_missing_count.saturating_sub(left_count_values[lane])
-                });
+                for group in 0..group_count {
+                    let chunk_start = block_start + group * 4;
+                    let chunk_len = (block_end - chunk_start).min(4);
+                    let left_grad_values = left_grad_blocks[group];
+                    let left_hess_values = left_hess_blocks[group];
+                    let left_grad_sq_values = left_grad_sq_blocks[group];
+                    let left_count_values = left_count_blocks[group];
+                    let right_grad_values =
+                        std::array::from_fn(|lane| non_missing_grad - left_grad_values[lane]);
+                    let right_hess_values =
+                        std::array::from_fn(|lane| non_missing_hess - left_hess_values[lane]);
+                    let right_grad_sq_values =
+                        std::array::from_fn(|lane| non_missing_grad_sq - left_grad_sq_values[lane]);
+                    let right_count_values = std::array::from_fn(|lane| {
+                        non_missing_count.saturating_sub(left_count_values[lane])
+                    });
 
-                for &default_left in &[true, false] {
-                    let (
-                        effective_left_grad_values,
-                        effective_left_hess_values,
-                        effective_left_grad_sq_values,
-                        effective_left_count_values,
-                        effective_right_grad_values,
-                        effective_right_hess_values,
-                        effective_right_grad_sq_values,
-                        effective_right_count_values,
-                    ) = if default_left {
-                        (
-                            std::array::from_fn(|lane| left_grad_values[lane] + missing_grad),
-                            std::array::from_fn(|lane| left_hess_values[lane] + missing_hess),
-                            std::array::from_fn(|lane| left_grad_sq_values[lane] + missing_grad_sq),
-                            std::array::from_fn(|lane| left_count_values[lane] + missing_count),
-                            right_grad_values,
-                            right_hess_values,
-                            right_grad_sq_values,
-                            right_count_values,
-                        )
-                    } else {
-                        (
-                            left_grad_values,
-                            left_hess_values,
-                            left_grad_sq_values,
-                            left_count_values,
-                            std::array::from_fn(|lane| right_grad_values[lane] + missing_grad),
-                            std::array::from_fn(|lane| right_hess_values[lane] + missing_hess),
-                            std::array::from_fn(|lane| {
-                                right_grad_sq_values[lane] + missing_grad_sq
-                            }),
-                            std::array::from_fn(|lane| right_count_values[lane] + missing_count),
-                        )
-                    };
+                    for &default_left in &[true, false] {
+                        let (
+                            effective_left_grad_values,
+                            effective_left_hess_values,
+                            effective_left_grad_sq_values,
+                            effective_left_count_values,
+                            effective_right_grad_values,
+                            effective_right_hess_values,
+                            effective_right_grad_sq_values,
+                            effective_right_count_values,
+                        ) = if default_left {
+                            (
+                                std::array::from_fn(|lane| left_grad_values[lane] + missing_grad),
+                                std::array::from_fn(|lane| left_hess_values[lane] + missing_hess),
+                                std::array::from_fn(|lane| {
+                                    left_grad_sq_values[lane] + missing_grad_sq
+                                }),
+                                std::array::from_fn(|lane| left_count_values[lane] + missing_count),
+                                right_grad_values,
+                                right_hess_values,
+                                right_grad_sq_values,
+                                right_count_values,
+                            )
+                        } else {
+                            (
+                                left_grad_values,
+                                left_hess_values,
+                                left_grad_sq_values,
+                                left_count_values,
+                                std::array::from_fn(|lane| right_grad_values[lane] + missing_grad),
+                                std::array::from_fn(|lane| right_hess_values[lane] + missing_hess),
+                                std::array::from_fn(|lane| {
+                                    right_grad_sq_values[lane] + missing_grad_sq
+                                }),
+                                std::array::from_fn(|lane| {
+                                    right_count_values[lane] + missing_count
+                                }),
+                            )
+                        };
 
-                    let effective_left = dro_effective_gradient_f64x4(
-                        effective_left_grad_values,
-                        effective_left_grad_sq_values,
-                        effective_left_count_values,
-                        dro_config.radius,
-                        options.l1_alpha,
-                    );
-                    let effective_right = dro_effective_gradient_f64x4(
-                        effective_right_grad_values,
-                        effective_right_grad_sq_values,
-                        effective_right_count_values,
-                        dro_config.radius,
-                        options.l1_alpha,
-                    );
-                    let effective_left_v = f32x4::from(effective_left);
-                    let effective_right_v = f32x4::from(effective_right);
-                    let left_hess_v = f32x4::from(effective_left_hess_values);
-                    let right_hess_v = f32x4::from(effective_right_hess_values);
-                    let left_count_v =
-                        f32x4::from(effective_left_count_values.map(|count| count as f32));
-                    let right_count_v =
-                        f32x4::from(effective_right_count_values.map(|count| count as f32));
+                        let effective_left = dro_effective_gradient_f64x4(
+                            effective_left_grad_values,
+                            effective_left_grad_sq_values,
+                            effective_left_count_values,
+                            radius_v,
+                            l1_threshold,
+                        );
+                        let effective_right = dro_effective_gradient_f64x4(
+                            effective_right_grad_values,
+                            effective_right_grad_sq_values,
+                            effective_right_count_values,
+                            radius_v,
+                            l1_threshold,
+                        );
+                        let effective_left_v = f32x4::from(effective_left);
+                        let effective_right_v = f32x4::from(effective_right);
+                        let left_hess_v = f32x4::from(effective_left_hess_values);
+                        let right_hess_v = f32x4::from(effective_right_hess_values);
+                        let left_count_v =
+                            f32x4::from(effective_left_count_values.map(|count| count as f32));
+                        let right_count_v =
+                            f32x4::from(effective_right_count_values.map(|count| count as f32));
 
-                    let left_denom = left_hess_v + lambda_v + epsilon_v;
-                    let right_denom = right_hess_v + lambda_v + epsilon_v;
-                    let left_gain_term = (f32x4::splat(0.5) * effective_left_v * effective_left_v
-                        / left_denom)
-                        * f32x4::splat(2.0);
-                    let right_gain_term =
-                        (f32x4::splat(0.5) * effective_right_v * effective_right_v / right_denom)
-                            * f32x4::splat(2.0);
-                    let gain_v = left_gain_term + right_gain_term - parent_gain_term_v;
+                        let left_denom = left_hess_v + lambda_v + epsilon_v;
+                        let right_denom = right_hess_v + lambda_v + epsilon_v;
+                        let left_gain_term =
+                            (half_v * effective_left_v * effective_left_v / left_denom) * two_v;
+                        let right_gain_term =
+                            (half_v * effective_right_v * effective_right_v / right_denom) * two_v;
+                        let gain_v = left_gain_term + right_gain_term - parent_gain_term_v;
 
-                    let valid_mask = left_count_v.cmp_ge(min_rows_v)
-                        & right_count_v.cmp_ge(min_rows_v)
-                        & left_hess_v.cmp_gt(min_hessian_v)
-                        & right_hess_v.cmp_gt(min_hessian_v);
-                    let valid_mask = if options.min_leaf_magnitude > 0.0 {
-                        let leaf_magnitude_ok = (effective_left_v.abs() / left_denom)
-                            .cmp_ge(min_leaf_magnitude_v)
-                            | (effective_right_v.abs() / right_denom).cmp_ge(min_leaf_magnitude_v);
-                        valid_mask & leaf_magnitude_ok
-                    } else {
-                        valid_mask
-                    };
-                    let mut gains = valid_mask.blend(gain_v, negative_infinity_v).to_array();
-                    for gain in gains.iter_mut().skip(chunk_len) {
-                        *gain = f32::NEG_INFINITY;
-                    }
-                    for (lane, gain) in gains.iter_mut().take(chunk_len).enumerate() {
-                        let threshold_bin = chunk_start + lane;
-                        if threshold_bin + 1 >= scan_limit
-                            && non_missing_count == cumulative_count[threshold_bin]
-                        {
+                        let valid_mask = left_count_v.cmp_ge(min_rows_v)
+                            & right_count_v.cmp_ge(min_rows_v)
+                            & left_hess_v.cmp_gt(min_hessian_v)
+                            & right_hess_v.cmp_gt(min_hessian_v);
+                        let valid_mask = if options.min_leaf_magnitude > 0.0 {
+                            let leaf_magnitude_ok = (effective_left_v.abs() / left_denom)
+                                .cmp_ge(min_leaf_magnitude_v)
+                                | (effective_right_v.abs() / right_denom)
+                                    .cmp_ge(min_leaf_magnitude_v);
+                            valid_mask & leaf_magnitude_ok
+                        } else {
+                            valid_mask
+                        };
+                        let mut gains = valid_mask.blend(gain_v, negative_infinity_v).to_array();
+                        for gain in gains.iter_mut().skip(chunk_len) {
                             *gain = f32::NEG_INFINITY;
                         }
-                        if !gain.is_finite() {
-                            continue;
-                        }
-                        if gain_materially_exceeds(*gain, best_gain) {
-                            best_gain = *gain;
-                            best_threshold = threshold_bin;
-                            best_default_left = default_left;
+                        for (lane, gain) in gains.iter_mut().take(chunk_len).enumerate() {
+                            let threshold_bin = chunk_start + lane;
+                            if threshold_bin + 1 >= scan_limit
+                                && non_missing_count == cumulative_count[threshold_bin]
+                            {
+                                *gain = f32::NEG_INFINITY;
+                            }
+                            if !gain.is_finite() {
+                                continue;
+                            }
+                            if gain_materially_exceeds(*gain, best_gain) {
+                                best_gain = *gain;
+                                best_threshold = threshold_bin;
+                                best_default_left = default_left;
+                            }
                         }
                     }
                 }
-                chunk_start = chunk_end;
+                block_start = block_end;
             }
 
             if best_threshold == usize::MAX {
