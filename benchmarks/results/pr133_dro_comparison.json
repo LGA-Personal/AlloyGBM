@@ -1,0 +1,49 @@
+{
+  "baseline_key_count": 90,
+  "candidate_key_count": 90,
+  "dro_fit_improvement": 0.18535578997124003,
+  "dro_fit_median_ratio": 0.81464421002876,
+  "dro_shape_time_ratios": {
+    "medium": 0.8500710825915472,
+    "small-narrow": 0.81464421002876,
+    "small-wide": 0.769634115598965,
+    "tall-narrow": 0.8178796169521294,
+    "tall-wide": 0.7665042722509524
+  },
+  "key_coverage_exact": true,
+  "passed": false,
+  "quality_equivalent": true,
+  "reasons": [
+    "standard-arm regression exceeded 3%: 1.042893"
+  ],
+  "rejected_trials": [
+    {
+      "dro_fit_improvement": 0.07260816158896133,
+      "label": "initial four-lane scanner",
+      "reason": "retained only as rejected prototype after the approved optimization sequence",
+      "scanner_medians_ns_per_iter": {
+        "16": 22363.92,
+        "64": 23755.75,
+        "255": 175467.25
+      },
+      "standard_fit_median_ratio": 1.0029747591263045,
+      "worst_standard_ratio": 1.0908616563553857
+    },
+    {
+      "dro_fit_improvement": 0.08088881753082167,
+      "label": "invariant-hoisting scanner",
+      "reason": "retained only as rejected prototype after the approved optimization sequence",
+      "scanner_medians_ns_per_iter": {
+        "16": 22284.17,
+        "64": 23753.08,
+        "255": 164909.50
+      },
+      "standard_fit_median_ratio": 0.9998339873978035,
+      "worst_standard_ratio": 1.1613111658381674
+    }
+  ],
+  "scanner_gate_passed": false,
+  "standard_fit_median_ratio": 1.0000458521917899,
+  "worst_dro_shape_ratio": 0.8500710825915472,
+  "worst_standard_ratio": 1.0428930304133082
+}

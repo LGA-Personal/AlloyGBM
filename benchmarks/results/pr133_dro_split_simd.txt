@@ -1,0 +1,126 @@
+production_base: 2b2e3ef
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+histogram_build_tiny_baseline_ref: total_ms=0.481 iterations=220 ns_per_iter=2185.41
+histogram_build_tiny_backend: total_ms=0.502 iterations=220 ns_per_iter=2282.39
+histogram_build_small_baseline_ref: total_ms=1.777 iterations=140 ns_per_iter=12694.94
+histogram_build_small_backend: total_ms=2.193 iterations=140 ns_per_iter=15662.80
+histogram_build_medium_baseline_ref: total_ms=46.172 iterations=80 ns_per_iter=577153.12
+histogram_build_medium_backend: total_ms=15.210 iterations=80 ns_per_iter=190126.56
+best_split_small: total_ms=11.622 iterations=500 ns_per_iter=23244.67
+best_split_medium: total_ms=41.276 iterations=500 ns_per_iter=82551.50
+best_split_dro_16: total_ms=11.077 iterations=500 ns_per_iter=22154.75
+best_split_dro_64: total_ms=12.093 iterations=500 ns_per_iter=24186.58
+best_split_dro_255: total_ms=75.032 iterations=500 ns_per_iter=150064.33
+best_split_morph_16: total_ms=10.126 iterations=500 ns_per_iter=20252.67
+best_split_morph_64: total_ms=11.759 iterations=500 ns_per_iter=23517.42
+best_split_morph_255: total_ms=108.708 iterations=500 ns_per_iter=217416.25
+production_base: 2b2e3ef
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+histogram_build_tiny_baseline_ref: total_ms=0.477 iterations=220 ns_per_iter=2166.10
+histogram_build_tiny_backend: total_ms=0.521 iterations=220 ns_per_iter=2368.18
+histogram_build_small_baseline_ref: total_ms=1.755 iterations=140 ns_per_iter=12535.41
+histogram_build_small_backend: total_ms=2.316 iterations=140 ns_per_iter=16540.18
+histogram_build_medium_baseline_ref: total_ms=47.324 iterations=80 ns_per_iter=591548.44
+histogram_build_medium_backend: total_ms=20.682 iterations=80 ns_per_iter=258523.44
+best_split_small: total_ms=11.524 iterations=500 ns_per_iter=23048.17
+best_split_medium: total_ms=42.786 iterations=500 ns_per_iter=85571.58
+best_split_dro_16: total_ms=9.840 iterations=500 ns_per_iter=19679.33
+best_split_dro_64: total_ms=12.268 iterations=500 ns_per_iter=24536.33
+best_split_dro_255: total_ms=74.993 iterations=500 ns_per_iter=149986.67
+best_split_morph_16: total_ms=10.530 iterations=500 ns_per_iter=21060.92
+best_split_morph_64: total_ms=11.778 iterations=500 ns_per_iter=23556.67
+best_split_morph_255: total_ms=68.695 iterations=500 ns_per_iter=137390.83
+production_base: 2b2e3ef
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+histogram_build_tiny_baseline_ref: total_ms=0.480 iterations=220 ns_per_iter=2182.39
+histogram_build_tiny_backend: total_ms=0.518 iterations=220 ns_per_iter=2355.68
+histogram_build_small_baseline_ref: total_ms=1.758 iterations=140 ns_per_iter=12559.52
+histogram_build_small_backend: total_ms=2.118 iterations=140 ns_per_iter=15130.66
+histogram_build_medium_baseline_ref: total_ms=46.911 iterations=80 ns_per_iter=586390.62
+histogram_build_medium_backend: total_ms=16.181 iterations=80 ns_per_iter=202257.29
+best_split_small: total_ms=10.556 iterations=500 ns_per_iter=21112.17
+best_split_medium: total_ms=37.082 iterations=500 ns_per_iter=74163.83
+best_split_dro_16: total_ms=11.400 iterations=500 ns_per_iter=22799.33
+best_split_dro_64: total_ms=11.364 iterations=500 ns_per_iter=22728.58
+best_split_dro_255: total_ms=75.541 iterations=500 ns_per_iter=151082.25
+best_split_morph_16: total_ms=11.203 iterations=500 ns_per_iter=22405.92
+best_split_morph_64: total_ms=12.450 iterations=500 ns_per_iter=24899.00
+best_split_morph_255: total_ms=74.689 iterations=500 ns_per_iter=149378.58
+production_base: 2b2e3ef
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+histogram_build_tiny_baseline_ref: total_ms=0.492 iterations=220 ns_per_iter=2238.64
+histogram_build_tiny_backend: total_ms=0.531 iterations=220 ns_per_iter=2414.59
+histogram_build_small_baseline_ref: total_ms=1.911 iterations=140 ns_per_iter=13652.98
+histogram_build_small_backend: total_ms=2.188 iterations=140 ns_per_iter=15628.28
+histogram_build_medium_baseline_ref: total_ms=46.556 iterations=80 ns_per_iter=581955.72
+histogram_build_medium_backend: total_ms=16.306 iterations=80 ns_per_iter=203819.26
+best_split_small: total_ms=10.813 iterations=500 ns_per_iter=21625.92
+best_split_medium: total_ms=36.180 iterations=500 ns_per_iter=72359.50
+best_split_dro_16: total_ms=11.366 iterations=500 ns_per_iter=22732.42
+best_split_dro_64: total_ms=11.775 iterations=500 ns_per_iter=23549.17
+best_split_dro_255: total_ms=75.941 iterations=500 ns_per_iter=151882.17
+best_split_morph_16: total_ms=11.326 iterations=500 ns_per_iter=22652.92
+best_split_morph_64: total_ms=12.315 iterations=500 ns_per_iter=24630.92
+best_split_morph_255: total_ms=70.004 iterations=500 ns_per_iter=140007.58
+production_base: 2b2e3ef
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+histogram_build_tiny_baseline_ref: total_ms=0.496 iterations=220 ns_per_iter=2253.22
+histogram_build_tiny_backend: total_ms=0.547 iterations=220 ns_per_iter=2485.61
+histogram_build_small_baseline_ref: total_ms=1.778 iterations=140 ns_per_iter=12700.00
+histogram_build_small_backend: total_ms=2.195 iterations=140 ns_per_iter=15676.79
+histogram_build_medium_baseline_ref: total_ms=46.035 iterations=80 ns_per_iter=575432.29
+histogram_build_medium_backend: total_ms=16.119 iterations=80 ns_per_iter=201490.10
+best_split_small: total_ms=10.306 iterations=500 ns_per_iter=20612.25
+best_split_medium: total_ms=37.495 iterations=500 ns_per_iter=74990.92
+best_split_dro_16: total_ms=10.958 iterations=500 ns_per_iter=21915.17
+best_split_dro_64: total_ms=12.028 iterations=500 ns_per_iter=24055.83
+best_split_dro_255: total_ms=77.152 iterations=500 ns_per_iter=154304.17
+best_split_morph_16: total_ms=11.769 iterations=500 ns_per_iter=23538.00
+best_split_morph_64: total_ms=12.353 iterations=500 ns_per_iter=24706.50
+best_split_morph_255: total_ms=69.451 iterations=500 ns_per_iter=138901.67
+production_base: 2b2e3ef
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+histogram_build_tiny_baseline_ref: total_ms=0.477 iterations=220 ns_per_iter=2169.70
+histogram_build_tiny_backend: total_ms=0.518 iterations=220 ns_per_iter=2354.74
+histogram_build_small_baseline_ref: total_ms=1.766 iterations=140 ns_per_iter=12617.26
+histogram_build_small_backend: total_ms=2.098 iterations=140 ns_per_iter=14987.20
+histogram_build_medium_baseline_ref: total_ms=46.213 iterations=80 ns_per_iter=577664.59
+histogram_build_medium_backend: total_ms=16.476 iterations=80 ns_per_iter=205954.69
+best_split_small: total_ms=10.459 iterations=500 ns_per_iter=20918.08
+best_split_medium: total_ms=38.726 iterations=500 ns_per_iter=77451.58
+best_split_dro_16: total_ms=11.221 iterations=500 ns_per_iter=22442.25
+best_split_dro_64: total_ms=11.345 iterations=500 ns_per_iter=22690.83
+best_split_dro_255: total_ms=77.029 iterations=500 ns_per_iter=154058.42
+best_split_morph_16: total_ms=11.807 iterations=500 ns_per_iter=23613.50
+best_split_morph_64: total_ms=12.578 iterations=500 ns_per_iter=25156.83
+best_split_morph_255: total_ms=70.373 iterations=500 ns_per_iter=140746.67
+production_base: 2b2e3ef
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+histogram_build_tiny_baseline_ref: total_ms=0.471 iterations=220 ns_per_iter=2142.61
+histogram_build_tiny_backend: total_ms=0.562 iterations=220 ns_per_iter=2555.68
+histogram_build_small_baseline_ref: total_ms=1.831 iterations=140 ns_per_iter=13075.29
+histogram_build_small_backend: total_ms=2.170 iterations=140 ns_per_iter=15498.51
+histogram_build_medium_baseline_ref: total_ms=48.753 iterations=80 ns_per_iter=609414.06
+histogram_build_medium_backend: total_ms=18.878 iterations=80 ns_per_iter=235973.44
+best_split_small: total_ms=11.007 iterations=500 ns_per_iter=22013.50
+best_split_medium: total_ms=42.167 iterations=500 ns_per_iter=84333.58
+best_split_dro_16: total_ms=10.496 iterations=500 ns_per_iter=20991.75
+best_split_dro_64: total_ms=12.122 iterations=500 ns_per_iter=24243.42
+best_split_dro_255: total_ms=90.727 iterations=500 ns_per_iter=181454.75
+best_split_morph_16: total_ms=10.173 iterations=500 ns_per_iter=20346.67
+best_split_morph_64: total_ms=12.346 iterations=500 ns_per_iter=24691.50
+best_split_morph_255: total_ms=96.800 iterations=500 ns_per_iter=193600.25
