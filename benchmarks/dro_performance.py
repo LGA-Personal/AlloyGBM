@@ -27,6 +27,32 @@ MAX_STANDARD_REGRESSION = 0.03
 MIN_FIT_IMPROVEMENT = 0.15
 QUALITY_TOLERANCE_ABS = 1e-7
 QUALITY_TOLERANCE_REL = 1e-7
+REJECTED_TRIALS: tuple[dict[str, object], ...] = (
+    {
+        "label": "initial four-lane scanner",
+        "reason": "retained only as rejected prototype after the approved optimization sequence",
+        "scanner_medians_ns_per_iter": {
+            "16": 22363.92,
+            "64": 23755.75,
+            "255": 175467.25,
+        },
+        "dro_fit_improvement": 0.07260816158896133,
+        "standard_fit_median_ratio": 1.0029747591263045,
+        "worst_standard_record_ratio": 1.0908616563553857,
+    },
+    {
+        "label": "invariant-hoisting scanner",
+        "reason": "retained only as rejected prototype after the approved optimization sequence",
+        "scanner_medians_ns_per_iter": {
+            "16": 22284.17,
+            "64": 23753.08,
+            "255": 164909.50,
+        },
+        "dro_fit_improvement": 0.08088881753082167,
+        "standard_fit_median_ratio": 0.9998339873978035,
+        "worst_standard_record_ratio": 1.1613111658381674,
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -680,7 +706,11 @@ def _run_command(args: argparse.Namespace) -> int:
 def _compare_command(args: argparse.Namespace) -> int:
     baseline = read_results(args.baseline)
     candidate = read_results(args.candidate)
-    summary = compare_results(baseline, candidate)
+    summary = compare_results(
+        baseline,
+        candidate,
+        rejected_trials=REJECTED_TRIALS,
+    )
     write_comparison(args.output, summary)
     print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     return 0 if summary.passed else 1

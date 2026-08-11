@@ -194,3 +194,18 @@ def test_timed_fit_seconds_excludes_prediction_latency(monkeypatch):
     assert fast_predict == pytest.approx(0.1)
     assert slow_predict == pytest.approx(10.0)
     assert fast_value == slow_value == "prediction"
+
+
+def test_rejected_prototype_trials_remain_machine_readable():
+    baseline = MODULE.synthetic_paired_records(metric_delta=0.0, time_ratio=1.0)
+    candidate = MODULE.synthetic_paired_records(metric_delta=0.0, time_ratio=0.7)
+    summary = MODULE.compare_results(
+        baseline,
+        candidate,
+        rejected_trials=MODULE.REJECTED_TRIALS,
+    )
+
+    assert [trial["label"] for trial in summary.rejected_trials] == [
+        "initial four-lane scanner",
+        "invariant-hoisting scanner",
+    ]
