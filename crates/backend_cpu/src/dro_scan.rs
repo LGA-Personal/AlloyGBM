@@ -376,7 +376,7 @@ mod tests {
         let mut best_default_left = false;
 
         reduce_dro_gain_lanes(
-            [1.0, 1.0000020, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            [1.0, 1.000_002, f32::NEG_INFINITY, f32::NEG_INFINITY],
             [
                 1.0000015,
                 f32::NEG_INFINITY,
