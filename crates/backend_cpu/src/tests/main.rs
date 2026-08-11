@@ -3165,6 +3165,47 @@ fn dro_simd_applies_minimum_constraints_and_rejects_invalid_edges() {
 }
 
 #[test]
+fn dro_simd_keeps_row_minimum_exact_above_f32_precision_limit() {
+    let feature = FeatureHistogram {
+        feature_index: 21,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 100.0,
+                hess_sum: 16_777_216.0,
+                grad_sq_sum: 10_000.0,
+                count: 16_777_216,
+            },
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -100.0,
+                hess_sum: 16_777_217.0,
+                grad_sq_sum: 10_000.0,
+                count: 16_777_217,
+            },
+        ],
+    };
+    let options = dro_scan_options(
+        0.05,
+        0.0,
+        1.0,
+        16_777_217,
+        0.0,
+        0.0,
+        3,
+    );
+
+    let (scalar, simd) = dro_simd_and_scalar_candidates(&feature, 23, options);
+    let scalar = scalar.expect("exact row minimum should leave one valid threshold");
+    assert_eq!(scalar.threshold_bin, 1);
+    assert_dro_split_candidates_match(Some(&scalar), simd.as_ref());
+}
+
+#[test]
 fn dro_simd_masks_non_finite_gain_and_requires_gradient_square_plane() {
     let non_finite = FeatureHistogram {
         feature_index: 7,

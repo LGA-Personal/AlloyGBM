@@ -37,6 +37,31 @@ fn dro_effective_gradient_f64x4(
     })
 }
 
+#[inline]
+fn reduce_dro_gain_lanes(
+    missing_left_gains: [f32; 4],
+    missing_right_gains: [f32; 4],
+    chunk_start: usize,
+    chunk_len: usize,
+    best_gain: &mut f32,
+    best_threshold: &mut usize,
+    best_default_left: &mut bool,
+) {
+    for lane in 0..chunk_len {
+        let threshold_bin = chunk_start + lane;
+        for (default_left, gain) in [
+            (true, missing_left_gains[lane]),
+            (false, missing_right_gains[lane]),
+        ] {
+            if gain.is_finite() && gain_materially_exceeds(gain, *best_gain) {
+                *best_gain = gain;
+                *best_threshold = threshold_bin;
+                *best_default_left = default_left;
+            }
+        }
+    }
+}
+
 /// Exhaustively scan a numeric feature with active DRO using safe four-lane
 /// SIMD for the f64 variance/radius term and f32 gain evaluation.
 pub(crate) fn best_split_dro_numeric_simd(
@@ -105,7 +130,6 @@ pub(crate) fn best_split_dro_numeric_simd(
     let lambda_v = f32x4::splat(options.l2_lambda);
     let epsilon_v = f32x4::splat(EPSILON);
     let min_hessian_v = f32x4::splat(options.min_child_hessian);
-    let min_rows_v = f32x4::splat(options.min_rows_per_leaf as f32);
     let min_leaf_magnitude_v = f32x4::splat(options.min_leaf_magnitude);
     let half_v = f32x4::splat(0.5);
     let two_v = f32x4::splat(2.0);
@@ -170,7 +194,7 @@ pub(crate) fn best_split_dro_numeric_simd(
                         non_missing_count.saturating_sub(left_count_values[lane])
                     });
 
-                    for &default_left in &[true, false] {
+                    let evaluate_direction = |default_left: bool| {
                         let (
                             effective_left_grad_values,
                             effective_left_hess_values,
@@ -228,10 +252,6 @@ pub(crate) fn best_split_dro_numeric_simd(
                         let effective_right_v = f32x4::from(effective_right);
                         let left_hess_v = f32x4::from(effective_left_hess_values);
                         let right_hess_v = f32x4::from(effective_right_hess_values);
-                        let left_count_v =
-                            f32x4::from(effective_left_count_values.map(|count| count as f32));
-                        let right_count_v =
-                            f32x4::from(effective_right_count_values.map(|count| count as f32));
 
                         let left_denom = left_hess_v + lambda_v + epsilon_v;
                         let right_denom = right_hess_v + lambda_v + epsilon_v;
@@ -241,9 +261,7 @@ pub(crate) fn best_split_dro_numeric_simd(
                             (half_v * effective_right_v * effective_right_v / right_denom) * two_v;
                         let gain_v = left_gain_term + right_gain_term - parent_gain_term_v;
 
-                        let valid_mask = left_count_v.cmp_ge(min_rows_v)
-                            & right_count_v.cmp_ge(min_rows_v)
-                            & left_hess_v.cmp_gt(min_hessian_v)
+                        let valid_mask = left_hess_v.cmp_gt(min_hessian_v)
                             & right_hess_v.cmp_gt(min_hessian_v);
                         let valid_mask = if options.min_leaf_magnitude > 0.0 {
                             let leaf_magnitude_ok = (effective_left_v.abs() / left_denom)
@@ -260,21 +278,30 @@ pub(crate) fn best_split_dro_numeric_simd(
                         }
                         for (lane, gain) in gains.iter_mut().take(chunk_len).enumerate() {
                             let threshold_bin = chunk_start + lane;
-                            if threshold_bin + 1 >= scan_limit
+                            if (effective_left_count_values[lane] as usize)
+                                < options.min_rows_per_leaf
+                                || (effective_right_count_values[lane] as usize)
+                                    < options.min_rows_per_leaf
+                                || (threshold_bin + 1 >= scan_limit
                                 && non_missing_count == cumulative_count[threshold_bin]
-                            {
+                            ) {
                                 *gain = f32::NEG_INFINITY;
                             }
-                            if !gain.is_finite() {
-                                continue;
-                            }
-                            if gain_materially_exceeds(*gain, best_gain) {
-                                best_gain = *gain;
-                                best_threshold = threshold_bin;
-                                best_default_left = default_left;
-                            }
                         }
-                    }
+                        gains
+                    };
+
+                    let missing_left_gains = evaluate_direction(true);
+                    let missing_right_gains = evaluate_direction(false);
+                    reduce_dro_gain_lanes(
+                        missing_left_gains,
+                        missing_right_gains,
+                        chunk_start,
+                        chunk_len,
+                        &mut best_gain,
+                        &mut best_threshold,
+                        &mut best_default_left,
+                    );
                 }
                 block_start = block_end;
             }
@@ -336,4 +363,30 @@ pub(crate) fn best_split_dro_numeric_simd(
             })
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dro_reduction_preserves_threshold_then_direction_order_for_near_ties() {
+        let mut best_gain = 0.0;
+        let mut best_threshold = usize::MAX;
+        let mut best_default_left = false;
+
+        reduce_dro_gain_lanes(
+            [1.0, 1.0000020, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            [1.0000015, f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            0,
+            2,
+            &mut best_gain,
+            &mut best_threshold,
+            &mut best_default_left,
+        );
+
+        assert_eq!(best_threshold, 0);
+        assert!(!best_default_left);
+        assert_eq!(best_gain, 1.0000015_f32);
+    }
 }
