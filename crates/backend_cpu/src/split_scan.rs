@@ -9,6 +9,7 @@ thread_local! {
 struct SplitScanScratch {
     cumulative_grad: Vec<f32>,
     cumulative_hess: Vec<f32>,
+    cumulative_grad_sq: Vec<f32>,
     cumulative_count: Vec<u32>,
 }
 
@@ -16,6 +17,7 @@ impl SplitScanScratch {
     fn resize(&mut self, len: usize) {
         self.cumulative_grad.resize(len, 0.0);
         self.cumulative_hess.resize(len, 0.0);
+        self.cumulative_grad_sq.resize(len, 0.0);
         self.cumulative_count.resize(len, 0);
     }
 }
@@ -31,6 +33,7 @@ pub(super) fn with_split_scan_scratch<R>(
             cumulative_grad,
             cumulative_hess,
             cumulative_count,
+            ..
         } = &mut *scratch;
         f(
             cumulative_grad.as_mut_slice(),
@@ -40,9 +43,32 @@ pub(super) fn with_split_scan_scratch<R>(
     })
 }
 
+pub(super) fn with_dro_split_scan_scratch<R>(
+    scan_limit: usize,
+    f: impl FnOnce(&mut [f32], &mut [f32], &mut [f32], &mut [u32]) -> R,
+) -> R {
+    THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        scratch.resize(scan_limit);
+        let SplitScanScratch {
+            cumulative_grad,
+            cumulative_hess,
+            cumulative_grad_sq,
+            cumulative_count,
+        } = &mut *scratch;
+        f(
+            cumulative_grad.as_mut_slice(),
+            cumulative_hess.as_mut_slice(),
+            cumulative_grad_sq.as_mut_slice(),
+            cumulative_count.as_mut_slice(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rayon::prelude::*;
 
     #[test]
     fn split_scan_scratch_reuses_buffers_and_initializes_active_slices() {
@@ -119,5 +145,109 @@ mod tests {
             cumulative_hess.fill(2.0);
             cumulative_count.fill(3);
         });
+    }
+
+    #[test]
+    fn dro_split_scan_scratch_reuses_gradient_square_and_isolates_workers() {
+        let first = with_dro_split_scan_scratch(
+            19,
+            |cumulative_grad: &mut [f32],
+             cumulative_hess: &mut [f32],
+             cumulative_grad_sq: &mut [f32],
+             cumulative_count: &mut [u32]| {
+                cumulative_grad.fill(1.0);
+                cumulative_hess.fill(2.0);
+                cumulative_grad_sq.fill(3.0);
+                cumulative_count.fill(4);
+                (
+                    cumulative_grad.as_ptr(),
+                    cumulative_hess.as_ptr(),
+                    cumulative_grad_sq.as_ptr(),
+                    cumulative_count.as_ptr(),
+                )
+            },
+        );
+        let first_capacities = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+            let scratch = cell.borrow();
+            (
+                scratch.cumulative_grad.capacity(),
+                scratch.cumulative_hess.capacity(),
+                scratch.cumulative_grad_sq.capacity(),
+                scratch.cumulative_count.capacity(),
+            )
+        });
+
+        let second = with_dro_split_scan_scratch(
+            7,
+            |cumulative_grad: &mut [f32],
+             cumulative_hess: &mut [f32],
+             cumulative_grad_sq: &mut [f32],
+             cumulative_count: &mut [u32]| {
+                for index in 0..cumulative_grad.len() {
+                    cumulative_grad[index] = index as f32;
+                    cumulative_hess[index] = (index * 2) as f32;
+                    cumulative_grad_sq[index] = (index * 3) as f32;
+                    cumulative_count[index] = index as u32;
+                }
+                assert_eq!(cumulative_grad_sq, &[0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0]);
+                (
+                    cumulative_grad.as_ptr(),
+                    cumulative_hess.as_ptr(),
+                    cumulative_grad_sq.as_ptr(),
+                    cumulative_count.as_ptr(),
+                )
+            },
+        );
+        let second_capacities = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+            let scratch = cell.borrow();
+            (
+                scratch.cumulative_grad.capacity(),
+                scratch.cumulative_hess.capacity(),
+                scratch.cumulative_grad_sq.capacity(),
+                scratch.cumulative_count.capacity(),
+            )
+        });
+
+        assert_eq!(first, second);
+        assert_eq!(first_capacities, second_capacities);
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("scratch isolation pool");
+        let values = pool.install(|| {
+            (0..8_usize)
+                .into_par_iter()
+                .map(|worker| {
+                    with_dro_split_scan_scratch(5, |_, _, cumulative_grad_sq, _| {
+                        cumulative_grad_sq.fill(worker as f32);
+                        cumulative_grad_sq.to_vec()
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for (worker, values) in values.into_iter().enumerate() {
+            assert_eq!(values, vec![worker as f32; 5]);
+        }
+    }
+
+    #[test]
+    fn dro_split_scan_scratch_recovers_after_callback_panic() {
+        let panic_result = std::panic::catch_unwind(|| {
+            with_dro_split_scan_scratch(31, |_, _, _, _| {
+                panic!("intentional DRO scratch callback panic")
+            });
+        });
+        assert!(panic_result.is_err());
+
+        with_dro_split_scan_scratch(
+            9,
+            |cumulative_grad, cumulative_hess, cumulative_grad_sq, cumulative_count| {
+                assert_eq!(cumulative_grad.len(), 9);
+                assert_eq!(cumulative_hess.len(), 9);
+                assert_eq!(cumulative_grad_sq.len(), 9);
+                assert_eq!(cumulative_count.len(), 9);
+            },
+        );
     }
 }
