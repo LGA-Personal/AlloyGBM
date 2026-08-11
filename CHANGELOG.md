@@ -93,6 +93,15 @@
 
 ### Performance
 
+- **Vectorized active numeric DRO split scanning.** Scalar-model numeric DRO now
+  evaluates every valid threshold and both missing directions with an exhaustive
+  safe four-lane f64 SIMD scanner. Native categorical, factor-penalized,
+  Morph+DRO, and joint-output split paths retain their documented fallbacks.
+  On the Apple M4 evidence host, 255-bin scanning improved 1.22x and the paired
+  nine-case matrix improved median DRO total fit time by 18.5% with exact
+  baseline/candidate quality values. The 1.5x scanner gate was not met and one
+  standard-arm timing outlier exceeded the 3% sentinel; see
+  `docs/benchmarks/dro_simd_pr133.md` for the complete evidence and concerns.
 - **Reused selected-row prediction deltas for sampled scalar and multiclass
   fits.** Eligible standard and GOSS rounds now retain the builder's selected-row
   prediction updates and replay the accepted tree only for excluded rows, while

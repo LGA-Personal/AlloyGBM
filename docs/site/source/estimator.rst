@@ -268,6 +268,13 @@ baseline to tune on validation data rather than a portable robustness guarantee.
 See ``docs/benchmarks/dro_robustness_v1.md`` for the deterministic default-radius
 clean-holdout result.
 
+For active numeric DRO on scalar models, split selection is exhaustive and uses a
+safe four-lane SIMD scanner for the f64 variance/radius calculation. It evaluates
+all valid thresholds and both missing-value directions without a top-k or other
+approximation. Native categorical, factor-penalized, and Morph+DRO scans retain
+their scalar routing; this changes training cost only and makes no predictive
+quality claim.
+
 ``MultiLabelGBMRanker(multi_label_mode="joint")`` accepts the same DRO
 parameters, but applies them only to final per-output leaf values. Its shared
 histogram does not retain the gradient-square statistics needed for robust split

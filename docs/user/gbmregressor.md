@@ -291,6 +291,13 @@ guaranteed live-market stability. It modifies split gain and final scalar leaf
 values consistently using the same robust effective gradient. Inference speed is
 unchanged because leaf values are baked into the artifact.
 
+For active numeric DRO on scalar models, split selection is exhaustive and uses a
+safe four-lane SIMD scanner for the f64 variance/radius calculation. It evaluates
+all valid thresholds and both missing-value directions; no top-k or approximate
+selection is used. Native categorical, factor-penalized, and Morph+DRO scans keep
+their scalar routing. This is a training-cost optimization only and does not
+claim improved predictive quality.
+
 `dro_radius` is dimensionless relative to the within-leaf gradient dispersion,
 but its practical effect remains objective- and target-scale dependent and it
 adds directly to `lambda_l1` in the same threshold. Treat `0.05` as a baseline,

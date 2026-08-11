@@ -6,7 +6,7 @@
 
 | Date | Reviewer | Version reviewed | Commit | Status |
 |---|---|---|---|---|
-| 2026-08-10 | OpenAI Codex | `main` after PR #132 | `2b2e3ef` | Approved for implementation |
+| 2026-08-10 | OpenAI Codex | `main` after PR #132 | `2b2e3ef` | Implemented; ready for review |
 
 **Goal:** Close special-modes review section 3.1 by making active scalar-path DRO numeric split
 selection materially faster without changing its formula, defaults, public API, artifact format, or
@@ -71,7 +71,7 @@ NumPy, scikit-learn metrics/datasets, pytest, maturin, and Sphinx.
 - Benchmark arms are `standard` and `dro`; DRO always uses `leaf_solver="dro"`,
   `dro_radius=0.05`, and `dro_metric="wasserstein"`.
 
-- [ ] **Step 1: Add failing benchmark-contract tests**
+- [x] **Step 1: Add failing benchmark-contract tests**
 
 Create tests that import the benchmark module by path and pin the stable contracts:
 
@@ -111,7 +111,7 @@ def test_compare_results_enforces_shape_regression_limit():
 Also test duplicate/missing keys, non-finite values, metric direction, deterministic JSON ordering,
 the 15% median fit-time fallback, and the 3% standard-arm sentinel.
 
-- [ ] **Step 2: Run the benchmark tests and verify failure**
+- [x] **Step 2: Run the benchmark tests and verify failure**
 
 Run:
 
@@ -122,7 +122,7 @@ Run:
 
 Expected: fail because `benchmarks/dro_performance.py` does not exist.
 
-- [ ] **Step 3: Implement the deterministic end-to-end matrix**
+- [x] **Step 3: Implement the deterministic end-to-end matrix**
 
 Define these full cases, with quick mode capping rows at 768, features at 48, and rounds at 12
 without removing a task family:
@@ -151,7 +151,7 @@ both arms, and set deterministic estimator parameters including `n_jobs=1`.
 aggregate DRO median ratio, standard-arm median ratio, worst ratios, quality equivalence, and gate
 reasons. Timing fields are excluded from JSON identity comparisons.
 
-- [ ] **Step 4: Add parseable scalar DRO scanner cases**
+- [x] **Step 4: Add parseable scalar DRO scanner cases**
 
 Build 16-, 64-, and 255-bin histograms with `build_histograms_with_grad_sq(..., true)`. Use:
 
@@ -170,7 +170,7 @@ let dro_options = SplitSelectionOptions {
 Print `best_split_dro_16`, `best_split_dro_64`, and `best_split_dro_255` with `run_case`. Update the
 benchmark header to `production_base: 2b2e3ef`. Do not change production scanner routing yet.
 
-- [ ] **Step 5: Capture immutable baseline evidence**
+- [x] **Step 5: Capture immutable baseline evidence**
 
 Run:
 
@@ -195,7 +195,7 @@ git diff 2b2e3ef -- crates/backend_cpu/src crates/engine/src crates/core/src \
 
 prints no production change.
 
-- [ ] **Step 6: Commit the benchmark contract and baseline**
+- [x] **Step 6: Commit the benchmark contract and baseline**
 
 ```bash
 git add -f crates/backend_cpu/benches/histogram_kernels.rs \
@@ -220,7 +220,7 @@ git commit -m "bench: establish DRO SIMD acceptance baseline"
   `Option<SplitCandidate>` contract as the scalar standard strategy with active DRO.
 - `dro_effective_gradient_f64x4` mirrors the scalar f64 variance/radius computation for four lanes.
 
-- [ ] **Step 1: Add failing scalar/SIMD parity and routing tests**
+- [x] **Step 1: Add failing scalar/SIMD parity and routing tests**
 
 Add a helper that evaluates the same `HistogramFeatureView` through:
 
@@ -252,7 +252,7 @@ tolerance. Cover:
 Add routing tests proving active numeric DRO selects the new scanner, radius-zero uses standard SIMD,
 and factor-penalized, categorical, and Morph+DRO paths retain scalar routing.
 
-- [ ] **Step 2: Run focused tests and verify intended failures**
+- [x] **Step 2: Run focused tests and verify intended failures**
 
 Run:
 
@@ -263,7 +263,7 @@ cargo test -p alloygbm-backend-cpu split_scan -- --nocapture
 
 Expected: fail because the DRO scratch and scanner do not exist.
 
-- [ ] **Step 3: Extend reusable split scratch**
+- [x] **Step 3: Extend reusable split scratch**
 
 Extend the existing thread-local scratch tuple with `Vec<f32>` for cumulative gradient squares.
 Keep `with_split_scan_scratch`'s current callback signature unchanged. Add:
@@ -279,7 +279,7 @@ Resize all four vectors before creating slices and retain the current `RefCell` 
 Add nested/sequential reuse tests that prove the gradient-square slice is cleared or fully
 overwritten before reading.
 
-- [ ] **Step 4: Implement the dedicated DRO scanner**
+- [x] **Step 4: Implement the dedicated DRO scanner**
 
 The scanner must:
 
@@ -317,7 +317,7 @@ Do not silently fall back to zero gradient-square data when active DRO is reques
 direct call receives no gradient-square plane, return `None`; production training already builds
 the plane whenever DRO is active, and a test must pin that invariant.
 
-- [ ] **Step 5: Route eligible active DRO scans**
+- [x] **Step 5: Route eligible active DRO scans**
 
 In `best_split_for_feature`:
 
@@ -328,7 +328,7 @@ In `best_split_for_feature`:
 Do not change categorical dispatch or `best_split_morph_numeric_feature`; both retain their existing
 active-DRO scalar behavior.
 
-- [ ] **Step 6: Run focused correctness suites**
+- [x] **Step 6: Run focused correctness suites**
 
 ```bash
 cargo fmt --all -- --check
@@ -340,7 +340,7 @@ cargo test -p alloygbm-engine dro -- --nocapture
 
 Expected: all pass with no ignored correctness tests.
 
-- [ ] **Step 7: Commit scanner implementation**
+- [x] **Step 7: Commit scanner implementation**
 
 ```bash
 git add crates/backend_cpu/src/split_scan.rs crates/backend_cpu/src/dro_scan.rs \
@@ -360,7 +360,7 @@ git commit -m "perf: vectorize numeric DRO split scanning"
 - `dro_performance.py compare BASELINE CANDIDATE --output COMPARISON` emits a machine-readable gate
   and exits nonzero when quality, shape, standard-sentinel, or aggregate performance gates fail.
 
-- [ ] **Step 1: Capture seven candidate scanner repetitions**
+- [x] **Step 1: Capture seven candidate scanner repetitions**
 
 ```bash
 for run in 1 2 3 4 5 6 7; do
@@ -371,7 +371,7 @@ done | tee benchmarks/results/pr133_dro_split_simd.txt
 Parse medians for all three DRO cases. Require 1.5x at 64 and 255 bins or defer acceptance to the
 end-to-end fallback gate; require no 16-bin regression above 5%.
 
-- [ ] **Step 2: Run candidate matrix and compare with baseline**
+- [x] **Step 2: Run candidate matrix and compare with baseline**
 
 ```bash
 maturin develop --release
@@ -388,7 +388,7 @@ The comparison must report exact key coverage and quality equivalence. Accept pe
 the scanner gate passes or median DRO fit time improves at least 15%, with no shape above 5% and the
 standard sentinel within 3%.
 
-- [ ] **Step 3: Reject or retain the implementation based on predeclared gates**
+- [x] **Step 3: Reject or retain the implementation based on predeclared gates**
 
 If performance fails, profile only the DRO scanner and try at most these behavior-preserving
 adjustments in order:
@@ -401,7 +401,7 @@ Do not switch variance to f32, add a top-k approximation, change the radius form
 parity/performance thresholds. Record rejected prototype timing in
 `benchmarks/results/pr133_dro_comparison.json` under `rejected_trials`.
 
-- [ ] **Step 4: Run robustness and compatibility sentinels**
+- [x] **Step 4: Run robustness and compatibility sentinels**
 
 ```bash
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_robustness.py \
@@ -415,7 +415,7 @@ parity/performance thresholds. Record rejected prototype timing in
 Require the existing robustness report's quality values to remain unchanged within its printed
 precision. This is a regression sentinel, not evidence to alter defaults.
 
-- [ ] **Step 5: Commit accepted performance evidence**
+- [x] **Step 5: Commit accepted performance evidence**
 
 ```bash
 git add -f benchmarks/results/pr133_dro_split_simd.txt \
@@ -442,7 +442,7 @@ git commit -m "bench: verify DRO SIMD performance"
 - The resolution marks only section 3.1 fixed. Existing caveats about default-radius robustness and
   joint leaf-only DRO remain unchanged.
 
-- [ ] **Step 1: Write the evidence report**
+- [x] **Step 1: Write the evidence report**
 
 Document:
 
@@ -458,14 +458,14 @@ Document:
 Do not claim DRO improves predictive quality or always beats standard leaves. State that this PR
 reduces the cost of an opt-in robust leaf solver whose radius remains workload-dependent.
 
-- [ ] **Step 2: Update user, Sphinx, changelog, and resolution docs**
+- [x] **Step 2: Update user, Sphinx, changelog, and resolution docs**
 
 Explain that active scalar-model numeric DRO split selection is exhaustive and safe-SIMD, while
 native categorical, factor-penalized, Morph+DRO, and joint-output split selection retain their
 documented scalar or standard-gain behavior. Link the report from user/Sphinx benchmark indexes.
 Mark section 3.1 fixed in the special-modes resolution without changing sections 3.2 or 3.3.
 
-- [ ] **Step 3: Run complete verification**
+- [x] **Step 3: Run complete verification**
 
 ```bash
 cargo fmt --all -- --check
@@ -482,7 +482,7 @@ git diff --check
 Expected: every command passes. Existing artifact-load and radius-zero equivalence tests in the full
 suites provide compatibility coverage.
 
-- [ ] **Step 4: Inspect final scope and compatibility**
+- [x] **Step 4: Inspect final scope and compatibility**
 
 ```bash
 git diff --stat 2b2e3ef...HEAD
@@ -495,7 +495,7 @@ Expected: no artifact-schema diff, no approximation or runtime switch, and no un
 after the closure commit. Confirm native categorical, factor, Morph+DRO, and joint code has no new
 SIMD routing.
 
-- [ ] **Step 5: Mark this plan implemented and commit closure**
+- [x] **Step 5: Mark this plan implemented and commit closure**
 
 Set the plan status to `Implemented; ready for review`, check every completed step, and commit:
 

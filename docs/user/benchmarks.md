@@ -29,6 +29,12 @@ results are reported in `docs/benchmarks/pl_trees_v1.md`.
 The exhaustive SIMD scanner, nine-shape quality matrix, rejected calibration
 trials, and secondary-cost decisions for PR #132 are recorded in
 [morphboost_pr132.md](../benchmarks/morphboost_pr132.md).
+A dedicated PR #133 report records the exhaustive numeric DRO scanner, its
+scalar fallbacks, seven-run 16/64/255-bin timings, the nine-case paired fit
+matrix, exact quality-equivalence checks, and rejected optimization trials in
+[dro_simd_pr133.md](../benchmarks/dro_simd_pr133.md). The report preserves the
+scanner and standard-arm gate concerns rather than treating the fit-time
+fallback as a universal performance claim.
 A deterministic large-query LambdaMART and skewed-count GLM harness lives at
 `benchmarks/objective_benchmark.py`; its current results are recorded in
 `docs/benchmarks/objective_benchmark_v1.md`.
@@ -134,6 +140,10 @@ each library behaves under different learning-rate / depth / round budgets.
   directly in the artifact.
 - Treat success as improved temporal/panel stability, especially worst-run or
   worst-era score, not necessarily better in-sample convergence.
+- Active scalar numeric DRO split selection is exhaustive and safe-SIMD; native
+  categorical, factor-penalized, Morph+DRO, and joint-output paths retain their
+  documented scalar or standard-gain behavior. See the PR #133 report for
+  measured scanner and fit-time evidence.
 
 ## Metrics By Task Type
 
