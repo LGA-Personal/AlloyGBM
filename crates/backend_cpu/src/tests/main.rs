@@ -3316,7 +3316,7 @@ fn dro_routing_uses_dedicated_numeric_scanner_and_radius_zero_uses_standard_simd
 }
 
 #[test]
-fn dro_factor_categorical_and_morph_combinations_retain_scalar_fallbacks() {
+fn dro_factor_and_morph_combinations_retain_scalar_fallbacks() {
     let mut feature = dro_random_feature(8, 113, 7);
     feature.feature_index = 0;
     let options = dro_scan_options(0.05, 0.1, 0.5, 1, 0.0, 0.0, 7);
@@ -3369,4 +3369,80 @@ fn dro_factor_categorical_and_morph_combinations_retain_scalar_fallbacks() {
         )
     });
     assert_dro_split_candidates_match(morph_scalar.as_ref(), morph_routed.as_ref());
+}
+
+#[test]
+fn dro_categorical_production_dispatch_retains_scalar_fallback() {
+    use alloygbm_engine::CategoricalFeatureInfo;
+
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: -4.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 8.0,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: -3.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 4.5,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: 3.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 4.5,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: 4.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 8.0,
+                count: 20,
+            },
+            HistogramBin {
+                grad_sum: 0.75,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.75 * 0.75,
+                count: 3,
+            },
+        ],
+    };
+    let histograms = HistogramBundle::from_feature_histograms(0, vec![feature.clone()], true)
+        .expect("valid categorical DRO histogram bundle");
+    let options = SplitSelectionOptions {
+        l2_lambda: 0.7,
+        l1_alpha: 0.25,
+        min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
+        min_leaf_magnitude: 0.05,
+        dro_config: Some(alloygbm_core::DroConfig {
+            radius: 0.05,
+            metric: alloygbm_core::DroMetric::Wasserstein,
+        }),
+        missing_bin_index: 4,
+    };
+    let categorical_features = [CategoricalFeatureInfo {
+        feature_index: 0,
+        num_categories: 4,
+    }];
+
+    let scalar = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_categorical_feature(view, 0, options, 4, None)
+    });
+    let production = CpuBackend::best_split_with_options_internal(
+        &histograms,
+        options,
+        &[],
+        &categorical_features,
+        None,
+    );
+
+    assert_split_candidates_match(scalar.as_ref(), production.as_ref());
+    let scalar = scalar.expect("categorical DRO oracle should produce a split");
+    let production = production.expect("categorical DRO production dispatch should split");
+    assert!(production.is_categorical);
+    assert_eq!(scalar.categorical_bitset, production.categorical_bitset);
 }
