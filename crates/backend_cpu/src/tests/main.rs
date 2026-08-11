@@ -3052,6 +3052,83 @@ fn dro_simd_routes_missing_mass_left_and_right_with_exact_child_statistics() {
     );
 }
 
+// Golden-reference parent-baseline invariant for the DRO scanner.
+//
+// The scalar/SIMD parity tests cross-check the two scanners against each other,
+// but that shares a blind spot: a parent-term regression applied to *both*
+// paths would still pass.  This test instead pins the DRO SIMD gain to an
+// independent `alloygbm_core::leaf_gain_term` reference whose parent term is
+// computed from the node's OWN aggregates — never `eff(left) + eff(right)` —
+// and proves that the sum-of-children baseline is measurably different.  Under
+// DRO's non-linear shrinkage the two diverge (they coincide only for a linear
+// leaf transform), so this guards the invariant for the DRO path and the
+// upcoming PL work.  Mirrors `morph_parent_baseline_matches_standard_leaf_gain_*`.
+#[test]
+fn dro_simd_parent_baseline_matches_core_leaf_gain_not_sum_of_children() {
+    use alloygbm_core::{DroConfig, DroMetric, leaf_effective_gradient, leaf_gain_term};
+
+    // Two data bins whose per-side variances differ enough that DRO shrinkage
+    // makes eff(parent) != eff(l) + eff(r) while leaving all three effective
+    // gradients clearly nonzero — so the test is sensitive to *any* parent
+    // miscalculation, not only the exact sum-of-children value.
+    let feature = FeatureHistogram {
+        feature_index: 7,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 8.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 21.6,
+                count: 40,
+            },
+            HistogramBin {
+                grad_sum: 1.0,
+                hess_sum: 4.0,
+                grad_sq_sum: 4.025,
+                count: 40,
+            },
+        ],
+    };
+    let (radius, l1, l2) = (0.1_f32, 0.0_f32, 0.7_f32);
+    let dro = DroConfig {
+        radius,
+        metric: DroMetric::Wasserstein,
+    };
+    // `missing_bin_index` past the two bins => no missing mass, single interior
+    // split at threshold 0 (left = bin 0, right = bin 1).
+    let options = dro_scan_options(radius, l1, l2, 1, 0.0, 0.0, 5);
+    let candidate = with_histogram_feature(&feature, |view| {
+        crate::dro_scan::best_split_dro_numeric_simd(view, 17, options)
+    })
+    .expect("dro split exists");
+    assert_eq!(candidate.threshold_bin, 0);
+
+    // Independent reference: 2*leaf_gain_term per side, parent from its own
+    // aggregates. `leaf_gain_term` is `0.5 * eff^2/(h+l2+eps)`, so `2*` matches
+    // the scanner's `eff^2/(h+l2+eps)` gain term exactly.
+    let lgt = |g, h, gsq, c| leaf_gain_term(g, h, gsq, c, l1, l2, Some(&dro));
+    let (gp, hp, gsp, cp) = (8.0_f32 + 1.0, 4.0_f32 + 4.0, 21.6_f32 + 4.025, 80_u32);
+    let reference =
+        2.0 * lgt(8.0, 4.0, 21.6, 40) + 2.0 * lgt(1.0, 4.0, 4.025, 40) - 2.0 * lgt(gp, hp, gsp, cp);
+    assert!(
+        (candidate.gain - reference).abs() <= 1e-5 * reference.abs().max(1.0),
+        "DRO SIMD gain must equal core::leaf_gain_term with the parent from totals: \
+         got {} expected {}",
+        candidate.gain,
+        reference,
+    );
+
+    // The buggy sum-of-children parent baseline must differ, so this actually
+    // locks out the regression rather than tautologically passing.
+    let eff = |g, gsq, c| leaf_effective_gradient(g, gsq, c, l1, Some(&dro));
+    let buggy_parent = eff(8.0, 21.6, 40) + eff(1.0, 4.025, 40);
+    let buggy = 2.0 * lgt(8.0, 4.0, 21.6, 40) + 2.0 * lgt(1.0, 4.0, 4.025, 40)
+        - buggy_parent * buggy_parent / (hp + l2 + 1e-6);
+    assert!(
+        (reference - buggy).abs() > 1e-4,
+        "fixture must distinguish the sum-of-children parent regression",
+    );
+}
+
 #[test]
 fn dro_simd_handles_tail_lengths_zero_variance_and_cancellation() {
     for tail in 1..=3_usize {
