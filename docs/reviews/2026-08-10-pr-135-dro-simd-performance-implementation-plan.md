@@ -1,4 +1,4 @@
-# PR #133 DRO SIMD Performance Implementation Plan
+# PR #135 DRO SIMD Performance Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
@@ -59,8 +59,8 @@ NumPy, scikit-learn metrics/datasets, pytest, maturin, and Sphinx.
 - Modify: `crates/backend_cpu/benches/histogram_kernels.rs`
 - Create: `benchmarks/dro_performance.py`
 - Create: `benchmarks/tests/test_dro_performance.py`
-- Create: `benchmarks/results/pr133_dro_split_baseline.txt`
-- Create: `benchmarks/results/pr133_dro_fit_baseline.json`
+- Create: `benchmarks/results/pr135_dro_split_baseline.txt`
+- Create: `benchmarks/results/pr135_dro_fit_baseline.json`
 
 **Interfaces:**
 - `dro_performance.py` produces `DroPerfRecord`, `ComparisonSummary`, `run_matrix`,
@@ -179,12 +179,12 @@ Run:
 ```bash
 for run in 1 2 3 4 5 6 7; do
   cargo bench -p alloygbm-backend-cpu --bench histogram_kernels
-done | tee benchmarks/results/pr133_dro_split_baseline.txt
+done | tee benchmarks/results/pr135_dro_split_baseline.txt
 
 maturin develop --release
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_performance.py run \
   --arms standard dro --seeds 0 1 2 3 4 \
-  --output benchmarks/results/pr133_dro_fit_baseline.json
+  --output benchmarks/results/pr135_dro_fit_baseline.json
 ```
 
 Verify both result files identify `production_base=2b2e3ef`, the JSON identifies the actual
@@ -202,8 +202,8 @@ prints no production change.
 ```bash
 git add -f crates/backend_cpu/benches/histogram_kernels.rs \
   benchmarks/dro_performance.py benchmarks/tests/test_dro_performance.py \
-  benchmarks/results/pr133_dro_split_baseline.txt \
-  benchmarks/results/pr133_dro_fit_baseline.json
+  benchmarks/results/pr135_dro_split_baseline.txt \
+  benchmarks/results/pr135_dro_fit_baseline.json
 git commit -m "bench: establish DRO SIMD acceptance baseline"
 ```
 
@@ -353,9 +353,9 @@ git commit -m "perf: vectorize numeric DRO split scanning"
 ### Task 3: Verify performance and end-to-end equivalence
 
 **Files:**
-- Create: `benchmarks/results/pr133_dro_split_simd.txt`
-- Create: `benchmarks/results/pr133_dro_fit_simd.json`
-- Create: `benchmarks/results/pr133_dro_comparison.json`
+- Create: `benchmarks/results/pr135_dro_split_simd.txt`
+- Create: `benchmarks/results/pr135_dro_fit_simd.json`
+- Create: `benchmarks/results/pr135_dro_comparison.json`
 
 **Interfaces:**
 - Candidate scanner output uses the exact benchmark row names established in Task 1.
@@ -367,7 +367,7 @@ git commit -m "perf: vectorize numeric DRO split scanning"
 ```bash
 for run in 1 2 3 4 5 6 7; do
   cargo bench -p alloygbm-backend-cpu --bench histogram_kernels
-done | tee benchmarks/results/pr133_dro_split_simd.txt
+done | tee benchmarks/results/pr135_dro_split_simd.txt
 ```
 
 Parse medians for all three DRO cases. Require 1.5x at 64 and 255 bins or defer acceptance to the
@@ -379,11 +379,11 @@ end-to-end fallback gate; require no 16-bin regression above 5%.
 maturin develop --release
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_performance.py run \
   --arms standard dro --seeds 0 1 2 3 4 \
-  --output benchmarks/results/pr133_dro_fit_simd.json
+  --output benchmarks/results/pr135_dro_fit_simd.json
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_performance.py compare \
-  benchmarks/results/pr133_dro_fit_baseline.json \
-  benchmarks/results/pr133_dro_fit_simd.json \
-  --output benchmarks/results/pr133_dro_comparison.json
+  benchmarks/results/pr135_dro_fit_baseline.json \
+  benchmarks/results/pr135_dro_fit_simd.json \
+  --output benchmarks/results/pr135_dro_comparison.json
 ```
 
 The comparison must report exact key coverage and quality equivalence. Accept performance only when
@@ -408,13 +408,13 @@ adjustments in order:
 
 Do not switch variance to f32, add a top-k approximation, change the radius formula, or weaken
 parity/performance thresholds. Record rejected prototype timing in
-`benchmarks/results/pr133_dro_comparison.json` under `rejected_trials`.
+`benchmarks/results/pr135_dro_comparison.json` under `rejected_trials`.
 
 - [x] **Step 4: Run robustness and compatibility sentinels**
 
 ```bash
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_robustness.py \
-  --seeds 7,13 --quick --output /tmp/pr133_dro_robustness.md
+  --seeds 7,13 --quick --output /tmp/pr135_dro_robustness.md
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python -m pytest \
   bindings/python/tests/test_dro_leaf_solver.py \
   benchmarks/tests/test_dro_robustness.py \
@@ -427,9 +427,9 @@ precision. This is a regression sentinel, not evidence to alter defaults.
 - [x] **Step 5: Commit accepted performance evidence**
 
 ```bash
-git add -f benchmarks/results/pr133_dro_split_simd.txt \
-  benchmarks/results/pr133_dro_fit_simd.json \
-  benchmarks/results/pr133_dro_comparison.json
+git add -f benchmarks/results/pr135_dro_split_simd.txt \
+  benchmarks/results/pr135_dro_fit_simd.json \
+  benchmarks/results/pr135_dro_comparison.json
 git commit -m "bench: verify DRO SIMD performance"
 ```
 
@@ -437,13 +437,13 @@ git commit -m "bench: verify DRO SIMD performance"
 
 **Files:**
 - Modify: `CHANGELOG.md`
-- Create: `docs/benchmarks/dro_simd_pr133.md`
+- Create: `docs/benchmarks/dro_simd_pr135.md`
 - Modify: `docs/user/gbmregressor.md`
 - Modify: `docs/site/source/estimator.rst`
 - Modify: `docs/user/benchmarks.md`
 - Modify: `docs/site/source/benchmarks.rst`
 - Modify: `docs/reviews/2026-07-02-v0.12.10-special-modes-resolutions.md`
-- Modify: `docs/reviews/2026-08-10-pr-133-dro-simd-performance-implementation-plan.md`
+- Modify: `docs/reviews/2026-08-10-pr-135-dro-simd-performance-implementation-plan.md`
 
 **Interfaces:**
 - The benchmark report distinguishes scanner, native fit, and total fit timing and includes exact
@@ -485,7 +485,7 @@ maturin develop --release
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python -m pytest \
   bindings/python/tests/ benchmarks/tests/ -q
 /Users/lashby/Projects/AlloyGBM/.venv/bin/sphinx-build -W -b html \
-  docs/site/source /tmp/alloygbm-pr133-sphinx
+  docs/site/source /tmp/alloygbm-pr135-sphinx
 git diff --check
 ```
 
@@ -510,17 +510,17 @@ SIMD routing.
 Set the plan status to `Implemented; ready for review`, check every completed step, and commit:
 
 ```bash
-git add CHANGELOG.md docs/benchmarks/dro_simd_pr133.md \
+git add CHANGELOG.md docs/benchmarks/dro_simd_pr135.md \
   docs/user/gbmregressor.md docs/site/source/estimator.rst \
   docs/user/benchmarks.md docs/site/source/benchmarks.rst \
   docs/reviews/2026-07-02-v0.12.10-special-modes-resolutions.md \
-  docs/reviews/2026-08-10-pr-133-dro-simd-performance-implementation-plan.md
+  docs/reviews/2026-08-10-pr-135-dro-simd-performance-implementation-plan.md
 git commit -m "docs: close DRO SIMD review finding"
 ```
 
-- [ ] **Step 6: Push and prepare draft PR #133 without merging**
+- [x] **Step 6: Push and prepare draft PR #135 without merging**
 
-Push `codex/dro-simd-performance` and open a draft PR against `main`. The PR description must include
-the scanner architecture, exact fallback scope, microbenchmark and fit-time gates, equivalence
-results, full verification, and links to the evidence and review-resolution documents. Preserve the
-worktree for reviewer changes and stop before merge.
+Draft PR #135 exists against `main`. Its description includes the scanner architecture, exact
+fallback scope, microbenchmark and fit-time gates, equivalence results, full verification, and links
+to the evidence and review-resolution documents. The worktree is preserved for reviewer changes and
+the branch has not been merged.

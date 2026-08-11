@@ -1,8 +1,8 @@
-# PR #133 DRO SIMD Performance Evidence
+# PR #135 DRO SIMD Performance Evidence
 
 Status: `DONE`
 
-This report records the implementation and evidence for PR #133. The change reduces
+This report records the implementation and evidence for PR #135. The change reduces
 the cost of the opt-in scalar DRO leaf solver. It does not claim that DRO improves
 predictive quality, that DRO is always faster than standard leaves, or that the
 default radius is portable across objectives and target scales.
@@ -142,19 +142,19 @@ reached the scanner gate or the 15% fit fallback; neither changed behavior.
 Run from the repository root on the same host class:
 
 ```bash
-git worktree add --detach /tmp/alloygbm-pr133-dro-baseline-round1 2b2e3ef
+git worktree add --detach /tmp/alloygbm-pr135-dro-baseline-round1 2b2e3ef
 cp benchmarks/dro_performance.py \
-  /tmp/alloygbm-pr133-dro-baseline-round1/benchmarks/dro_performance.py
+  /tmp/alloygbm-pr135-dro-baseline-round1/benchmarks/dro_performance.py
 cp crates/backend_cpu/benches/histogram_kernels.rs \
-  /tmp/alloygbm-pr133-dro-baseline-round1/crates/backend_cpu/benches/histogram_kernels.rs
-git -C /tmp/alloygbm-pr133-dro-baseline-round1 status --short
-git -C /tmp/alloygbm-pr133-dro-baseline-round1 diff -- \
+  /tmp/alloygbm-pr135-dro-baseline-round1/crates/backend_cpu/benches/histogram_kernels.rs
+git -C /tmp/alloygbm-pr135-dro-baseline-round1 status --short
+git -C /tmp/alloygbm-pr135-dro-baseline-round1 diff -- \
   crates/core crates/engine crates/backend_cpu/src bindings/python/alloygbm
 
-cd /tmp/alloygbm-pr133-dro-baseline-round1
+cd /tmp/alloygbm-pr135-dro-baseline-round1
 for run in 1 2 3 4 5 6 7; do
   cargo bench -p alloygbm-backend-cpu --bench histogram_kernels
-done | tee benchmarks/results/pr133_dro_split_baseline.txt
+done | tee benchmarks/results/pr135_dro_split_baseline.txt
 
 VIRTUAL_ENV=/path/to/repo/.venv PATH=/path/to/repo/.venv/bin:$PATH \
   /path/to/repo/.venv/bin/maturin develop --release
@@ -162,26 +162,26 @@ VIRTUAL_ENV=/path/to/repo/.venv PATH=/path/to/repo/.venv/bin:$PATH \
 VIRTUAL_ENV=/path/to/repo/.venv PATH=/path/to/repo/.venv/bin:$PATH \
   /path/to/repo/.venv/bin/python benchmarks/dro_performance.py run \
   --arms standard dro --seeds 0 1 2 3 4 \
-  --output /path/to/repo/benchmarks/results/pr133_dro_fit_baseline.json
+  --output /path/to/repo/benchmarks/results/pr135_dro_fit_baseline.json
 
 cd /path/to/repo
 maturin develop --release
 
 for run in 1 2 3 4 5 6 7; do
   cargo bench -p alloygbm-backend-cpu --bench histogram_kernels
-done | tee benchmarks/results/pr133_dro_split_simd.txt
+done | tee benchmarks/results/pr135_dro_split_simd.txt
 
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_performance.py run \
   --arms standard dro --seeds 0 1 2 3 4 \
-  --output benchmarks/results/pr133_dro_fit_simd.json
+  --output benchmarks/results/pr135_dro_fit_simd.json
 
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_performance.py compare \
-  benchmarks/results/pr133_dro_fit_baseline.json \
-  benchmarks/results/pr133_dro_fit_simd.json \
-  --output benchmarks/results/pr133_dro_comparison.json
+  benchmarks/results/pr135_dro_fit_baseline.json \
+  benchmarks/results/pr135_dro_fit_simd.json \
+  --output benchmarks/results/pr135_dro_comparison.json
 
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/dro_robustness.py \
-  --seeds 7,13 --quick --output /tmp/pr133_dro_robustness.md
+  --seeds 7,13 --quick --output /tmp/pr135_dro_robustness.md
 
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python -m pytest \
   bindings/python/tests/test_dro_leaf_solver.py \

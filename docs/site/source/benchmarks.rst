@@ -31,9 +31,9 @@ harnesses are also provided:
 - ``benchmarks/morph_report.py`` -- quick MorphBoost-vs-peers comparison
 - ``docs/benchmarks/morphboost_pr132.md`` -- exhaustive SIMD scanner,
   quality-matrix, calibration, and secondary-cost evidence for PR #132
-- ``docs/benchmarks/dro_simd_pr133.md`` -- exhaustive scalar numeric DRO
+- ``docs/benchmarks/dro_simd_pr135.md`` -- exhaustive scalar numeric DRO
   scanner, fallback scope, seven-run scanner timings, nine-case fit matrix,
-  quality-equivalence checks, and rejected optimization trials for PR #133
+  quality-equivalence checks, and rejected optimization trials for PR #135
 - ``benchmarks/numerai_benchmark.py`` -- Numerai tournament benchmark with
   walk-forward CV, residualized targets, and Numerai-specific scoring
 - ``benchmarks/pl_trees_benchmark.py`` -- piecewise-linear-leaf
@@ -117,7 +117,7 @@ Current results
 - Active scalar numeric DRO split selection is exhaustive and safe-SIMD; native
   categorical, factor-penalized, Morph+DRO, and joint-output paths retain their
   documented scalar or standard-gain behavior.
-- See ``docs/benchmarks/dro_simd_pr133.md`` for the scanner gate, paired fit
+- See ``docs/benchmarks/dro_simd_pr135.md`` for the scanner gate, paired fit
   matrix, exact quality-equivalence result, and remaining timing concerns.
 
 Metrics by task type

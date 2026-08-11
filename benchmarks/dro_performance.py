@@ -677,7 +677,7 @@ def read_results(path: str | Path) -> list[DroPerfRecord]:
     if payload.get("schema_version") != RESULT_SCHEMA_VERSION:
         raise ValueError(f"unsupported DRO benchmark schema: {payload.get('schema_version')!r}")
     if payload.get("production_base") != PRODUCTION_BASE:
-        raise ValueError("DRO benchmark production_base does not match PR #133")
+        raise ValueError("DRO benchmark production_base does not match PR #135")
     records = [DroPerfRecord(**record) for record in payload.get("records", [])]
     if not records:
         raise ValueError("DRO benchmark result contains no records")

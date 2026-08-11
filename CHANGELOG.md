@@ -103,7 +103,7 @@
   the 1.5x target, so acceptance uses the declared 15% end-to-end fallback. The
   worst five-seed standard-case median was 1.18%, within the 3% sentinel; the
   worst individual record ratio remains descriptive in
-  `docs/benchmarks/dro_simd_pr133.md`.
+  `docs/benchmarks/dro_simd_pr135.md`.
 - **Reused selected-row prediction deltas for sampled scalar and multiclass
   fits.** Eligible standard and GOSS rounds now retain the builder's selected-row
   prediction updates and replay the accepted tree only for excluded rows, while

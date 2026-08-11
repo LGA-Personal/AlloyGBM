@@ -1,4 +1,4 @@
-"""Contract tests for the PR #133 DRO performance benchmark harness."""
+"""Contract tests for the PR #135 DRO performance benchmark harness."""
 
 from __future__ import annotations
 
