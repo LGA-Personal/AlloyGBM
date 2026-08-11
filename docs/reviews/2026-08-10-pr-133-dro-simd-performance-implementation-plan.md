@@ -6,7 +6,7 @@
 
 | Date | Reviewer | Version reviewed | Commit | Status |
 |---|---|---|---|---|
-| 2026-08-10 | OpenAI Codex | `main` after PR #132 | `2b2e3ef` | Implemented; ready for review |
+| 2026-08-10 | OpenAI Codex | `main` after PR #132 | `2b2e3ef` | Implemented; acceptance gate passed; ready for review |
 
 **Goal:** Close special-modes review section 3.1 by making active scalar-path DRO numeric split
 selection materially faster without changing its formula, defaults, public API, artifact format, or
@@ -148,8 +148,10 @@ both arms, and set deterministic estimator parameters including `n_jobs=1`.
 
 `compare_results` requires primary and secondary metrics to match with
 `abs_error <= max(1e-7, 1e-7 * abs(baseline))`. It reports per-shape DRO median time ratios,
-aggregate DRO median ratio, standard-arm median ratio, worst ratios, quality equivalence, and gate
-reasons. Timing fields are excluded from JSON identity comparisons.
+aggregate DRO median ratio, per-case `standard_case_time_ratios`,
+`worst_standard_case_ratio` for the 3% gate, `worst_standard_record_ratio` as descriptive output,
+quality equivalence, and gate reasons. `fit_seconds` covers only model fitting; prediction is timed
+separately in `predict_seconds`. Timing fields are excluded from JSON identity comparisons.
 
 - [x] **Step 4: Add parseable scalar DRO scanner cases**
 
@@ -388,6 +390,13 @@ The comparison must report exact key coverage and quality equivalence. Accept pe
 the scanner gate passes or median DRO fit time improves at least 15%, with no shape above 5% and the
 standard sentinel within 3%.
 
+Corrected fix-round evidence recaptured the baseline from production `2b2e3ef` in a temporary
+worktree containing only benchmark-only changes, then recaptured the candidate with the fit-only
+timing window. The comparison passed: scanner medians were 1.052x/1.097x/1.510x at 16/64/255 bins,
+the 64-bin scanner target remained below 1.5x, and the accepted DRO fit-time fallback was 26.3244%.
+The worst standard five-seed case median was 1.011813; the worst individual record ratio was
+1.127643 and remained descriptive.
+
 - [x] **Step 3: Reject or retain the implementation based on predeclared gates**
 
 If performance fails, profile only the DRO scanner and try at most these behavior-preserving
@@ -463,7 +472,8 @@ reduces the cost of an opt-in robust leaf solver whose radius remains workload-d
 Explain that active scalar-model numeric DRO split selection is exhaustive and safe-SIMD, while
 native categorical, factor-penalized, Morph+DRO, and joint-output split selection retain their
 documented scalar or standard-gain behavior. Link the report from user/Sphinx benchmark indexes.
-Mark section 3.1 fixed in the special-modes resolution without changing sections 3.2 or 3.3.
+Mark section 3.1 fixed in the special-modes resolution without changing sections 3.2 or 3.3; retain
+the 64-bin scanner miss and the accepted end-to-end fallback in the benchmark evidence.
 
 - [x] **Step 3: Run complete verification**
 

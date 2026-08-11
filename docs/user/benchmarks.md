@@ -33,8 +33,8 @@ A dedicated PR #133 report records the exhaustive numeric DRO scanner, its
 scalar fallbacks, seven-run 16/64/255-bin timings, the nine-case paired fit
 matrix, exact quality-equivalence checks, and rejected optimization trials in
 [dro_simd_pr133.md](../benchmarks/dro_simd_pr133.md). The report preserves the
-scanner and standard-arm gate concerns rather than treating the fit-time
-fallback as a universal performance claim.
+64-bin scanner miss and the accepted fit-time fallback rather than treating the
+same-host result as a universal performance claim.
 A deterministic large-query LambdaMART and skewed-count GLM harness lives at
 `benchmarks/objective_benchmark.py`; its current results are recorded in
 `docs/benchmarks/objective_benchmark_v1.md`.
