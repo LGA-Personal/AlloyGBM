@@ -14,11 +14,15 @@ struct SplitScanScratch {
 }
 
 impl SplitScanScratch {
-    fn resize(&mut self, len: usize) {
+    fn resize_standard(&mut self, len: usize) {
         self.cumulative_grad.resize(len, 0.0);
         self.cumulative_hess.resize(len, 0.0);
-        self.cumulative_grad_sq.resize(len, 0.0);
         self.cumulative_count.resize(len, 0);
+    }
+
+    fn resize_dro(&mut self, len: usize) {
+        self.resize_standard(len);
+        self.cumulative_grad_sq.resize(len, 0.0);
     }
 }
 
@@ -28,7 +32,7 @@ pub(super) fn with_split_scan_scratch<R>(
 ) -> R {
     THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
-        scratch.resize(scan_limit);
+        scratch.resize_standard(scan_limit);
         let SplitScanScratch {
             cumulative_grad,
             cumulative_hess,
@@ -49,7 +53,7 @@ pub(super) fn with_dro_split_scan_scratch<R>(
 ) -> R {
     THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
-        scratch.resize(scan_limit);
+        scratch.resize_dro(scan_limit);
         let SplitScanScratch {
             cumulative_grad,
             cumulative_hess,
@@ -128,6 +132,51 @@ mod tests {
             assert_eq!(cumulative_hess.len(), 513);
             assert_eq!(cumulative_count.len(), 513);
         });
+    }
+
+    #[test]
+    fn standard_split_scan_scratch_never_allocates_gradient_square() {
+        let capacities = std::thread::spawn(|| {
+            let initial = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+                cell.borrow().cumulative_grad_sq.capacity()
+            });
+
+            with_split_scan_scratch(257, |_, _, _| {});
+            let after_first_standard = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+                cell.borrow().cumulative_grad_sq.capacity()
+            });
+
+            with_split_scan_scratch(17, |_, _, _| {});
+            let after_second_standard = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+                cell.borrow().cumulative_grad_sq.capacity()
+            });
+
+            with_dro_split_scan_scratch(19, |_, _, _, _| {});
+            let after_dro = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+                cell.borrow().cumulative_grad_sq.capacity()
+            });
+
+            with_split_scan_scratch(513, |_, _, _| {});
+            let after_final_standard = THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+                cell.borrow().cumulative_grad_sq.capacity()
+            });
+
+            (
+                initial,
+                after_first_standard,
+                after_second_standard,
+                after_dro,
+                after_final_standard,
+            )
+        })
+        .join()
+        .expect("scratch capacity probe thread");
+
+        assert_eq!(capacities.0, 0);
+        assert_eq!(capacities.1, 0);
+        assert_eq!(capacities.2, 0);
+        assert!(capacities.3 >= 19);
+        assert_eq!(capacities.4, capacities.3);
     }
 
     #[test]
