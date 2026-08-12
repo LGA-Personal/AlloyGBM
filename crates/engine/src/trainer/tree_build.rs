@@ -2088,6 +2088,7 @@ mod linear_leaf_path_tests {
         };
         let params = TrainParams {
             leaf_model: LeafModelKind::Linear,
+            pl_split_candidates: 8,
             ..TrainParams::default()
         };
 

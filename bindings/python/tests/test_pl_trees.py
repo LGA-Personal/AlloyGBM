@@ -248,6 +248,32 @@ class TestPLRegressor:
         assert single.artifact_bytes == parallel.artifact_bytes
         np.testing.assert_array_equal(single.predict(X), parallel.predict(X))
 
+    @pytest.mark.parametrize(
+        ("tree_growth", "max_leaves"),
+        [("level", None), ("leaf", 8)],
+    )
+    def test_default_matches_explicit_topk_compatibility_mode(
+        self, tree_growth, max_leaves
+    ):
+        X, y = _linear_regression_data(n=320, n_features=4, seed=31)
+        X[::19, 2] = np.nan
+        common = dict(
+            n_estimators=12,
+            max_depth=3,
+            max_leaves=max_leaves,
+            tree_growth=tree_growth,
+            leaf_model="linear",
+            training_policy="manual",
+            n_jobs=2,
+            seed=17,
+        )
+
+        default = GBMRegressor(**common).fit(X, y)
+        compatibility = GBMRegressor(pl_split_candidates=0, **common).fit(X, y)
+
+        assert default.artifact_bytes == compatibility.artifact_bytes
+        np.testing.assert_array_equal(default.predict(X), compatibility.predict(X))
+
     def test_exhaustive_candidate_limit_is_clipped_and_finite(self):
         X, y = _linear_regression_data(n=240, n_features=4, seed=29)
         model = GBMRegressor(
