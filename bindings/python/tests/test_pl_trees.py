@@ -222,6 +222,45 @@ class TestPLRegressor:
             f"linear RMSE={linear_rmse:.4f}, constant RMSE={constant_rmse:.4f}"
         )
 
+    @pytest.mark.parametrize(
+        ("tree_growth", "max_leaves"),
+        [("level", None), ("leaf", 8)],
+    )
+    def test_topk_is_deterministic_across_growth_and_thread_counts(
+        self, tree_growth, max_leaves
+    ):
+        X, y = _linear_regression_data(n=320, n_features=4, seed=23)
+        X[::17, 1] = np.nan
+        common = dict(
+            n_estimators=12,
+            max_depth=3,
+            max_leaves=max_leaves,
+            tree_growth=tree_growth,
+            leaf_model="linear",
+            pl_split_candidates=8,
+            training_policy="manual",
+            seed=91,
+        )
+
+        single = GBMRegressor(n_jobs=1, **common).fit(X, y)
+        parallel = GBMRegressor(n_jobs=4, **common).fit(X, y)
+
+        assert single.artifact_bytes == parallel.artifact_bytes
+        np.testing.assert_array_equal(single.predict(X), parallel.predict(X))
+
+    def test_exhaustive_candidate_limit_is_clipped_and_finite(self):
+        X, y = _linear_regression_data(n=240, n_features=4, seed=29)
+        model = GBMRegressor(
+            n_estimators=8,
+            max_depth=2,
+            leaf_model="linear",
+            pl_split_candidates=10_000,
+            training_policy="manual",
+            seed=7,
+        ).fit(X, y)
+
+        assert np.isfinite(np.asarray(model.predict(X))).all()
+
 
 # ---------------------------------------------------------------------------
 # Classifier smoke tests

@@ -147,6 +147,23 @@ def test_morph_artifact_bytes_identical_for_same_seed():
     assert m1.artifact_bytes == m2.artifact_bytes
 
 
+def test_pl_split_shortlist_is_inactive_for_morph_linear_leaves():
+    X, y = _toy_regression_data(n=240, seed=17)
+    common = dict(
+        n_estimators=12,
+        max_depth=3,
+        leaf_model="linear",
+        training_mode="morph",
+        training_policy="manual",
+        seed=31,
+    )
+
+    compatibility = GBMRegressor(pl_split_candidates=0, **common).fit(X, y)
+    shortlisted = GBMRegressor(pl_split_candidates=8, **common).fit(X, y)
+
+    assert compatibility.artifact_bytes == shortlisted.artifact_bytes
+
+
 def test_morph_warmup_cosine_artifact_deterministic():
     X, y = _toy_regression_data(n=200, seed=3)
     kw = dict(n_estimators=20, max_depth=4, training_mode="morph",
