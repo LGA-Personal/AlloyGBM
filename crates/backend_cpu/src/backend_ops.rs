@@ -5,7 +5,7 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
-    HistogramExecution, LinearContext, MorphContext, SplitSelectionOptions,
+    HistogramExecution, LinearContext, MorphContext, SplitSelectionOptions, SplitShortlist,
 };
 use rayon::prelude::*;
 
@@ -116,6 +116,83 @@ impl BackendOps for CpuBackend {
             categorical_features,
             None,
         ))
+    }
+
+    fn shortlist_standard_splits(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        max_numeric_features: usize,
+    ) -> EngineResult<SplitShortlist> {
+        let find_best = |fh: HistogramFeatureView<'_>| -> Option<SplitCandidate> {
+            let feature_index = fh.feature_index() as usize;
+            if let Some(info) = categorical_features
+                .iter()
+                .find(|info| info.feature_index == feature_index)
+            {
+                Self::best_split_for_categorical_feature(
+                    fh,
+                    histograms.node_id,
+                    options,
+                    info.num_categories,
+                    None,
+                )
+            } else {
+                Self::best_split_for_feature(fh, histograms.node_id, options, None)
+            }
+        };
+
+        let per_feature: Vec<Option<SplitCandidate>> =
+            if histograms.feature_count() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+                (0..histograms.feature_count())
+                    .into_par_iter()
+                    .map(|index| find_best(histograms.feature(index).expect("bounded feature")))
+                    .collect()
+            } else {
+                histograms.features().map(find_best).collect()
+            };
+
+        let best_overall = per_feature
+            .iter()
+            .flatten()
+            .cloned()
+            .reduce(|current, candidate| {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&candidate, feature_weights),
+                    apply_feature_weight(&current, feature_weights),
+                ) {
+                    candidate
+                } else {
+                    current
+                }
+            });
+
+        let mut remaining: Vec<SplitCandidate> = per_feature
+            .into_iter()
+            .flatten()
+            .filter(|candidate| !candidate.is_categorical)
+            .collect();
+        let target = max_numeric_features.min(remaining.len());
+        let mut numeric_candidates = Vec::with_capacity(target);
+        for _ in 0..target {
+            let mut best_index = 0;
+            for index in 1..remaining.len() {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&remaining[index], feature_weights),
+                    apply_feature_weight(&remaining[best_index], feature_weights),
+                ) {
+                    best_index = index;
+                }
+            }
+            numeric_candidates.push(remaining.remove(best_index));
+        }
+
+        Ok(SplitShortlist {
+            best_overall,
+            numeric_candidates,
+        })
     }
 
     fn best_split_with_factor_context(

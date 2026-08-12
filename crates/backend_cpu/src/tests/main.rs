@@ -166,6 +166,7 @@ fn fixture_params() -> TrainParams {
         tweedie_variance_power: 1.5,
         poisson_max_delta_step: 0.7,
         quantile_alpha: 0.5,
+        pl_split_candidates: 8,
     }
 }
 
@@ -222,6 +223,194 @@ fn split_candidate(
             row_count: 0,
         },
     }
+}
+
+fn shortlist_standard_fixture(feature_count: usize) -> HistogramBundle {
+    let features = (0..feature_count)
+        .map(|feature_index| {
+            let scale = (feature_index + 1) as f32;
+            FeatureHistogram {
+                feature_index: feature_index as u32,
+                bins: vec![
+                    HistogramBin {
+                        grad_sum: 2.0 * scale,
+                        hess_sum: 2.0,
+                        grad_sq_sum: 0.0,
+                        count: 2,
+                    },
+                    HistogramBin {
+                        grad_sum: -2.0 * scale,
+                        hess_sum: 2.0,
+                        grad_sq_sum: 0.0,
+                        count: 2,
+                    },
+                    HistogramBin {
+                        grad_sum: 0.0,
+                        hess_sum: 0.0,
+                        grad_sq_sum: 0.0,
+                        count: 0,
+                    },
+                ],
+            }
+        })
+        .collect();
+    HistogramBundle::from_feature_histograms(17, features, false)
+        .expect("shortlist fixture is valid")
+}
+
+#[test]
+fn shortlist_standard_respects_k_weighting_and_production_winner() {
+    let backend = CpuBackend;
+    let histograms = shortlist_standard_fixture(5);
+    let options = SplitSelectionOptions {
+        missing_bin_index: 2,
+        ..SplitSelectionOptions::default()
+    };
+    let weights = [1.0, 100.0, 1.0, 1.0, 1.0];
+
+    let shortlist = backend
+        .shortlist_standard_splits(&histograms, options, &weights, &[], 2)
+        .expect("shortlist succeeds");
+    let production = backend
+        .best_split_with_options(&histograms, options, &weights, &[])
+        .expect("production selection succeeds");
+
+    assert_eq!(shortlist.best_overall, production);
+    assert_eq!(
+        shortlist
+            .numeric_candidates
+            .iter()
+            .map(|candidate| candidate.feature_index)
+            .collect::<Vec<_>>(),
+        vec![1, 4]
+    );
+}
+
+#[test]
+fn shortlist_standard_handles_zero_exhaustive_ties_and_parallel_features() {
+    let backend = CpuBackend;
+    for feature_count in [4, CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD] {
+        let histograms = shortlist_standard_fixture(feature_count);
+        let options = SplitSelectionOptions {
+            missing_bin_index: 2,
+            ..SplitSelectionOptions::default()
+        };
+        let empty = backend
+            .shortlist_standard_splits(&histograms, options, &[], &[], 0)
+            .expect("zero shortlist succeeds");
+        assert!(empty.numeric_candidates.is_empty());
+
+        let exhaustive = backend
+            .shortlist_standard_splits(&histograms, options, &[], &[], usize::MAX)
+            .expect("exhaustive shortlist succeeds");
+        assert_eq!(exhaustive.numeric_candidates.len(), feature_count);
+        assert_eq!(
+            exhaustive.numeric_candidates[0].feature_index,
+            (feature_count - 1) as u32
+        );
+        assert_eq!(
+            exhaustive.numeric_candidates.last().unwrap().feature_index,
+            0
+        );
+        for _ in 0..8 {
+            assert_eq!(
+                backend
+                    .shortlist_standard_splits(
+                        &histograms,
+                        options,
+                        &vec![0.0; feature_count],
+                        &[],
+                        feature_count,
+                    )
+                    .expect("tied shortlist succeeds")
+                    .numeric_candidates
+                    .iter()
+                    .map(|candidate| candidate.feature_index)
+                    .collect::<Vec<_>>(),
+                (0..feature_count as u32).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn shortlist_standard_keeps_categorical_overall_out_of_numeric_candidates() {
+    let backend = CpuBackend;
+    let mut features = shortlist_standard_fixture(2)
+        .features()
+        .map(|view| {
+            let mut bins = view
+                .grad_sums()
+                .iter()
+                .zip(view.hess_sums())
+                .zip(view.counts())
+                .map(|((&grad_sum, &hess_sum), &count)| HistogramBin {
+                    grad_sum,
+                    hess_sum,
+                    grad_sq_sum: 0.0,
+                    count,
+                })
+                .collect::<Vec<_>>();
+            bins.push(HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                count: 0,
+            });
+            FeatureHistogram {
+                feature_index: view.feature_index(),
+                bins,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut categorical_bins = vec![
+        HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        4
+    ];
+    categorical_bins[0] = HistogramBin {
+        grad_sum: 50.0,
+        hess_sum: 2.0,
+        grad_sq_sum: 0.0,
+        count: 2,
+    };
+    categorical_bins[1] = HistogramBin {
+        grad_sum: -50.0,
+        hess_sum: 2.0,
+        grad_sq_sum: 0.0,
+        count: 2,
+    };
+    features.push(FeatureHistogram {
+        feature_index: 2,
+        bins: categorical_bins,
+    });
+    let histograms = HistogramBundle::from_feature_histograms(17, features, false)
+        .expect("mixed shortlist fixture is valid");
+    let options = SplitSelectionOptions {
+        missing_bin_index: 3,
+        ..SplitSelectionOptions::default()
+    };
+    let categorical = [CategoricalFeatureInfo {
+        feature_index: 2,
+        num_categories: 2,
+    }];
+
+    let shortlist = backend
+        .shortlist_standard_splits(&histograms, options, &[], &categorical, 8)
+        .expect("mixed shortlist succeeds");
+
+    assert!(shortlist.best_overall.as_ref().unwrap().is_categorical);
+    assert_eq!(shortlist.numeric_candidates.len(), 2);
+    assert!(
+        shortlist
+            .numeric_candidates
+            .iter()
+            .all(|candidate| !candidate.is_categorical)
+    );
 }
 
 fn legacy_parallel_partition_with_stats(

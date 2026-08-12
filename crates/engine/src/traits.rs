@@ -6,6 +6,7 @@ use alloygbm_core::{
 use crate::error::{EngineError, EngineResult};
 use crate::split_options::{
     CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, SplitSelectionOptions,
+    SplitShortlist,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +59,18 @@ pub trait BackendOps: Sync {
         _categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split(histograms)
+    }
+    fn shortlist_standard_splits(
+        &self,
+        _histograms: &HistogramBundle,
+        _options: SplitSelectionOptions,
+        _feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+        _max_numeric_features: usize,
+    ) -> EngineResult<SplitShortlist> {
+        Err(EngineError::NotImplemented(
+            "standard split shortlisting not implemented for this backend".to_string(),
+        ))
     }
     fn best_split_with_factor_context(
         &self,

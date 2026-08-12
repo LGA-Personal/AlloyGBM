@@ -1,6 +1,21 @@
 use alloygbm_core::{
     BinnedMatrix, DroConfig, FactorExposureMatrix, MISSING_BIN_U8, MorphConfig, MorphPrecomputed,
+    SplitCandidate,
 };
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitShortlist {
+    pub best_overall: Option<SplitCandidate>,
+    pub numeric_candidates: Vec<SplitCandidate>,
+}
+
+/// Return the gain used to compare candidates across features without
+/// changing the unweighted gain persisted in the candidate.
+pub fn feature_weighted_gain(candidate: &SplitCandidate, feature_weights: &[f32]) -> f32 {
+    feature_weights
+        .get(candidate.feature_index as usize)
+        .map_or(candidate.gain, |weight| candidate.gain * weight)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SplitSelectionOptions {
