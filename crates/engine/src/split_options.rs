@@ -1,12 +1,19 @@
 use alloygbm_core::{
-    BinnedMatrix, DroConfig, FactorExposureMatrix, MISSING_BIN_U8, MorphConfig, MorphPrecomputed,
-    SplitCandidate,
+    BinnedMatrix, DroConfig, FactorExposureMatrix, LinearLeaf, MISSING_BIN_U8, MorphConfig,
+    MorphPrecomputed, SplitCandidate,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitShortlist {
     pub best_overall: Option<SplitCandidate>,
     pub numeric_candidates: Vec<SplitCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedLinearSplit {
+    pub split: SplitCandidate,
+    pub left_leaf: LinearLeaf,
+    pub right_leaf: LinearLeaf,
 }
 
 /// Return the gain used to compare candidates across features without

@@ -3,12 +3,12 @@ use crate::split_helpers::goes_left_for_split;
 use crate::*;
 use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
-    LeafModelKind, MISSING_BIN_U8, MorphConfig, MorphPrecomputed, TrainParams, TrainingDataset,
-    TreeGrowth, discover_exact_feature_bundles,
+    LeafModelKind, LinearFeatureScaler, MISSING_BIN_U8, MorphConfig, MorphPrecomputed, TrainParams,
+    TrainingDataset, TreeGrowth, discover_exact_feature_bundles,
 };
 use alloygbm_engine::{
-    BackendOps, FactorSplitContext, HistogramExecution, MorphContext, SquaredErrorObjective,
-    Trainer,
+    BackendOps, FactorSplitContext, HistogramExecution, LinearContext, MorphContext,
+    SquaredErrorObjective, Trainer,
 };
 
 fn sample_binned_matrix() -> BinnedMatrix {
@@ -411,6 +411,87 @@ fn shortlist_standard_keeps_categorical_overall_out_of_numeric_candidates() {
             .iter()
             .all(|candidate| !candidate.is_categorical)
     );
+}
+
+#[test]
+fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
+    let backend = CpuBackend;
+    let binned =
+        BinnedMatrix::new(4, 1, 1, vec![0_u8, 0, 1, 1]).expect("shortlisted PL matrix is valid");
+    let gradients = vec![
+        GradientPair {
+            grad: 2.0,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 2.0,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: -2.0,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: -2.0,
+            hess: 1.0,
+        },
+    ];
+    let node = sample_node();
+    let raw = vec![1.0; 4];
+    let scaler = LinearFeatureScaler::identity(1);
+    let regressors = vec![0];
+    let context = LinearContext {
+        regressor_features: regressors.clone(),
+        l2_lambda: 1.0,
+    };
+    let options = SplitSelectionOptions {
+        l2_lambda: 1.0,
+        missing_bin_index: binned.missing_bin() as usize,
+        ..SplitSelectionOptions::default()
+    };
+    let owned = backend
+        .build_linear_histograms(
+            &binned,
+            &gradients,
+            &node,
+            &[FeatureTile::new(0, 1).expect("single feature tile")],
+            &regressors,
+            &scaler,
+            &raw,
+            4,
+            1,
+        )
+        .expect("owned linear histogram builds");
+    let oracle_split = backend
+        .best_split_linear(&owned, options, &[], &[], &context)
+        .expect("owned split search succeeds")
+        .expect("owned split exists");
+    let oracle_leaves = backend
+        .compute_linear_leaf_pair(
+            &owned,
+            oracle_split.feature_index,
+            oracle_split.threshold_bin as usize,
+            oracle_split.default_left,
+            options.missing_bin_index,
+            0.1,
+            context.l2_lambda,
+            &scaler,
+        )
+        .expect("owned leaves solve");
+
+    let prepared = backend
+        .evaluate_shortlisted_linear_feature(
+            &binned, &gradients, &node, 0, &context, &scaler, &raw, 4, 1, options, 0.1,
+        )
+        .expect("shortlisted evaluation succeeds")
+        .expect("shortlisted split exists");
+
+    assert_eq!(prepared.split, oracle_split);
+    assert_eq!(prepared.split.threshold_bin, 0);
+    assert!(prepared.split.default_left);
+    assert!((prepared.split.gain - (16.0 / 3.0)).abs() < 1e-5);
+    assert_eq!(prepared.left_leaf.regressor_features, regressors);
+    assert_eq!((prepared.left_leaf, prepared.right_leaf), oracle_leaves);
 }
 
 fn legacy_parallel_partition_with_stats(

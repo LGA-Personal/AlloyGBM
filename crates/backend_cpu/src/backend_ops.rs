@@ -5,7 +5,8 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
-    HistogramExecution, LinearContext, MorphContext, SplitSelectionOptions, SplitShortlist,
+    HistogramExecution, LinearContext, MorphContext, PreparedLinearSplit, SplitSelectionOptions,
+    SplitShortlist,
 };
 use rayon::prelude::*;
 
@@ -536,6 +537,78 @@ impl BackendOps for CpuBackend {
         };
 
         Ok(result)
+    }
+
+    fn evaluate_shortlisted_linear_feature(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split_feature_index: u32,
+        linear_context: &LinearContext,
+        feature_scaler: &LinearFeatureScaler,
+        raw_feature_values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+        options: SplitSelectionOptions,
+        learning_rate: f32,
+    ) -> EngineResult<Option<PreparedLinearSplit>> {
+        pl_histogram::with_shortlisted_linear_histogram(
+            binned_matrix,
+            gradients,
+            node,
+            split_feature_index,
+            &linear_context.regressor_features,
+            feature_scaler,
+            raw_feature_values,
+            row_count,
+            feature_count,
+            |bins| {
+                let split = pl::best_split_linear_for_bins(
+                    split_feature_index,
+                    bins,
+                    node.node_id,
+                    options,
+                    linear_context,
+                )?;
+                let (l_xtg, l_xthx, l_grad, l_hess, r_xtg, r_xthx, r_grad, r_hess) =
+                    pl::leaf_linear_stats_for_bins(
+                        bins,
+                        split.threshold_bin as usize,
+                        options.missing_bin_index,
+                        split.default_left,
+                    );
+                let left_leaf = pl::solve_pl_leaf(
+                    &l_xtg,
+                    &l_xthx,
+                    pl::LinearLeafSolveParams {
+                        grad_sum: l_grad,
+                        hess_sum: l_hess,
+                        learning_rate,
+                        l2_lambda: linear_context.l2_lambda,
+                    },
+                    &linear_context.regressor_features,
+                    feature_scaler,
+                );
+                let right_leaf = pl::solve_pl_leaf(
+                    &r_xtg,
+                    &r_xthx,
+                    pl::LinearLeafSolveParams {
+                        grad_sum: r_grad,
+                        hess_sum: r_hess,
+                        learning_rate,
+                        l2_lambda: linear_context.l2_lambda,
+                    },
+                    &linear_context.regressor_features,
+                    feature_scaler,
+                );
+                Some(PreparedLinearSplit {
+                    split,
+                    left_leaf,
+                    right_leaf,
+                })
+            },
+        )
     }
 
     fn compute_linear_leaf_pair(

@@ -5,8 +5,8 @@ use alloygbm_core::{
 
 use crate::error::{EngineError, EngineResult};
 use crate::split_options::{
-    CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, SplitSelectionOptions,
-    SplitShortlist,
+    CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, PreparedLinearSplit,
+    SplitSelectionOptions, SplitShortlist,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +201,26 @@ pub trait BackendOps: Sync {
     ) -> EngineResult<Option<SplitCandidate>> {
         Err(EngineError::NotImplemented(
             "best_split_linear not implemented for this backend".to_string(),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_shortlisted_linear_feature(
+        &self,
+        _binned_matrix: &BinnedMatrix,
+        _gradients: &[GradientPair],
+        _node: &NodeSlice,
+        _split_feature_index: u32,
+        _linear_context: &LinearContext,
+        _feature_scaler: &LinearFeatureScaler,
+        _raw_feature_values: &[f32],
+        _row_count: usize,
+        _feature_count: usize,
+        _options: SplitSelectionOptions,
+        _learning_rate: f32,
+    ) -> EngineResult<Option<PreparedLinearSplit>> {
+        Err(EngineError::NotImplemented(
+            "shortlisted linear feature evaluation not implemented for this backend".to_string(),
         ))
     }
 

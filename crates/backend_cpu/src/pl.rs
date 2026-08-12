@@ -308,8 +308,24 @@ pub fn best_split_linear_for_feature(
     options: SplitSelectionOptions,
     ctx: &LinearContext,
 ) -> Option<SplitCandidate> {
+    best_split_linear_for_bins(
+        linear_fh.feature_index,
+        &linear_fh.bins,
+        node_id,
+        options,
+        ctx,
+    )
+}
+
+pub(crate) fn best_split_linear_for_bins(
+    feature_index: u32,
+    bins: &[LinearHistogramBin],
+    node_id: u32,
+    options: SplitSelectionOptions,
+    ctx: &LinearContext,
+) -> Option<SplitCandidate> {
     let d = ctx.d();
-    if d == 0 || linear_fh.bins.len() < 2 {
+    if d == 0 || bins.len() < 2 {
         return None;
     }
     let missing_bin_idx = options.missing_bin_index;
@@ -320,7 +336,7 @@ pub fn best_split_linear_for_feature(
     let mut p_grad = 0.0_f32;
     let mut p_hess = 0.0_f32;
     let mut p_count = 0_u32;
-    for bin in &linear_fh.bins {
+    for bin in bins {
         p_grad += bin.grad_sum;
         p_hess += bin.hess_sum;
         p_count += bin.count;
@@ -333,8 +349,8 @@ pub fn best_split_linear_for_feature(
     }
 
     // ── Missing-bin contribution ─────────────────────────────────────────────
-    let (m_xtg, m_xt_hx, m_grad, m_hess, m_count) = if missing_bin_idx < linear_fh.bins.len() {
-        let mb = &linear_fh.bins[missing_bin_idx];
+    let (m_xtg, m_xt_hx, m_grad, m_hess, m_count) = if missing_bin_idx < bins.len() {
+        let mb = &bins[missing_bin_idx];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
         copy_xt_hx(&mb.xt_hx, &mut mxthx);
         (mb.xtg, mxthx, mb.grad_sum, mb.hess_sum, mb.count)
@@ -352,7 +368,7 @@ pub fn best_split_linear_for_feature(
     let parent_gain = compute_pl_gain_one_side(&p_xtg, &p_xt_hx, d, ctx.l2_lambda);
 
     // ── Non-missing totals (for right-side via subtraction) ──────────────────
-    let scan_limit = linear_fh.bins.len().min(missing_bin_idx);
+    let scan_limit = bins.len().min(missing_bin_idx);
     let nm_grad = p_grad - m_grad;
     let nm_hess = p_hess - m_hess;
     let nm_count = p_count.saturating_sub(m_count);
@@ -372,7 +388,7 @@ pub fn best_split_linear_for_feature(
     let mut best_gain = 0.0_f32;
     let min_rows = options.min_rows_per_leaf as u32;
 
-    for (threshold_bin, bin) in linear_fh.bins.iter().enumerate().take(scan_limit) {
+    for (threshold_bin, bin) in bins.iter().enumerate().take(scan_limit) {
         // Accumulate left side.
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
@@ -462,7 +478,7 @@ pub fn best_split_linear_for_feature(
                 best_gain = gain;
                 best_candidate = Some(SplitCandidate {
                     node_id,
-                    feature_index: linear_fh.feature_index,
+                    feature_index,
                     threshold_bin: threshold_bin as u16,
                     gain,
                     default_left,
@@ -511,11 +527,35 @@ pub fn leaf_linear_stats_for_split(
     f32,
     f32,
 ) {
-    let scan_limit = linear_fh.bins.len().min(missing_bin_idx);
+    leaf_linear_stats_for_bins(
+        &linear_fh.bins,
+        threshold_bin,
+        missing_bin_idx,
+        default_left,
+    )
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn leaf_linear_stats_for_bins(
+    bins: &[LinearHistogramBin],
+    threshold_bin: usize,
+    missing_bin_idx: usize,
+    default_left: bool,
+) -> (
+    [f32; MAX_PL_REGRESSORS],
+    [f32; MAX_PL_MATRIX_ENTRIES],
+    f32,
+    f32,
+    [f32; MAX_PL_REGRESSORS],
+    [f32; MAX_PL_MATRIX_ENTRIES],
+    f32,
+    f32,
+) {
+    let scan_limit = bins.len().min(missing_bin_idx);
 
     // Missing bin.
-    let (m_xtg, m_xt_hx, m_grad, m_hess) = if missing_bin_idx < linear_fh.bins.len() {
-        let mb = &linear_fh.bins[missing_bin_idx];
+    let (m_xtg, m_xt_hx, m_grad, m_hess) = if missing_bin_idx < bins.len() {
+        let mb = &bins[missing_bin_idx];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
         copy_xt_hx(&mb.xt_hx, &mut mxthx);
         (mb.xtg, mxthx, mb.grad_sum, mb.hess_sum)
@@ -533,11 +573,7 @@ pub fn leaf_linear_stats_for_split(
     let mut l_xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
     let mut l_grad = 0.0_f32;
     let mut l_hess = 0.0_f32;
-    for bin in linear_fh
-        .bins
-        .iter()
-        .take(scan_limit.min(threshold_bin + 1))
-    {
+    for bin in bins.iter().take(scan_limit.min(threshold_bin + 1)) {
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
         add_xtg(&bin.xtg, &mut l_xtg);
@@ -549,7 +585,7 @@ pub fn leaf_linear_stats_for_split(
     let mut nm_xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
     let mut nm_grad = 0.0_f32;
     let mut nm_hess = 0.0_f32;
-    for bin in linear_fh.bins.iter().take(scan_limit) {
+    for bin in bins.iter().take(scan_limit) {
         nm_grad += bin.grad_sum;
         nm_hess += bin.hess_sum;
         add_xtg(&bin.xtg, &mut nm_xtg);
@@ -1144,6 +1180,58 @@ mod tests {
             let net = gain_l + gain_r - gain_p;
             // Net gain can be negative if parent is already well-fit; just assert no NaN/inf.
             assert!(net.is_finite(), "gain should be finite, got {net}");
+        }
+    }
+
+    #[test]
+    fn shortlisted_linear_borrowed_scanner_matches_owned_oracle() {
+        for bin_count in [2_usize, 3, 8, 64, 255] {
+            let mut state = 0xA5A5_1F3D_u32 ^ bin_count as u32;
+            let mut bins = Vec::with_capacity(bin_count);
+            for _ in 0..bin_count {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let x = 0.25 + (state % 100) as f32 / 40.0;
+                let grad = ((state >> 8) as i16 as f32) / 8192.0;
+                let hess = 0.5 + (state % 37) as f32 / 20.0;
+                let mut bin = LinearHistogramBin {
+                    grad_sum: grad,
+                    hess_sum: hess,
+                    count: 1 + state % 5,
+                    ..LinearHistogramBin::default()
+                };
+                bin.xtg[0] = grad * x;
+                bin.xt_hx[0] = hess * x * x;
+                bins.push(bin);
+            }
+            let feature = LinearFeatureHistogram {
+                feature_index: 9,
+                bins,
+            };
+            for missing_bin_index in [bin_count, bin_count - 1] {
+                let options = SplitSelectionOptions {
+                    l1_alpha: 0.1,
+                    l2_lambda: 0.5,
+                    min_child_hessian: 0.1,
+                    min_rows_per_leaf: 1,
+                    missing_bin_index,
+                    ..SplitSelectionOptions::default()
+                };
+                let context = LinearContext {
+                    regressor_features: vec![0],
+                    l2_lambda: 0.5,
+                };
+                assert_eq!(
+                    best_split_linear_for_bins(
+                        feature.feature_index,
+                        &feature.bins,
+                        23,
+                        options,
+                        &context,
+                    ),
+                    best_split_linear_for_feature(&feature, 23, options, &context),
+                    "borrowed scanner mismatch for bins={bin_count} missing={missing_bin_index}",
+                );
+            }
         }
     }
 
