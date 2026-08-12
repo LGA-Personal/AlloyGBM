@@ -6,9 +6,9 @@
 
 | Date | Author | Production base | Status |
 |---|---|---|---|
-| 2026-08-12 | OpenAI Codex | `ea4df36` | Planned |
+| 2026-08-12 | OpenAI Codex | `ea4df36` | Implemented; default promotion rejected by A/B evidence |
 
-**Goal:** Add public `pl_split_candidates=8` control and use a standard-gain feature shortlist to
+**Goal:** Add public `pl_split_candidates` control and use a standard-gain feature shortlist to
 perform bounded, exhaustive PL split rescoring with reusable one-feature matrix-histogram storage.
 
 **Architecture:** Standard scalar histograms produce the best overall split and an ordered numeric
@@ -25,7 +25,8 @@ NumPy, scikit-learn, pytest, maturin, Sphinx, subprocess RSS measurement.
 - Follow the approved design in
   `docs/reviews/2026-08-12-pr-136-top-k-pl-histogram-design.md`.
 - Preserve `pl_split_candidates=0` artifacts byte for byte against production base `ea4df36`.
-- Default `pl_split_candidates` to `8` on regressor, classifier, ranker, and `TrainParams`.
+- Default `pl_split_candidates` to `0` on regressor, classifier, ranker, and `TrainParams` after
+  the proposed `8` default failed the predeclared quality and fixed-round cost gates.
 - Reject booleans, negative values, non-integral values, and native integer overflow.
 - Do not add or change artifact sections, metadata fields, prediction code, objective formulas, PL
   solve formulas, model defaults other than the approved new parameter, or dependencies.
@@ -37,6 +38,20 @@ NumPy, scikit-learn, pytest, maturin, Sphinx, subprocess RSS measurement.
 - Use no `unsafe`; workspace policy remains `unsafe_code = "forbid"`.
 - Commit one logical change per task and retain rejected performance prototypes in machine-readable
   evidence.
+
+---
+
+## Implementation Outcome
+
+The architecture was completed, including both tree growers, deterministic
+parallel candidate evaluation, reusable one-feature scratch, public estimator
+plumbing, and exact `k=0` compatibility. The proposed default of `8` was not
+accepted: the five-seed matrix measured an 8.09x median fixed-round cost and
+material regressions on multiple fixtures. A joint intercept/slope gain variant
+also failed. With explicit user approval, `0` is therefore the production
+default and positive values are documented experimental opt-ins. The wide-data
+purpose of the shortlist remains demonstrated: `k=8` took 13.96% to 20.66% of
+exhaustive `k=all` time across the 15 wide records.
 
 ---
 
@@ -196,17 +211,17 @@ git commit -m "bench: establish top-k PL acceptance baseline"
 - Modify: `bindings/python/tests/test_sklearn_conformance.py`
 
 **Interfaces:**
-- Produces `TrainParams::pl_split_candidates: usize` with default `8`.
-- Produces Python estimator attribute and constructor parameter `pl_split_candidates: int = 8`.
+- Produces `TrainParams::pl_split_candidates: usize` with default `0`.
+- Produces Python estimator attribute and constructor parameter `pl_split_candidates: int = 0`.
 
 - [ ] **Step 1: Add failing Rust default and validation tests**
 
-Pin `TrainParams::default().pl_split_candidates == 8` and a validation failure for an internal
+Pin `TrainParams::default().pl_split_candidates == 0` and a validation failure for an internal
 value above `u32::MAX as usize`, the native bridge limit used for stable cross-platform conversion.
 
 - [ ] **Step 2: Add failing Python estimator-contract tests**
 
-For all three estimators, assert default `8`, explicit `0`, clone, `get_params`, `set_params`,
+For all three estimators, assert default `0`, explicit positive values, clone, `get_params`, `set_params`,
 `repr`, and pickle retention. Assert `True`, `False`, `-1`, `1.5`, and `2**32` raise `ValueError`
 mentioning `pl_split_candidates`.
 
@@ -439,7 +454,7 @@ git commit -m "perf: evaluate shortlisted PL features in reusable scratch"
 Add deterministic fixtures proving:
 
 - `k=0` matches a captured production artifact byte vector for level and leaf growth;
-- default `k=8` can select a different feature or threshold when PL gain favors it;
+- opt-in `k=8` can select a different feature or threshold when PL gain favors it;
 - `k>=eligible` matches a scalar exhaustive candidate-specific oracle;
 - prepared leaves are used without invoking selected-partition PL accumulation again;
 - categorical standard winner and MorphBoost bypass PL rescoring;
@@ -510,7 +525,7 @@ git commit -m "feat: rescore top-k PL split features"
 
 - [ ] **Step 1: Add end-to-end Python cases**
 
-Pin deterministic `k=0`, default `k=8`, and exhaustive values across regression, binary,
+Pin deterministic default/explicit `k=0`, opt-in `k=8`, and exhaustive values across regression, binary,
 multiclass, ranking, quantile, raw-scale, missing-value, native categorical, Morph, level-wise, and
 leaf-wise fixtures. Assert finite predictions, estimator state, persistence, and exact compatibility
 digests where required.
@@ -582,13 +597,11 @@ done | tee benchmarks/results/pr136_pl_histogram_candidate.txt
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/pl_topk_performance.py compare \
   benchmarks/results/pr136_pl_topk_baseline.json \
   benchmarks/results/pr136_pl_topk_candidate.json \
-  --native-baseline benchmarks/results/pr136_pl_histogram_baseline.txt \
-  --native-candidate benchmarks/results/pr136_pl_histogram_candidate.txt \
   --output benchmarks/results/pr136_pl_topk_comparison.json
 ```
 
-Require `passed: true`, exact k0 digests, memory/RSS pass, per-case quality pass, both convergence
-passes, bounded fixed-round cost, wide-feature shortlist benefit, and deterministic evidence.
+Require `passed: true`, exact default and k0 digests, memory/RSS pass, wide-feature shortlist
+benefit, and deterministic evidence. Preserve opt-in quality and cost failures as observations.
 
 - [ ] **Step 5: Optimize behavior-preservingly if a performance gate fails**
 
@@ -599,8 +612,9 @@ Try at most, in order:
 3. reuse child/node scratch capacity more aggressively without retaining more than one feature;
 4. avoid solving a prepared leaf pair until its PL gain becomes the current winner.
 
-Do not change `k=8`, formulas, thresholds, fixture budgets, or acceptance gates. Record each rejected
-prototype under `rejected_trials` with commit, timings, memory, and rejection reason.
+Do not change formulas, thresholds, or fixture budgets merely to pass a gate. Record each rejected
+prototype under `rejected_trials` with commit, timings, memory, and rejection reason. The design's
+explicit default-reconsideration clause permits retaining `0` when promotion evidence fails.
 
 - [ ] **Step 6: Commit accepted evidence**
 
@@ -628,7 +642,7 @@ git commit -m "bench: verify top-k PL acceptance gates"
 - Modify: `docs/reviews/2026-08-12-pr-136-top-k-pl-histogram-implementation-plan.md`
 
 **Interfaces:**
-- User docs state default `8`, `0` compatibility, clipping, Morph/categorical fallbacks, and the
+- User docs state default `0`, positive opt-in behavior, clipping, Morph/categorical fallbacks, and the
   measured quality/memory/time tradeoff.
 - Resolution marks only the top-k PL histogram finding fixed.
 
@@ -685,8 +699,6 @@ maturin develop --release
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/pl_topk_performance.py compare \
   benchmarks/results/pr136_pl_topk_baseline.json \
   benchmarks/results/pr136_pl_topk_candidate.json \
-  --native-baseline benchmarks/results/pr136_pl_histogram_baseline.txt \
-  --native-candidate benchmarks/results/pr136_pl_histogram_candidate.txt \
   --output /tmp/pr136_pl_topk_comparison.json
 git diff --check ea4df36...HEAD
 git status --short

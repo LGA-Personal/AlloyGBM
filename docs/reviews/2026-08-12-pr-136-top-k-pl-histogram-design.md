@@ -2,7 +2,7 @@
 
 | Date | Author | Base | Status |
 |---|---|---|---|
-| 2026-08-12 | OpenAI Codex | `main` after PR #135 (`ea4df36`) | Approved architecture; ready for implementation planning |
+| 2026-08-12 | OpenAI Codex | `main` after PR #135 (`ea4df36`) | Implemented as an opt-in mode; ready for review |
 
 ## Objective
 
@@ -12,10 +12,12 @@ all-feature matrix-histogram cost. Standard scalar histograms first identify a
 small deterministic feature shortlist. Only those numeric features receive the
 expensive `(X^T g, X^T H X)` statistics needed for exhaustive PL rescoring.
 
-The default is `pl_split_candidates=8`. Setting it to `0` preserves the current
-v0.12.10+ behavior exactly: select the split with the existing standard or Morph
-criterion, partition the rows, and fit linear child models only for that selected
-split.
+The default is `pl_split_candidates=0`, which preserves the current v0.12.10+
+behavior exactly: select the split with the existing standard or Morph criterion,
+partition the rows, and fit linear child models only for that selected split.
+Positive values opt into the bounded PL-aware rescorer. The originally proposed
+default of `8` was rejected after the predeclared A/B matrix found mixed quality
+and excessive fixed-round cost.
 
 ## Current-State Constraint
 
@@ -32,7 +34,7 @@ accuracy and convergence benefit justifies its cost relative to
 `GBMRegressor`, `GBMClassifier`, and `GBMRanker` gain:
 
 ```python
-pl_split_candidates: int = 8
+pl_split_candidates: int = 0
 ```
 
 The parameter contract is:
@@ -54,7 +56,7 @@ The parameter contract is:
 - joint multi-output training does not support linear leaves and therefore does
   not gain a separate behavior path.
 
-`TrainParams.pl_split_candidates` is appended to the struct, defaults to `8`, and
+`TrainParams.pl_split_candidates` is appended to the struct, defaults to `0`, and
 is validated centrally. Python validation rejects `True`/`False`, negative
 values, non-integral values, and integers that cannot be represented by the
 native parameter type.
@@ -207,52 +209,43 @@ live `LinearHistogramBin` capacities.
 Baseline evidence is captured from production `ea4df36` plus benchmark-only
 files in a detached worktree. Candidate evidence is captured on the PR branch.
 
-## Predeclared Acceptance Gates
+## Acceptance Outcome
 
-The implementation is accepted only when all gates pass:
+The original proposal predeclared quality, convergence, fixed-round cost, and
+wide-feature shortlist gates for promoting `k=8` to the default. Broad A/B
+evidence failed the quality and fixed-round cost gates: median opt-in cost was
+8.09x `k=0`, and several fixtures regressed materially. A second joint
+intercept/slope formula also failed and was discarded. Per the design's explicit
+default-reconsideration clause, the user approved retaining the production
+behavior as the default and exposing the bounded rescorer only as an experimental
+opt-in.
 
-1. **Compatibility:** candidate `k=0` matches the production-base prediction and
-   artifact digests for every deterministic record.
-2. **Memory:** live native matrix-histogram storage is bounded to one feature per
-   worker and is no more than `1 / F` of the existing all-feature bundle on each
-   `F`-feature oracle fixture. For default `k=8`, subprocess peak RSS may exceed
-   `k=0` by no more than the larger of 15% or 32 MiB on any repeated case.
-3. **Quality:** the five-seed median default-`k=8` primary metric is within 1%
-   relative of `k=0` on every case and improves at least one predefined
-   PL-friendly case by at least 5%. Secondary metrics may not regress by more
-   than 1% relative.
-4. **Convergence:** on both predefined local-linear fixtures, median `k=8`
-   reaches the `k=0` final-checkpoint quality in at most 75% of the rounds.
-5. **Bounded fixed-round cost:** the median `k=8 / k=0` fit-time ratio across
-   shapes is at most 3.0, and no case median exceeds 5.0.
-6. **Shortlist benefit:** on fixtures with at least 32 eligible numeric features,
-   median `k=8` fit time is at most 50% of exhaustive `k=all`, while remaining
-   within 1% relative quality.
-7. **Determinism:** repeated candidate runs have identical predictions and
-   artifacts for the same seed and thread count; single-thread and multi-thread
-   fits satisfy the existing deterministic contract.
-8. **Repository health:** formatting, strict Clippy, all Rust tests, release
-   extension build, all Python and benchmark tests, sklearn conformance, Sphinx
-   with warnings as errors, and `git diff --check` pass.
+The accepted opt-in contract requires:
 
-Gate thresholds are fixed by this design. Failed gates require a
-behavior-preserving optimization, a default reconsideration with explicit user
-approval, or rejection of the implementation; they must not be weakened after
-candidate measurements are known.
+1. **Compatibility:** both the default and explicit `k=0` match production-base
+   prediction and artifact digests for every deterministic record.
+2. **Bounded storage:** each worker retains at most one feature's matrix
+   histogram scratch, independent of `k` and total feature count.
+3. **Shortlist efficiency:** on fixtures with at least 32 eligible numeric
+   features, `k=8` fit time is at most 50% of exhaustive `k=all`.
+4. **Transparency:** opt-in quality and fixed-round cost remain reported as
+   observations, not represented as general improvements.
+5. **Determinism and repository health:** thread-count determinism, both growth
+   modes, formatting, Clippy, Rust/Python tests, docs, and diff checks pass.
 
 ## Documentation and Review Closure
 
 Update the README, estimator documentation and Sphinx mirror, benchmark index,
 changelog, and the 2026-07-02 special-modes resolution. Documentation must state:
 
-- default `8`, `0` compatibility behavior, and positive-value clipping;
+- default `0`, exact compatibility behavior, and positive-value clipping;
 - standard-gain feature shortlist followed by exhaustive PL threshold rescoring;
 - MorphBoost and native categorical fallback behavior;
 - the parameter controls a training-time accuracy/memory/time tradeoff and does
   not affect prediction cost or artifact compatibility;
-- measured memory, quality, convergence, and runtime evidence, including any
-  case where `k=0` remains preferable.
+- measured memory, quality, convergence, and runtime evidence, including the
+  cases where `k=0` remains preferable.
 
-The resolution may mark the top-k PL histogram finding fixed only after all
-predeclared gates pass. PR #136 remains a draft until independent review and must
-not be merged by the implementation agent.
+The resolution records the bounded implementation and the rejected default
+promotion. PR #136 remains a draft until independent review and must not be
+merged by the implementation agent.

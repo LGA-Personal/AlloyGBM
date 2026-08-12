@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Bounded, opt-in PL-aware split rescoring.** `GBMRegressor`,
+  `GBMClassifier`, and `GBMRanker` now expose `pl_split_candidates` for linear
+  leaves. The default `0` exactly preserves the production split path; positive
+  values shortlist numeric features by standard gain and exhaustively rescore
+  those features with reusable one-feature matrix-histogram scratch. The mode is
+  experimental because broad A/B evidence found mixed quality and an 8.09x
+  median cost versus `0`, although `k=8` used only 13.96–20.66% of exhaustive
+  rescoring time on wide fixtures. Prediction and artifact formats are unchanged.
+
 ### Fixed
 
 - **Vectorized exhaustive MorphBoost numeric split scanning.** Ordinary

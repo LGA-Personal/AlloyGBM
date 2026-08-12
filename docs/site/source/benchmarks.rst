@@ -39,6 +39,9 @@ harnesses are also provided:
 - ``benchmarks/pl_trees_benchmark.py`` -- piecewise-linear-leaf
   convergence-curve and λ-sweep analysis. Report at
   ``docs/benchmarks/pl_trees_v1.md``.
+- ``benchmarks/pl_topk_performance.py`` -- isolated five-seed compatibility,
+  quality, RSS, and runtime matrix for experimental PL split shortlisting.
+  Report at ``docs/benchmarks/pl_topk_pr136.md``.
 - ``benchmarks/objective_benchmark.py`` -- deterministic large-query
   LambdaMART and skewed-count GLM validation. Report at
   ``docs/benchmarks/objective_benchmark_v1.md``.

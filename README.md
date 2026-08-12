@@ -290,6 +290,7 @@ model = GBMRegressor(
     max_depth=6,
     learning_rate=0.05,
     leaf_model="linear",
+    pl_split_candidates=0,  # exact standard-split compatibility path
     lambda_l2=0.01,    # recommended >= 0.01 with linear leaves
     seed=7,
 )
@@ -307,6 +308,18 @@ Missing regressor values contribute the standardized mean-imputed value
 direction. Internal standardization makes `lambda_l2` much less sensitive to
 raw feature units, but `lambda_l2 >= 0.01` remains a sensible default for
 noisy or long fits.
+
+`pl_split_candidates` controls an experimental PL-aware split rescorer. The
+default `0` preserves the standard split-selection path and current artifacts.
+A positive value first shortlists that many numeric features by standard gain,
+then exhaustively rescans their thresholds with the PL criterion while reusing
+one feature-histogram scratch allocation per worker. Values above the eligible
+numeric feature count are clipped. This can substantially reduce training time
+relative to exhaustive PL rescoring on wide data, but it is slower than `0` and
+quality is dataset-dependent; validate positive values explicitly. MorphBoost
+and native-categorical winners retain their existing split paths. Prediction
+cost and the artifact format are unchanged. See the
+[PR #136 evidence](docs/benchmarks/pl_topk_pr136.md).
 
 ### Time-Aware Validation
 
