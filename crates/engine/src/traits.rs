@@ -224,6 +224,8 @@ pub trait BackendOps: Sync {
         _feature_count: usize,
         _options: SplitSelectionOptions,
         _learning_rate: f32,
+        _parent_leaf_value: f32,
+        _parent_linear_leaf: Option<&LinearLeaf>,
     ) -> EngineResult<Option<PreparedLinearSplit>> {
         Err(EngineError::NotImplemented(
             "shortlisted linear feature evaluation not implemented for this backend".to_string(),

@@ -654,6 +654,100 @@ pub(crate) fn leaf_linear_stats_for_bins(
     )
 }
 
+fn linear_leaf_l2_penalty(leaf: &LinearLeaf, learning_rate: f32, l2_lambda: f32) -> Option<f64> {
+    if !learning_rate.is_finite() || learning_rate <= 0.0 || !l2_lambda.is_finite() {
+        return None;
+    }
+    let scale = f64::from(learning_rate);
+    let intercept = f64::from(leaf.intercept) / scale;
+    let mut squared_norm = intercept * intercept;
+    for &weight in &leaf.weights {
+        let weight = f64::from(weight) / scale;
+        squared_norm += weight * weight;
+    }
+    squared_norm
+        .is_finite()
+        .then_some(0.5 * f64::from(l2_lambda) * squared_norm)
+}
+
+/// Measure the second-order reduction delivered by the actual independently
+/// solved PL intercept and slope updates, relative to an unsplit PL leaf.
+///
+/// The historical matrix gain omits intercept/slope cross terms. That makes it
+/// a useful threshold scanner, but it can overstate a candidate whose solved
+/// updates reinforce each other. This final guard evaluates the model that will
+/// actually be committed without retaining any additional histogram storage.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn realized_pl_split_gain(
+    binned_matrix: &BinnedMatrix,
+    gradients: &[alloygbm_core::GradientPair],
+    node: &alloygbm_core::NodeSlice,
+    raw_feature_values: &[f32],
+    feature_count: usize,
+    split: &SplitCandidate,
+    parent_leaf_value: f32,
+    parent_linear_leaf: Option<&LinearLeaf>,
+    left_leaf: &LinearLeaf,
+    right_leaf: &LinearLeaf,
+    learning_rate: f32,
+    l2_lambda: f32,
+) -> Option<f32> {
+    if split.is_categorical || feature_count != binned_matrix.feature_count {
+        return None;
+    }
+    let inverse_learning_rate = 1.0_f64 / f64::from(learning_rate);
+    if !inverse_learning_rate.is_finite() {
+        return None;
+    }
+
+    let mut parent_reduction = 0.0_f64;
+    let mut child_reduction = 0.0_f64;
+    for &row in &node.row_indices {
+        let row = row as usize;
+        let gradient = gradients.get(row)?;
+        let row_offset = row.checked_mul(feature_count)?;
+        if row_offset + feature_count > raw_feature_values.len() {
+            return None;
+        }
+        let parent_update = f64::from(parent_linear_leaf.map_or(parent_leaf_value, |leaf| {
+            leaf.eval(raw_feature_values, row_offset)
+        })) * inverse_learning_rate;
+        let bin = binned_matrix.bin_at(row, split.feature_index as usize);
+        let child_leaf = if bin == binned_matrix.missing_bin() {
+            if split.default_left {
+                left_leaf
+            } else {
+                right_leaf
+            }
+        } else if bin <= split.threshold_bin {
+            left_leaf
+        } else {
+            right_leaf
+        };
+        let child_update =
+            f64::from(child_leaf.eval(raw_feature_values, row_offset)) * inverse_learning_rate;
+        if !parent_update.is_finite() || !child_update.is_finite() {
+            return None;
+        }
+        let grad = f64::from(gradient.grad);
+        let hess = f64::from(gradient.hess);
+        parent_reduction += -grad * parent_update - 0.5 * hess * parent_update * parent_update;
+        child_reduction += -grad * child_update - 0.5 * hess * child_update * child_update;
+    }
+
+    parent_reduction -= if let Some(parent_leaf) = parent_linear_leaf {
+        linear_leaf_l2_penalty(parent_leaf, learning_rate, l2_lambda)?
+    } else {
+        let unit_value = f64::from(parent_leaf_value) * inverse_learning_rate;
+        0.5 * f64::from(l2_lambda) * unit_value * unit_value
+    };
+    child_reduction -= linear_leaf_l2_penalty(left_leaf, learning_rate, l2_lambda)?;
+    child_reduction -= linear_leaf_l2_penalty(right_leaf, learning_rate, l2_lambda)?;
+    let gain = child_reduction - parent_reduction;
+    let gain = gain as f32;
+    (gain.is_finite() && gain > 0.0).then_some(gain)
+}
+
 /// Solve for PL leaf weights: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
 ///
 /// Returns the weight vector `[α_0, …, α_{d-1}]`. On an invalid,

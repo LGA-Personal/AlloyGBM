@@ -552,6 +552,8 @@ impl BackendOps for CpuBackend {
         feature_count: usize,
         options: SplitSelectionOptions,
         learning_rate: f32,
+        parent_leaf_value: f32,
+        parent_linear_leaf: Option<&LinearLeaf>,
     ) -> EngineResult<Option<PreparedLinearSplit>> {
         pl_histogram::with_shortlisted_linear_histogram(
             binned_matrix,
@@ -564,7 +566,7 @@ impl BackendOps for CpuBackend {
             row_count,
             feature_count,
             |bins| {
-                let split = pl::best_split_linear_for_bins(
+                let mut split = pl::best_split_linear_for_bins(
                     split_feature_index,
                     bins,
                     node.node_id,
@@ -602,6 +604,20 @@ impl BackendOps for CpuBackend {
                     &linear_context.regressor_features,
                     feature_scaler,
                 );
+                split.gain = pl::realized_pl_split_gain(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    raw_feature_values,
+                    feature_count,
+                    &split,
+                    parent_leaf_value,
+                    parent_linear_leaf,
+                    &left_leaf,
+                    &right_leaf,
+                    learning_rate,
+                    linear_context.l2_lambda,
+                )?;
                 Some(PreparedLinearSplit {
                     split,
                     left_leaf,

@@ -481,15 +481,17 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
 
     let prepared = backend
         .evaluate_shortlisted_linear_feature(
-            &binned, &gradients, &node, 0, &context, &scaler, &raw, 4, 1, options, 0.1,
+            &binned, &gradients, &node, 0, &context, &scaler, &raw, 4, 1, options, 0.1, 0.0, None,
         )
         .expect("shortlisted evaluation succeeds")
         .expect("shortlisted split exists");
 
-    assert_eq!(prepared.split, oracle_split);
+    assert_eq!(prepared.split.feature_index, oracle_split.feature_index);
+    assert_eq!(prepared.split.threshold_bin, oracle_split.threshold_bin);
+    assert_eq!(prepared.split.default_left, oracle_split.default_left);
     assert_eq!(prepared.split.threshold_bin, 0);
     assert!(prepared.split.default_left);
-    assert!((prepared.split.gain - (16.0 / 3.0)).abs() < 1e-5);
+    assert!((prepared.split.gain - (32.0 / 9.0)).abs() < 1e-5);
     assert_eq!(prepared.left_leaf.regressor_features, regressors);
     assert_eq!((prepared.left_leaf, prepared.right_leaf), oracle_leaves);
 }

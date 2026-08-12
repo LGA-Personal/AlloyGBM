@@ -312,6 +312,8 @@ fn select_node_split<B: BackendOps>(
     factor_context: Option<&FactorSplitContext<'_>>,
     raw_feature_values: &[f32],
     feature_scaler: &LinearFeatureScaler,
+    parent_leaf_value: f32,
+    parent_linear_leaf: Option<&LinearLeaf>,
 ) -> EngineResult<Option<SelectedNodeSplit>> {
     let legacy_path = params.leaf_model != LeafModelKind::Linear
         || params.pl_split_candidates == 0
@@ -378,6 +380,8 @@ fn select_node_split<B: BackendOps>(
             binned_matrix.feature_count,
             options,
             params.learning_rate,
+            parent_leaf_value,
+            parent_linear_leaf,
         )?
         else {
             continue;
@@ -480,6 +484,8 @@ fn propose_level_node<B: BackendOps>(
         factor_context.as_ref(),
         context.raw_feature_values,
         context.feature_scaler,
+        parent_leaf_value,
+        parent_linear_leaf.as_ref(),
     )?
     else {
         return Ok(LevelNodeOutcome::no_split(local_node_id));
@@ -1175,6 +1181,8 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         root_factor_context.as_ref(),
         raw_feature_values,
         &feature_scaler,
+        0.0,
+        None,
     )?;
 
     let Some(SelectedNodeSplit {
@@ -1634,6 +1642,8 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 smaller_factor_context.as_ref(),
                 raw_feature_values,
                 &feature_scaler,
+                smaller_parent_val,
+                smaller_parent_ll.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1688,6 +1698,8 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 larger_factor_context.as_ref(),
                 raw_feature_values,
                 &feature_scaler,
+                larger_parent_val,
+                larger_parent_ll.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1879,6 +1891,8 @@ mod linear_leaf_path_tests {
             _feature_count: usize,
             _options: SplitSelectionOptions,
             _learning_rate: f32,
+            _parent_leaf_value: f32,
+            _parent_linear_leaf: Option<&LinearLeaf>,
         ) -> EngineResult<Option<PreparedLinearSplit>> {
             self.evaluation_calls.fetch_add(1, AtomicOrdering::Relaxed);
             let candidate = self
@@ -1980,6 +1994,8 @@ mod linear_leaf_path_tests {
             None,
             &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             &LinearFeatureScaler::identity(3),
+            0.0,
+            None,
         )
         .expect("selector succeeds")
         .expect("selector returns a split")
