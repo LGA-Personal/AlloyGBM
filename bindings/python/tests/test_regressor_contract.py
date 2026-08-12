@@ -375,6 +375,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "quantile_sketch_max_rows": None,
                         "objective": "squared_error",
                         "leaf_model": "constant",
+                        "pl_split_candidates": 0,
                         "leaf_solver": "standard",
                         "dro_radius": 0.05,
                         "dro_metric": "wasserstein",
