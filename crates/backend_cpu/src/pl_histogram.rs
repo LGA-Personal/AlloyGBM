@@ -91,7 +91,7 @@ pub(crate) fn with_shortlisted_linear_histogram<R>(
             }
             let x = f32x8::from(x_array);
             bin.xtg = (f32x8::from(bin.xtg) + f32x8::splat(gradient.grad) * x).to_array();
-            for (row, &x_row) in x_array.iter().enumerate() {
+            for (row, &x_row) in x_array.iter().enumerate().take(d) {
                 let base = row * MAX_PL_REGRESSORS;
                 let current: [f32; MAX_PL_REGRESSORS] = bin.xt_hx[base..base + MAX_PL_REGRESSORS]
                     .try_into()
@@ -352,6 +352,7 @@ mod tests {
 
     #[test]
     fn linear_histogram_scratch_is_isolated_between_rayon_workers() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
         let pointers = rayon::ThreadPoolBuilder::new()
             .num_threads(4)
             .build()
@@ -361,8 +362,10 @@ mod tests {
                 (0..4)
                     .into_par_iter()
                     .map(|_| {
+                        let barrier = std::sync::Arc::clone(&barrier);
                         with_linear_histogram_scratch(16, |bins| {
                             bins[0].count = rayon::current_thread_index().unwrap_or(99) as u32 + 1;
+                            barrier.wait();
                             bins.as_ptr() as usize
                         })
                     })

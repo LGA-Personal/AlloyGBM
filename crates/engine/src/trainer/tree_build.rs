@@ -356,34 +356,40 @@ fn select_node_split<B: BackendOps>(
         }));
     }
 
+    let evaluated = shortlist
+        .numeric_candidates
+        .par_iter()
+        .map(|candidate| {
+            let regressor_features = linear_regressor_path_features(
+                path_features,
+                candidate.feature_index,
+                false,
+                binned_matrix.feature_count,
+            );
+            let linear_context = LinearContext {
+                regressor_features,
+                l2_lambda: options.l2_lambda,
+            };
+            backend.evaluate_shortlisted_linear_feature(
+                binned_matrix,
+                gradients,
+                node,
+                candidate.feature_index,
+                &linear_context,
+                feature_scaler,
+                raw_feature_values,
+                binned_matrix.row_count,
+                binned_matrix.feature_count,
+                options,
+                params.learning_rate,
+                parent_leaf_value,
+                parent_linear_leaf,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut best: Option<PreparedLinearSplit> = None;
-    for candidate in shortlist.numeric_candidates {
-        let regressor_features = linear_regressor_path_features(
-            path_features,
-            candidate.feature_index,
-            false,
-            binned_matrix.feature_count,
-        );
-        let linear_context = LinearContext {
-            regressor_features,
-            l2_lambda: options.l2_lambda,
-        };
-        let Some(prepared) = backend.evaluate_shortlisted_linear_feature(
-            binned_matrix,
-            gradients,
-            node,
-            candidate.feature_index,
-            &linear_context,
-            feature_scaler,
-            raw_feature_values,
-            binned_matrix.row_count,
-            binned_matrix.feature_count,
-            options,
-            params.learning_rate,
-            parent_leaf_value,
-            parent_linear_leaf,
-        )?
-        else {
+    for prepared in evaluated {
+        let Some(prepared) = prepared? else {
             continue;
         };
         let replace = best.as_ref().is_none_or(|current| {
