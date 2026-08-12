@@ -357,6 +357,7 @@ class GBMRanker(_GBMEstimatorCore):
             f"lr_schedule='{self.lr_schedule}', "
             f"lr_warmup_frac={self.lr_warmup_frac}, "
             f"leaf_model='{self.leaf_model}', "
+            f"pl_split_candidates={self.pl_split_candidates}, "
             f"leaf_solver='{self.leaf_solver}', "
             f"dro_radius={self.dro_radius}, "
             f"dro_metric='{self.dro_metric}', "

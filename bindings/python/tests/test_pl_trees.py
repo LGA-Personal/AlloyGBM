@@ -8,6 +8,7 @@ import tempfile
 
 import numpy as np
 import pytest
+from sklearn.base import clone
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
 
@@ -84,6 +85,34 @@ class TestParamValidation:
         m = GBMRegressor(leaf_model="linear")
         r = repr(m)
         assert "leaf_model='linear'" in r
+
+    @pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+    def test_pl_split_candidates_public_parameter_contract(self, estimator_type):
+        default = estimator_type()
+        assert default.pl_split_candidates == 8
+        assert default.get_params(deep=False)["pl_split_candidates"] == 8
+        assert "pl_split_candidates=8" in repr(default)
+
+        explicit = estimator_type(pl_split_candidates=0)
+        assert explicit.pl_split_candidates == 0
+        assert clone(explicit).pl_split_candidates == 0
+        assert pickle.loads(pickle.dumps(explicit)).pl_split_candidates == 0
+
+        explicit.set_params(pl_split_candidates=17)
+        assert explicit.pl_split_candidates == 17
+        assert explicit.get_params(deep=False)["pl_split_candidates"] == 17
+
+    @pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+    @pytest.mark.parametrize("value", [True, False, -1, 1.5, 2**32])
+    def test_pl_split_candidates_rejects_invalid_values(self, estimator_type, value):
+        estimator = estimator_type(pl_split_candidates=value, n_estimators=1)
+        fit_kwargs = {"group": [0, 0, 1, 1]} if estimator_type is GBMRanker else {}
+        with pytest.raises(ValueError, match="pl_split_candidates"):
+            estimator.fit(
+                np.asarray([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32),
+                np.asarray([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
+                **fit_kwargs,
+            )
 
 
 # ---------------------------------------------------------------------------

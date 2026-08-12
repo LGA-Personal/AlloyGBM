@@ -39,6 +39,19 @@ def _validate_n_jobs(value: object) -> int | None:
     raise ValueError("n_jobs must be None, -1, or a positive integer")
 
 
+def _validate_pl_split_candidates(value: object) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(
+            "pl_split_candidates must be an integer between 0 and 4294967295"
+        )
+    normalized = int(value)
+    if normalized < 0 or normalized > 0xFFFF_FFFF:
+        raise ValueError(
+            "pl_split_candidates must be an integer between 0 and 4294967295"
+        )
+    return normalized
+
+
 class _GBMEstimatorCore(
     _ValidationMixin,
     _QuantizationMixin,
@@ -94,6 +107,7 @@ class _GBMEstimatorCore(
         lr_schedule: str = "constant",
         lr_warmup_frac: float = 0.1,
         leaf_model: str = "constant",
+        pl_split_candidates: int = 8,
         leaf_solver: str = "standard",
         dro_radius: float = 0.05,
         dro_metric: str = "wasserstein",
@@ -310,6 +324,9 @@ class _GBMEstimatorCore(
             raise ValueError(
                 f"leaf_model must be 'constant' or 'linear', got {leaf_model!r}"
             )
+        normalized_pl_split_candidates = _validate_pl_split_candidates(
+            pl_split_candidates
+        )
         if str(leaf_solver) not in ("standard", "dro"):
             raise ValueError(
                 f"leaf_solver must be 'standard' or 'dro', got {leaf_solver!r}"
@@ -463,6 +480,7 @@ class _GBMEstimatorCore(
         self.lr_schedule = str(lr_schedule)
         self.lr_warmup_frac = float(lr_warmup_frac)
         self.leaf_model = str(leaf_model)
+        self.pl_split_candidates = normalized_pl_split_candidates
         self.leaf_solver = str(leaf_solver)
         self.dro_radius = float(dro_radius)
         self.dro_metric = str(dro_metric)
@@ -547,6 +565,7 @@ class _GBMEstimatorCore(
         lr_schedule: str = "constant",
         lr_warmup_frac: float = 0.1,
         leaf_model: str = "constant",
+        pl_split_candidates: int = 8,
         leaf_solver: str = "standard",
         dro_radius: float = 0.05,
         dro_metric: str = "wasserstein",
@@ -609,6 +628,7 @@ class _GBMEstimatorCore(
         self.lr_schedule = lr_schedule
         self.lr_warmup_frac = lr_warmup_frac
         self.leaf_model = leaf_model
+        self.pl_split_candidates = pl_split_candidates
         self.leaf_solver = leaf_solver
         self.dro_radius = dro_radius
         self.dro_metric = dro_metric
@@ -689,6 +709,7 @@ class _GBMEstimatorCore(
             f"lr_schedule='{self.lr_schedule}', "
             f"lr_warmup_frac={self.lr_warmup_frac}, "
             f"leaf_model='{self.leaf_model}', "
+            f"pl_split_candidates={self.pl_split_candidates}, "
             f"leaf_solver='{self.leaf_solver}', "
             f"dro_radius={self.dro_radius}, "
             f"dro_metric='{self.dro_metric}', "
@@ -756,6 +777,7 @@ class _GBMEstimatorCore(
             "lr_schedule": self.lr_schedule,
             "lr_warmup_frac": self.lr_warmup_frac,
             "leaf_model": self.leaf_model,
+            "pl_split_candidates": self.pl_split_candidates,
             "leaf_solver": self.leaf_solver,
             "dro_radius": self.dro_radius,
             "dro_metric": self.dro_metric,
@@ -822,6 +844,7 @@ class _GBMEstimatorCore(
             "lr_schedule",
             "lr_warmup_frac",
             "leaf_model",
+            "pl_split_candidates",
             "leaf_solver",
             "dro_radius",
             "dro_metric",
@@ -1257,6 +1280,11 @@ class _GBMEstimatorCore(
                     f"leaf_model must be 'constant' or 'linear', got {lm!r}"
                 )
             self.leaf_model = lm
+
+        if "pl_split_candidates" in params:
+            self.pl_split_candidates = _validate_pl_split_candidates(
+                params["pl_split_candidates"]
+            )
 
         if "leaf_solver" in params:
             ls = str(params["leaf_solver"])
@@ -1986,6 +2014,7 @@ class _GBMEstimatorCore(
                     max_cat_threshold=self.max_cat_threshold,
                     morph_config=self._morph_config_,
                     leaf_model=self.leaf_model,
+                    pl_split_candidates=self.pl_split_candidates,
                     leaf_solver=self.leaf_solver,
                     dro_radius=self.dro_radius,
                     dro_metric=self.dro_metric,
@@ -2145,6 +2174,7 @@ class _GBMEstimatorCore(
                 max_cat_threshold=self.max_cat_threshold,
                 morph_config=self._morph_config_,
                 leaf_model=self.leaf_model,
+                pl_split_candidates=self.pl_split_candidates,
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,
@@ -2253,6 +2283,7 @@ class _GBMEstimatorCore(
                 max_cat_threshold=self.max_cat_threshold,
                 morph_config=self._morph_config_,
                 leaf_model=self.leaf_model,
+                pl_split_candidates=self.pl_split_candidates,
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,
@@ -2711,6 +2742,7 @@ class _GBMEstimatorCore(
                 quantile_sketch_max_rows=self.quantile_sketch_max_rows,
                 objective=self._objective_name(),
                 leaf_model=self.leaf_model,
+                pl_split_candidates=self.pl_split_candidates,
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,
@@ -2790,6 +2822,7 @@ class _GBMEstimatorCore(
                 quantile_sketch_max_rows=self.quantile_sketch_max_rows,
                 objective=self._objective_name(),
                 leaf_model=self.leaf_model,
+                pl_split_candidates=self.pl_split_candidates,
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,

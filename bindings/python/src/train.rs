@@ -906,6 +906,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     objective="squared_error",
     morph_config=None,
     leaf_model="constant",
+    pl_split_candidates=8,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -958,6 +959,7 @@ pub(crate) fn train_regression_artifact(
     objective: &str,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    pl_split_candidates: usize,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1042,6 +1044,7 @@ pub(crate) fn train_regression_artifact(
         tweedie_variance_power.unwrap_or(1.5),
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
+        pl_split_candidates,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -1129,6 +1132,7 @@ pub(crate) fn train_regression_artifact(
     objective="squared_error",
     morph_config=None,
     leaf_model="constant",
+    pl_split_candidates=8,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -1183,6 +1187,7 @@ pub(crate) fn train_regression_artifact_dense(
     objective: &str,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    pl_split_candidates: usize,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1267,6 +1272,7 @@ pub(crate) fn train_regression_artifact_dense(
         tweedie_variance_power.unwrap_or(1.5),
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
+        pl_split_candidates,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -1376,6 +1382,7 @@ pub(crate) fn train_regression_artifact_dense(
     max_cat_threshold=0,
     morph_config=None,
     leaf_model="constant",
+    pl_split_candidates=8,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -1456,6 +1463,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    pl_split_candidates: usize,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1541,6 +1549,7 @@ pub(crate) fn train_regression_artifact_with_summary(
         tweedie_variance_power.unwrap_or(1.5),
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
+        pl_split_candidates,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -1744,6 +1753,7 @@ mod tests {
     max_cat_threshold=0,
     morph_config=None,
     leaf_model="constant",
+    pl_split_candidates=8,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -1827,6 +1837,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    pl_split_candidates: usize,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1912,6 +1923,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         tweedie_variance_power.unwrap_or(1.5),
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
+        pl_split_candidates,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -2057,6 +2069,7 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     max_cat_threshold=0,
     morph_config=None,
     leaf_model="constant",
+    pl_split_candidates=8,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -2140,6 +2153,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    pl_split_candidates: usize,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -2231,6 +2245,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         tweedie_variance_power.unwrap_or(1.5),
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
+        pl_split_candidates,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(

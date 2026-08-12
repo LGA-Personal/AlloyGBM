@@ -17,6 +17,24 @@ fn validates_default_train_params() {
 }
 
 #[test]
+fn pl_split_candidates_defaults_to_eight() {
+    assert_eq!(TrainParams::default().pl_split_candidates, 8);
+}
+
+#[test]
+fn pl_split_candidates_rejects_values_above_native_bridge_limit() {
+    if usize::BITS <= u32::BITS {
+        return;
+    }
+    let params = TrainParams {
+        pl_split_candidates: u32::MAX as usize + 1,
+        ..TrainParams::default()
+    };
+    let error = validate_train_params(&params).expect_err("oversized shortlist must fail");
+    assert!(error.to_string().contains("pl_split_candidates"));
+}
+
+#[test]
 fn dense_shape_rejects_element_count_overflow() {
     let err = checked_dense_element_count(usize::MAX, 2).expect_err("shape must overflow");
     assert!(err.to_string().contains("row_count * feature_count"));

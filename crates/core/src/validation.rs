@@ -15,6 +15,12 @@ use crate::neutralization::NeutralizationKind;
 use crate::training_mode::LrSchedule;
 
 pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
+    if params.pl_split_candidates > u32::MAX as usize {
+        return Err(CoreError::InvalidConfig(
+            "pl_split_candidates must be between 0 and 4294967295".to_string(),
+        ));
+    }
+
     if !(0.0..=1.0).contains(&params.learning_rate) || params.learning_rate == 0.0 {
         return Err(CoreError::InvalidConfig(
             "learning_rate must be in (0.0, 1.0]".to_string(),
