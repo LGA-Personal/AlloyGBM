@@ -19,7 +19,10 @@ use std::collections::{BinaryHeap, HashMap};
 use crate::error::{EngineError, EngineResult};
 use crate::morph_state::MorphTreeContext;
 use crate::round::apply_partition_leaf_updates;
-use crate::split_options::{CategoricalFeatureInfo, SplitSelectionOptions};
+use crate::split_options::{
+    CategoricalFeatureInfo, FactorSplitContext, LinearContext, PreparedLinearSplit,
+    SplitSelectionOptions, feature_weighted_gain,
+};
 use crate::trainer::interaction::{
     InteractionConstraintIndex, filter_histogram_bundle_by_features,
 };
@@ -134,6 +137,11 @@ type LinearLeafPairSplit = (
     Option<(LinearLeaf, LinearLeaf)>,
     Option<(LinearLeaf, LinearLeaf)>,
 );
+
+struct SelectedNodeSplit {
+    split: SplitCandidate,
+    prepared_linear_leaf_pair: Option<(LinearLeaf, LinearLeaf)>,
+}
 
 pub(crate) fn apply_single_categorical_target_encoding(
     dataset: &TrainingDataset,
@@ -288,6 +296,115 @@ fn linear_regressor_path_features(
     selected
 }
 
+#[allow(clippy::too_many_arguments)]
+fn select_node_split<B: BackendOps>(
+    backend: &B,
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    node: &NodeSlice,
+    histograms: &HistogramBundle,
+    path_features: &[u32],
+    options: SplitSelectionOptions,
+    params: &TrainParams,
+    feature_weights: &[f32],
+    categorical_features: &[CategoricalFeatureInfo],
+    morph: Option<&MorphTreeContext<'_>>,
+    factor_context: Option<&FactorSplitContext<'_>>,
+    raw_feature_values: &[f32],
+    feature_scaler: &LinearFeatureScaler,
+) -> EngineResult<Option<SelectedNodeSplit>> {
+    let legacy_path = params.leaf_model != LeafModelKind::Linear
+        || params.pl_split_candidates == 0
+        || raw_feature_values.is_empty()
+        || morph.is_some()
+        || factor_context.is_some();
+    if legacy_path {
+        return find_best_split_dispatch(
+            backend,
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            morph,
+            factor_context,
+        )
+        .map(|split| {
+            split.map(|split| SelectedNodeSplit {
+                split,
+                prepared_linear_leaf_pair: None,
+            })
+        });
+    }
+
+    let shortlist = backend.shortlist_standard_splits(
+        histograms,
+        options,
+        feature_weights,
+        categorical_features,
+        params.pl_split_candidates,
+    )?;
+    let standard = match shortlist.best_overall {
+        Some(split) => split,
+        None => return Ok(None),
+    };
+    if standard.is_categorical {
+        return Ok(Some(SelectedNodeSplit {
+            split: standard,
+            prepared_linear_leaf_pair: None,
+        }));
+    }
+
+    let mut best: Option<PreparedLinearSplit> = None;
+    for candidate in shortlist.numeric_candidates {
+        let regressor_features = linear_regressor_path_features(
+            path_features,
+            candidate.feature_index,
+            false,
+            binned_matrix.feature_count,
+        );
+        let linear_context = LinearContext {
+            regressor_features,
+            l2_lambda: options.l2_lambda,
+        };
+        let Some(prepared) = backend.evaluate_shortlisted_linear_feature(
+            binned_matrix,
+            gradients,
+            node,
+            candidate.feature_index,
+            &linear_context,
+            feature_scaler,
+            raw_feature_values,
+            binned_matrix.row_count,
+            binned_matrix.feature_count,
+            options,
+            params.learning_rate,
+        )?
+        else {
+            continue;
+        };
+        let replace = best.as_ref().is_none_or(|current| {
+            let trial = feature_weighted_gain(&prepared.split, feature_weights);
+            let retained = feature_weighted_gain(&current.split, feature_weights);
+            let tolerance = 1e-6_f32 * trial.abs().max(retained.abs()).max(1.0);
+            trial > retained + tolerance
+        });
+        if replace {
+            best = Some(prepared);
+        }
+    }
+
+    Ok(Some(match best {
+        Some(prepared) => SelectedNodeSplit {
+            split: prepared.split,
+            prepared_linear_leaf_pair: Some((prepared.left_leaf, prepared.right_leaf)),
+        },
+        None => SelectedNodeSplit {
+            split: standard,
+            prepared_linear_leaf_pair: None,
+        },
+    }))
+}
+
 fn should_parallelize_level(
     active_nodes: &[ActiveNodeEntry],
     feature_tiles: &[FeatureTile],
@@ -345,14 +462,24 @@ fn propose_level_node<B: BackendOps>(
         }
         _ => &histograms,
     };
-    let Some(mut split) = find_best_split_dispatch(
+    let Some(SelectedNodeSplit {
+        mut split,
+        prepared_linear_leaf_pair,
+    }) = select_node_split(
         context.backend,
+        context.binned_matrix,
+        context.gradients,
+        &node,
         histograms_for_split,
+        &path_features,
         context.split_options,
+        context.params,
         context.feature_weights,
         context.categorical_features,
         context.morph.as_ref(),
         factor_context.as_ref(),
+        context.raw_feature_values,
+        context.feature_scaler,
     )?
     else {
         return Ok(LevelNodeOutcome::no_split(local_node_id));
@@ -511,23 +638,24 @@ fn propose_level_node<B: BackendOps>(
             split.is_categorical,
             context.binned_matrix.feature_count,
         );
-        context
-            .backend
-            .compute_linear_leaf_pair_from_partitions(
-                context.binned_matrix,
-                context.gradients,
-                context.raw_feature_values,
-                context.binned_matrix.feature_count,
-                split.feature_index,
-                split.threshold_bin,
-                split.default_left,
-                &regressor_features,
-                context.feature_scaler,
-                &partition.left_row_indices,
-                &partition.right_row_indices,
-                scheduled_lr,
-                context.split_options.l2_lambda,
-            )
+        prepared_linear_leaf_pair
+            .or_else(|| {
+                context.backend.compute_linear_leaf_pair_from_partitions(
+                    context.binned_matrix,
+                    context.gradients,
+                    context.raw_feature_values,
+                    context.binned_matrix.feature_count,
+                    split.feature_index,
+                    split.threshold_bin,
+                    split.default_left,
+                    &regressor_features,
+                    context.feature_scaler,
+                    &partition.left_row_indices,
+                    &partition.right_row_indices,
+                    scheduled_lr,
+                    context.split_options.l2_lambda,
+                )
+            })
             .map(|(mut left_absolute, mut right_absolute)| {
                 left_absolute.intercept *= morph_scale;
                 right_absolute.intercept *= morph_scale;
@@ -924,6 +1052,7 @@ pub(crate) struct PendingSplit {
     row_indices: Vec<u32>,
     path_features: Vec<u32>,
     split_candidate: SplitCandidate,
+    prepared_linear_leaf_pair: Option<(LinearLeaf, LinearLeaf)>,
     histograms: HistogramBundle,
     parent_leaf_value: f32,
     /// Absolute linear leaf of the parent (used to compute weight deltas for linear-leaf trees).
@@ -1031,17 +1160,28 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         }
         _ => &root_histograms,
     };
-    let root_split = find_best_split_dispatch(
+    let root_selection = select_node_split(
         backend,
+        binned_matrix,
+        gradients,
+        &root_node,
         root_histograms_for_split,
+        &[],
         split_options,
+        params,
         feature_weights,
         categorical_features,
         morph.as_ref(),
         root_factor_context.as_ref(),
+        raw_feature_values,
+        &feature_scaler,
     )?;
 
-    let Some(root_split) = root_split else {
+    let Some(SelectedNodeSplit {
+        split: root_split,
+        prepared_linear_leaf_pair: root_prepared_linear_leaf_pair,
+    }) = root_selection
+    else {
         return Ok((Vec::new(), IterationStopReason::NoSplitCandidate));
     };
     if !root_split.gain.is_finite() || root_split.gain <= controls.min_split_gain {
@@ -1054,6 +1194,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         row_indices: root_node.row_indices,
         path_features: Vec::new(),
         split_candidate: root_split,
+        prepared_linear_leaf_pair: root_prepared_linear_leaf_pair,
         histograms: root_histograms,
         parent_leaf_value: 0.0,
         parent_linear_leaf: None,
@@ -1072,6 +1213,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             row_indices,
             path_features,
             split_candidate: split,
+            prepared_linear_leaf_pair,
             mut histograms,
             parent_leaf_value,
             parent_linear_leaf,
@@ -1237,22 +1379,24 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 split.is_categorical,
                 binned_matrix.feature_count,
             );
-            backend
-                .compute_linear_leaf_pair_from_partitions(
-                    binned_matrix,
-                    gradients,
-                    raw_feature_values,
-                    binned_matrix.feature_count,
-                    split.feature_index,
-                    split.threshold_bin,
-                    split.default_left,
-                    &regressor_features,
-                    &feature_scaler,
-                    &partition.left_row_indices,
-                    &partition.right_row_indices,
-                    scheduled_lr,
-                    split_options.l2_lambda,
-                )
+            prepared_linear_leaf_pair
+                .or_else(|| {
+                    backend.compute_linear_leaf_pair_from_partitions(
+                        binned_matrix,
+                        gradients,
+                        raw_feature_values,
+                        binned_matrix.feature_count,
+                        split.feature_index,
+                        split.threshold_bin,
+                        split.default_left,
+                        &regressor_features,
+                        &feature_scaler,
+                        &partition.left_row_indices,
+                        &partition.right_row_indices,
+                        scheduled_lr,
+                        split_options.l2_lambda,
+                    )
+                })
                 .map(|(mut ll_abs, mut rl_abs)| {
                     ll_abs.intercept *= morph_scale;
                     rl_abs.intercept *= morph_scale;
@@ -1472,14 +1616,24 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     }
                     _ => &smaller_histograms,
                 };
-            if let Some(child_split) = find_best_split_dispatch(
+            if let Some(SelectedNodeSplit {
+                split: child_split,
+                prepared_linear_leaf_pair: child_prepared_linear_leaf_pair,
+            }) = select_node_split(
                 backend,
+                binned_matrix,
+                gradients,
+                &smaller_node,
                 smaller_histograms_for_split,
+                &child_path_features,
                 split_options,
+                params,
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
                 smaller_factor_context.as_ref(),
+                raw_feature_values,
+                &feature_scaler,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1488,6 +1642,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     row_indices: smaller_node.row_indices,
                     path_features: child_path_features.clone(),
                     split_candidate: child_split,
+                    prepared_linear_leaf_pair: child_prepared_linear_leaf_pair,
                     histograms: smaller_histograms,
                     parent_leaf_value: smaller_parent_val,
                     parent_linear_leaf: smaller_parent_ll,
@@ -1496,11 +1651,12 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 });
             }
 
+            let larger_node = NodeSlice::new(larger_node_id, larger_indices)?;
             let larger_factor_context = factor_split_context_for_node(
                 params,
                 binned_matrix,
                 factor_exposures,
-                &larger_indices,
+                &larger_node.row_indices,
             );
             let larger_filtered_storage;
             let larger_histograms_for_split = match (constraint_index.as_ref(), child_active_groups)
@@ -1514,22 +1670,33 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 }
                 _ => &larger_histograms,
             };
-            if let Some(child_split) = find_best_split_dispatch(
+            if let Some(SelectedNodeSplit {
+                split: child_split,
+                prepared_linear_leaf_pair: child_prepared_linear_leaf_pair,
+            }) = select_node_split(
                 backend,
+                binned_matrix,
+                gradients,
+                &larger_node,
                 larger_histograms_for_split,
+                &child_path_features,
                 split_options,
+                params,
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
                 larger_factor_context.as_ref(),
+                raw_feature_values,
+                &feature_scaler,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
                 queue.push(PendingSplit {
                     local_node_id: larger_local,
-                    row_indices: larger_indices,
+                    row_indices: larger_node.row_indices,
                     path_features: child_path_features.clone(),
                     split_candidate: child_split,
+                    prepared_linear_leaf_pair: child_prepared_linear_leaf_pair,
                     histograms: larger_histograms,
                     parent_leaf_value: larger_parent_val,
                     parent_linear_leaf: larger_parent_ll,
@@ -1650,6 +1817,173 @@ pub(crate) fn validate_iteration_controls(controls: IterationControls) -> Engine
 #[cfg(test)]
 mod linear_leaf_path_tests {
     use super::*;
+    use crate::split_options::SplitShortlist;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    struct ShortlistRecordingBackend {
+        shortlist_calls: AtomicUsize,
+        evaluation_calls: AtomicUsize,
+        standard_split: SplitCandidate,
+        candidates: Vec<SplitCandidate>,
+    }
+
+    impl BackendOps for ShortlistRecordingBackend {
+        fn build_histograms(
+            &self,
+            _binned_matrix: &BinnedMatrix,
+            _gradients: &[GradientPair],
+            _node: &NodeSlice,
+            _feature_tiles: &[FeatureTile],
+        ) -> EngineResult<HistogramBundle> {
+            unreachable!("selector tests provide histograms directly")
+        }
+
+        fn best_split(
+            &self,
+            _histograms: &HistogramBundle,
+        ) -> EngineResult<Option<SplitCandidate>> {
+            Ok(Some(self.standard_split.clone()))
+        }
+
+        fn shortlist_standard_splits(
+            &self,
+            _histograms: &HistogramBundle,
+            _options: SplitSelectionOptions,
+            _feature_weights: &[f32],
+            _categorical_features: &[CategoricalFeatureInfo],
+            max_numeric_features: usize,
+        ) -> EngineResult<SplitShortlist> {
+            self.shortlist_calls.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(SplitShortlist {
+                best_overall: Some(self.standard_split.clone()),
+                numeric_candidates: self
+                    .candidates
+                    .iter()
+                    .take(max_numeric_features)
+                    .cloned()
+                    .collect(),
+            })
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn evaluate_shortlisted_linear_feature(
+            &self,
+            _binned_matrix: &BinnedMatrix,
+            _gradients: &[GradientPair],
+            _node: &NodeSlice,
+            split_feature_index: u32,
+            linear_context: &LinearContext,
+            _feature_scaler: &LinearFeatureScaler,
+            _raw_feature_values: &[f32],
+            _row_count: usize,
+            _feature_count: usize,
+            _options: SplitSelectionOptions,
+            _learning_rate: f32,
+        ) -> EngineResult<Option<PreparedLinearSplit>> {
+            self.evaluation_calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let candidate = self
+                .candidates
+                .iter()
+                .find(|candidate| candidate.feature_index == split_feature_index)
+                .expect("shortlisted feature is recorded")
+                .clone();
+            let leaf = LinearLeaf::identity_scaled(
+                split_feature_index as f32,
+                vec![1.0; linear_context.regressor_features.len()],
+                linear_context.regressor_features.clone(),
+            );
+            Ok(Some(PreparedLinearSplit {
+                split: candidate,
+                left_leaf: leaf.clone(),
+                right_leaf: leaf,
+            }))
+        }
+
+        fn apply_split(
+            &self,
+            _binned_matrix: &BinnedMatrix,
+            _node: &NodeSlice,
+            _split: &SplitCandidate,
+        ) -> EngineResult<PartitionResult> {
+            unreachable!("selector tests do not partition")
+        }
+
+        fn reduce_sums(
+            &self,
+            _gradients: &[GradientPair],
+            _row_indices: &[u32],
+        ) -> EngineResult<alloygbm_core::NodeStats> {
+            unreachable!("selector tests do not reduce")
+        }
+    }
+
+    fn selector_candidate(feature_index: u32, gain: f32, categorical: bool) -> SplitCandidate {
+        SplitCandidate {
+            node_id: 0,
+            feature_index,
+            threshold_bin: 0,
+            gain,
+            default_left: false,
+            is_categorical: categorical,
+            categorical_bitset: categorical.then(|| vec![1]),
+            left_stats: alloygbm_core::NodeStats {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 1.0,
+                row_count: 1,
+            },
+            right_stats: alloygbm_core::NodeStats {
+                grad_sum: 1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 1.0,
+                row_count: 1,
+            },
+        }
+    }
+
+    fn run_selector(
+        backend: &ShortlistRecordingBackend,
+        params: &TrainParams,
+        feature_weights: &[f32],
+    ) -> SelectedNodeSplit {
+        let binned_matrix =
+            BinnedMatrix::new(2, 3, 1, vec![0, 0, 0, 1, 1, 1]).expect("selector matrix is valid");
+        let gradients = vec![
+            GradientPair::new(-1.0, 1.0).expect("gradient is valid"),
+            GradientPair::new(1.0, 1.0).expect("gradient is valid"),
+        ];
+        let node = NodeSlice::new(0, vec![0, 1]).expect("selector node is valid");
+        let histograms =
+            HistogramBundle::from_soa(0, vec![0], 1, vec![0.0], vec![2.0], None, vec![2])
+                .expect("selector histogram is valid");
+        let options = SplitSelectionOptions {
+            l2_lambda: 0.0,
+            l1_alpha: 0.0,
+            min_child_hessian: 0.0,
+            min_rows_per_leaf: 1,
+            min_leaf_magnitude: 0.0,
+            dro_config: None,
+            missing_bin_index: 255,
+        };
+        select_node_split(
+            backend,
+            &binned_matrix,
+            &gradients,
+            &node,
+            &histograms,
+            &[],
+            options,
+            params,
+            feature_weights,
+            &[],
+            None,
+            None,
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &LinearFeatureScaler::identity(3),
+        )
+        .expect("selector succeeds")
+        .expect("selector returns a split")
+    }
 
     #[test]
     fn linear_regressor_features_follow_split_path_not_first_columns() {
@@ -1668,6 +2002,79 @@ mod linear_leaf_path_tests {
     fn linear_regressor_path_skips_categorical_split_features() {
         let selected = linear_regressor_path_features(&[10, 3], 12, true, 20);
         assert_eq!(selected, vec![10, 3]);
+    }
+
+    #[test]
+    fn linear_selector_rescores_only_the_requested_shortlist_and_reuses_leaf_solves() {
+        let backend = ShortlistRecordingBackend {
+            shortlist_calls: AtomicUsize::new(0),
+            evaluation_calls: AtomicUsize::new(0),
+            standard_split: selector_candidate(0, 10.0, false),
+            candidates: vec![
+                selector_candidate(0, 10.0, false),
+                selector_candidate(1, 8.0, false),
+                selector_candidate(2, 7.0, false),
+            ],
+        };
+        let params = TrainParams {
+            leaf_model: LeafModelKind::Linear,
+            pl_split_candidates: 2,
+            ..TrainParams::default()
+        };
+
+        let selected = run_selector(&backend, &params, &[0.5, 1.0, 1.0]);
+
+        assert_eq!(backend.shortlist_calls.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(backend.evaluation_calls.load(AtomicOrdering::Relaxed), 2);
+        assert_eq!(selected.split.feature_index, 1);
+        let (left, right) = selected
+            .prepared_linear_leaf_pair
+            .expect("winning PL solve is retained");
+        assert_eq!(left.intercept, 1.0);
+        assert_eq!(right.intercept, 1.0);
+    }
+
+    #[test]
+    fn zero_candidate_limit_uses_the_legacy_dispatcher_exactly() {
+        let backend = ShortlistRecordingBackend {
+            shortlist_calls: AtomicUsize::new(0),
+            evaluation_calls: AtomicUsize::new(0),
+            standard_split: selector_candidate(2, 4.0, false),
+            candidates: vec![selector_candidate(0, 10.0, false)],
+        };
+        let params = TrainParams {
+            leaf_model: LeafModelKind::Linear,
+            pl_split_candidates: 0,
+            ..TrainParams::default()
+        };
+
+        let selected = run_selector(&backend, &params, &[]);
+
+        assert_eq!(selected.split.feature_index, 2);
+        assert!(selected.prepared_linear_leaf_pair.is_none());
+        assert_eq!(backend.shortlist_calls.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(backend.evaluation_calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[test]
+    fn categorical_standard_winner_bypasses_linear_rescoring() {
+        let backend = ShortlistRecordingBackend {
+            shortlist_calls: AtomicUsize::new(0),
+            evaluation_calls: AtomicUsize::new(0),
+            standard_split: selector_candidate(2, 12.0, true),
+            candidates: vec![selector_candidate(0, 10.0, false)],
+        };
+        let params = TrainParams {
+            leaf_model: LeafModelKind::Linear,
+            ..TrainParams::default()
+        };
+
+        let selected = run_selector(&backend, &params, &[]);
+
+        assert!(selected.split.is_categorical);
+        assert!(selected.prepared_linear_leaf_pair.is_none());
+        assert_eq!(backend.shortlist_calls.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(backend.evaluation_calls.load(AtomicOrdering::Relaxed), 0);
     }
 
     #[test]

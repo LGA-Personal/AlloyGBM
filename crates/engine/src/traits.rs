@@ -62,15 +62,21 @@ pub trait BackendOps: Sync {
     }
     fn shortlist_standard_splits(
         &self,
-        _histograms: &HistogramBundle,
-        _options: SplitSelectionOptions,
-        _feature_weights: &[f32],
-        _categorical_features: &[CategoricalFeatureInfo],
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
         _max_numeric_features: usize,
     ) -> EngineResult<SplitShortlist> {
-        Err(EngineError::NotImplemented(
-            "standard split shortlisting not implemented for this backend".to_string(),
-        ))
+        Ok(SplitShortlist {
+            best_overall: self.best_split_with_options(
+                histograms,
+                options,
+                feature_weights,
+                categorical_features,
+            )?,
+            numeric_candidates: Vec::new(),
+        })
     }
     fn best_split_with_factor_context(
         &self,
