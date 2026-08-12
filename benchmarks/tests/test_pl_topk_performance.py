@@ -43,20 +43,31 @@ def test_full_specs_cover_required_shapes_and_tasks():
 
 def test_comparison_requires_exact_k0_production_digests():
     baseline, candidate = MODULE.synthetic_result_pair()
-    candidate[0] = replace(candidate[0], artifact_sha256="different")
+    k0_index = next(index for index, record in enumerate(candidate) if record.arm == "k0")
+    candidate[k0_index] = replace(candidate[k0_index], artifact_sha256="different")
     summary = MODULE.compare_results(baseline, candidate)
     assert not summary.passed
     assert any("k0 artifact parity" in reason for reason in summary.reasons)
 
 
-def test_default_quality_gate_rejects_one_percent_regression():
-    baseline, candidate = MODULE.synthetic_result_pair(k8_quality_ratio=1.011)
+def test_comparison_requires_exact_default_production_digests():
+    baseline, candidate = MODULE.synthetic_result_pair()
+    default_index = next(index for index, record in enumerate(candidate) if record.arm == "default")
+    candidate[default_index] = replace(candidate[default_index], artifact_sha256="different")
     summary = MODULE.compare_results(baseline, candidate)
     assert not summary.passed
-    assert any("quality" in reason for reason in summary.reasons)
+    assert any("default artifact parity" in reason for reason in summary.reasons)
 
 
-def test_default_quality_gate_respects_higher_is_better_metrics():
+def test_opt_in_quality_regression_is_reported_without_rejecting_safe_default():
+    baseline, candidate = MODULE.synthetic_result_pair(k8_quality_ratio=1.011)
+    summary = MODULE.compare_results(baseline, candidate)
+    assert summary.passed
+    assert not summary.opt_in_quality_within_one_percent
+    assert any("quality" in observation for observation in summary.observations)
+
+
+def test_opt_in_quality_report_respects_higher_is_better_metrics():
     baseline, candidate = MODULE.synthetic_result_pair(
         task_family="ranking",
         primary_metric="ndcg",
@@ -64,33 +75,27 @@ def test_default_quality_gate_respects_higher_is_better_metrics():
         k8_quality_ratio=0.989,
     )
     summary = MODULE.compare_results(baseline, candidate)
-    assert not summary.passed
-    assert any("quality" in reason for reason in summary.reasons)
+    assert summary.passed
+    assert not summary.opt_in_quality_within_one_percent
+    assert any("quality" in observation for observation in summary.observations)
 
 
-def test_comparison_requires_quality_improvement_on_pl_friendly_case():
+def test_comparison_records_no_pl_friendly_improvement_without_failing():
     baseline, candidate = MODULE.synthetic_result_pair(k8_quality_ratio=1.0)
     summary = MODULE.compare_results(baseline, candidate)
-    assert not summary.passed
-    assert any("five percent" in reason for reason in summary.reasons)
+    assert summary.passed
+    assert summary.pl_friendly_improvement == 0.0
 
 
-def test_comparison_rejects_slow_convergence():
-    baseline, candidate = MODULE.synthetic_result_pair(convergence_ratio=1.0)
+def test_comparison_reports_opt_in_fixed_round_cost_without_failing():
+    baseline, candidate = MODULE.synthetic_result_pair(features=16, k8_time_ratio=3.01)
     summary = MODULE.compare_results(baseline, candidate)
-    assert not summary.passed
-    assert any("convergence" in reason for reason in summary.reasons)
+    assert summary.passed
+    assert summary.median_opt_in_time_ratio == pytest.approx(3.01)
 
 
-def test_comparison_rejects_default_fixed_round_cost_over_three_x():
-    baseline, candidate = MODULE.synthetic_result_pair(k8_time_ratio=3.01)
-    summary = MODULE.compare_results(baseline, candidate)
-    assert not summary.passed
-    assert any("fixed-round" in reason for reason in summary.reasons)
-
-
-def test_comparison_rejects_single_case_cost_over_five_x():
-    baseline, candidate = MODULE.synthetic_result_pair(k8_time_ratio=1.0)
+def test_comparison_reports_worst_opt_in_case_cost():
+    baseline, candidate = MODULE.synthetic_result_pair(features=16, k8_time_ratio=1.0)
     candidate = [
         replace(record, fit_seconds=5.01)
         if record.arm == "k8" and record.seed == 0
@@ -98,8 +103,8 @@ def test_comparison_rejects_single_case_cost_over_five_x():
         for record in candidate
     ]
     summary = MODULE.compare_results(baseline, candidate)
-    assert not summary.passed
-    assert any("five times" in reason for reason in summary.reasons)
+    assert summary.passed
+    assert summary.worst_opt_in_time_ratio == pytest.approx(5.01)
 
 
 def test_comparison_rejects_wide_shortlist_without_half_cost_benefit():

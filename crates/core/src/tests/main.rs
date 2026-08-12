@@ -17,8 +17,8 @@ fn validates_default_train_params() {
 }
 
 #[test]
-fn pl_split_candidates_defaults_to_eight() {
-    assert_eq!(TrainParams::default().pl_split_candidates, 8);
+fn pl_split_candidates_defaults_to_compatibility_mode() {
+    assert_eq!(TrainParams::default().pl_split_candidates, 0);
 }
 
 #[test]

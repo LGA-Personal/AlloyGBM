@@ -24,17 +24,32 @@ import numpy as np
 
 RESULT_SCHEMA_VERSION = 1
 PRODUCTION_BASE = "ea4df36"
-ARMS = ("legacy", "k0", "k1", "k8", "all")
+ARMS = ("legacy", "default", "k0", "k1", "k8", "all")
 PL_FRIENDLY_VARIANTS = frozenset({"local-linear", "raw-scale"})
 MAX_QUALITY_REGRESSION = 0.01
-MIN_PL_FRIENDLY_IMPROVEMENT = 0.05
-MAX_DEFAULT_MEDIAN_TIME_RATIO = 3.0
-MAX_DEFAULT_RECORD_TIME_RATIO = 5.0
 MAX_WIDE_EXHAUSTIVE_TIME_RATIO = 0.5
 MAX_RSS_RELATIVE_GROWTH = 0.15
 MAX_RSS_ABSOLUTE_GROWTH = 32 * 1024 * 1024
-MAX_CONVERGENCE_ROUND_RATIO = 0.75
-REJECTED_TRIALS: tuple[dict[str, object], ...] = ()
+REJECTED_TRIALS: tuple[dict[str, object], ...] = (
+    {
+        "label": "historical-matrix-gain-default-8",
+        "reason": "rejected after broad quality and fixed-round cost gates failed",
+        "commit": "3f9173f",
+        "metrics": {
+            "representative_local_linear_rmse_ratio": 1.762,
+            "representative_fixed_round_time_ratio": 8.66,
+        },
+    },
+    {
+        "label": "joint-intercept-slope-gain-default-8",
+        "reason": "rejected after quality and fixed-round cost remained outside gates",
+        "commit": "uncommitted-experiment",
+        "metrics": {
+            "representative_local_linear_rmse_ratio": 1.539,
+            "representative_fixed_round_time_ratio": 20.0,
+        },
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -85,16 +100,18 @@ class PLTopKRecord:
 class PLTopKComparison:
     passed: bool
     key_coverage_exact: bool
+    default_artifact_parity: bool
+    default_prediction_parity: bool
     k0_artifact_parity: bool
     k0_prediction_parity: bool
-    default_quality_passed: bool
+    opt_in_quality_within_one_percent: bool
     pl_friendly_improvement: float
-    convergence_passed: bool
-    median_fixed_round_ratio: float
-    worst_fixed_round_ratio: float
+    median_opt_in_time_ratio: float
+    worst_opt_in_time_ratio: float
     wide_exhaustive_ratios: dict[str, float]
     worst_rss_growth_bytes: int
     reasons: tuple[str, ...]
+    observations: tuple[str, ...]
     rejected_trials: tuple[dict[str, object], ...] = ()
 
 
@@ -267,7 +284,7 @@ def _fit_record(spec: FixtureSpec, arm: str, seed: int) -> PLTopKRecord:
         "n_jobs": 1,
         "seed": seed,
     }
-    if arm != "legacy":
+    if arm not in {"legacy", "default"}:
         kwargs["pl_split_candidates"] = {
             "k0": 0,
             "k1": 1,
@@ -390,12 +407,6 @@ def _quality_ratio(reference: PLTopKRecord, trial: PLTopKRecord) -> float:
     return trial.primary_value / reference.primary_value
 
 
-def _quality_reaches(trial: PLTopKRecord, target: PLTopKRecord) -> bool:
-    if target.higher_is_better:
-        return trial.primary_value >= target.primary_value * (1.0 - 1e-12)
-    return trial.primary_value <= target.primary_value * (1.0 + 1e-12)
-
-
 def compare_results(
     baseline: Sequence[PLTopKRecord],
     candidate: Sequence[PLTopKRecord],
@@ -403,8 +414,9 @@ def compare_results(
     rejected_trials: Sequence[Mapping[str, object]] = (),
 ) -> PLTopKComparison:
     base_map, reasons = _validated_map(baseline, "baseline")
+    observations: list[str] = []
     by_arm: dict[str, dict[tuple[object, ...], PLTopKRecord]] = {}
-    for arm in ("k0", "k8", "all"):
+    for arm in ("default", "k0", "k8", "all"):
         arm_map, arm_reasons = _validated_map([record for record in candidate if record.arm == arm], arm)
         by_arm[arm] = arm_map
         reasons.extend(arm_reasons)
@@ -414,6 +426,8 @@ def compare_results(
     if not key_coverage_exact:
         reasons.append("candidate coverage does not exactly match baseline coverage")
 
+    default_artifact_parity = key_coverage_exact
+    default_prediction_parity = key_coverage_exact
     k0_artifact_parity = key_coverage_exact
     k0_prediction_parity = key_coverage_exact
     quality_ratios: list[float] = []
@@ -422,11 +436,23 @@ def compare_results(
     rss_growth: list[int] = []
     wide_exhaustive_ratios: dict[str, float] = {}
 
-    for key in sorted(base_keys & set(by_arm["k0"]) & set(by_arm["k8"]) & set(by_arm["all"])):
+    compared_keys = (
+        base_keys
+        & set(by_arm["default"])
+        & set(by_arm["k0"])
+        & set(by_arm["k8"])
+        & set(by_arm["all"])
+    )
+    for key in sorted(compared_keys):
         base = base_map[key]
+        default = by_arm["default"][key]
         k0 = by_arm["k0"][key]
         k8 = by_arm["k8"][key]
         exhaustive = by_arm["all"][key]
+        if base.artifact_sha256 != default.artifact_sha256:
+            default_artifact_parity = False
+        if base.prediction_sha256 != default.prediction_sha256:
+            default_prediction_parity = False
         if base.artifact_sha256 != k0.artifact_sha256:
             k0_artifact_parity = False
         if base.prediction_sha256 != k0.prediction_sha256:
@@ -434,13 +460,13 @@ def compare_results(
         ratio = _quality_ratio(k0, k8)
         quality_ratios.append(ratio)
         if ratio > 1.0 + MAX_QUALITY_REGRESSION:
-            reasons.append(f"default quality regression exceeded one percent for {key}: {ratio:.6f}")
+            observations.append(f"opt-in k8 quality regressed over one percent for {key}: {ratio:.6f}")
         for metric, reference_value in k0.secondary_metrics.items():
             trial_value = k8.secondary_metrics.get(metric)
             if trial_value is None:
-                reasons.append(f"secondary quality metric coverage differs for {key}")
+                observations.append(f"opt-in secondary quality metric coverage differs for {key}")
             elif reference_value != 0.0 and abs(trial_value - reference_value) / abs(reference_value) > MAX_QUALITY_REGRESSION:
-                reasons.append(f"secondary quality regression exceeded one percent for {key} metric={metric}")
+                observations.append(f"opt-in secondary quality moved over one percent for {key} metric={metric}")
         if k0.variant in PL_FRIENDLY_VARIANTS and k0.rounds == max(
             record.rounds
             for record in by_arm["k0"].values()
@@ -449,68 +475,50 @@ def compare_results(
             friendly_improvements.append(1.0 - ratio)
         time_ratio = k8.fit_seconds / k0.fit_seconds
         fixed_round_ratios.append(time_ratio)
-        if time_ratio > MAX_DEFAULT_RECORD_TIME_RATIO:
-            reasons.append(f"default fixed-round fit cost exceeded five times k0 for {key}: {time_ratio:.6f}")
         growth = k8.peak_rss_bytes - k0.peak_rss_bytes
         rss_growth.append(growth)
         allowed_growth = max(int(MAX_RSS_RELATIVE_GROWTH * k0.peak_rss_bytes), MAX_RSS_ABSOLUTE_GROWTH)
         if growth > allowed_growth:
-            reasons.append(f"default peak RSS exceeded growth allowance for {key}: RSS growth={growth}")
+            reasons.append(f"opt-in peak RSS exceeded growth allowance for {key}: RSS growth={growth}")
         if k0.features >= 32:
             exhaustive_ratio = k8.fit_seconds / exhaustive.fit_seconds
             wide_exhaustive_ratios[str(key)] = exhaustive_ratio
             if exhaustive_ratio > MAX_WIDE_EXHAUSTIVE_TIME_RATIO:
-                reasons.append(f"wide default fit cost exceeded half exhaustive cost for {key}: {exhaustive_ratio:.6f}")
+                reasons.append(f"wide k8 fit cost exceeded half exhaustive cost for {key}: {exhaustive_ratio:.6f}")
             if _quality_ratio(exhaustive, k8) > 1.0 + MAX_QUALITY_REGRESSION:
-                reasons.append(f"wide default quality regressed over one percent versus exhaustive for {key}")
+                observations.append(f"wide k8 quality differs over one percent versus exhaustive for {key}")
 
+    if not default_artifact_parity:
+        reasons.append("default artifact parity with production failed")
+    if not default_prediction_parity:
+        reasons.append("default prediction parity with production failed")
     if not k0_artifact_parity:
         reasons.append("k0 artifact parity with production failed")
     if not k0_prediction_parity:
         reasons.append("k0 prediction parity with production failed")
 
     pl_friendly_improvement = max(friendly_improvements, default=-math.inf)
-    if pl_friendly_improvement < MIN_PL_FRIENDLY_IMPROVEMENT:
-        reasons.append("no PL-friendly case improved by five percent")
-
-    convergence_passed = True
-    grouped: dict[tuple[str, int], list[PLTopKRecord]] = {}
-    for record in by_arm["k8"].values():
-        if record.variant in PL_FRIENDLY_VARIANTS:
-            grouped.setdefault((record.dataset, record.seed), []).append(record)
-    for group_key, trials in grouped.items():
-        reference_records = [
-            record for key, record in by_arm["k0"].items()
-            if (record.dataset, record.seed) == group_key
-        ]
-        if not reference_records:
-            continue
-        target = max(reference_records, key=lambda record: record.rounds)
-        reaching = [record.rounds_completed for record in trials if _quality_reaches(record, target)]
-        limit = MAX_CONVERGENCE_ROUND_RATIO * target.rounds_completed
-        if not reaching or min(reaching) > limit:
-            convergence_passed = False
-            reasons.append(f"convergence gate failed for {group_key}: limit={limit:g}")
-
     median_fixed_round_ratio = statistics.median(fixed_round_ratios) if fixed_round_ratios else math.inf
     worst_fixed_round_ratio = max(fixed_round_ratios, default=math.inf)
-    if median_fixed_round_ratio > MAX_DEFAULT_MEDIAN_TIME_RATIO:
-        reasons.append(f"median fixed-round default cost exceeded three times k0: {median_fixed_round_ratio:.6f}")
 
     validated_trials = tuple(validate_rejected_trial(trial) for trial in rejected_trials)
     return PLTopKComparison(
         passed=not reasons,
         key_coverage_exact=key_coverage_exact,
+        default_artifact_parity=default_artifact_parity,
+        default_prediction_parity=default_prediction_parity,
         k0_artifact_parity=k0_artifact_parity,
         k0_prediction_parity=k0_prediction_parity,
-        default_quality_passed=all(ratio <= 1.0 + MAX_QUALITY_REGRESSION for ratio in quality_ratios),
+        opt_in_quality_within_one_percent=all(
+            ratio <= 1.0 + MAX_QUALITY_REGRESSION for ratio in quality_ratios
+        ),
         pl_friendly_improvement=pl_friendly_improvement,
-        convergence_passed=convergence_passed,
-        median_fixed_round_ratio=float(median_fixed_round_ratio),
-        worst_fixed_round_ratio=float(worst_fixed_round_ratio),
+        median_opt_in_time_ratio=float(median_fixed_round_ratio),
+        worst_opt_in_time_ratio=float(worst_fixed_round_ratio),
         wide_exhaustive_ratios=wide_exhaustive_ratios,
         worst_rss_growth_bytes=max(rss_growth, default=0),
         reasons=tuple(reasons),
+        observations=tuple(observations),
         rejected_trials=validated_trials,
     )
 
@@ -570,6 +578,7 @@ def synthetic_result_pair(
             baseline.append(legacy)
             candidate.extend(
                 [
+                    replace(legacy, arm="default"),
                     replace(legacy, arm="k0"),
                     replace(legacy, arm="k8", primary_value=k8_value, fit_seconds=k8_time_ratio, peak_rss_bytes=k8_peak_rss_bytes),
                     replace(legacy, arm="all", primary_value=k8_value, fit_seconds=all_time_ratio, peak_rss_bytes=k8_peak_rss_bytes),

@@ -166,7 +166,7 @@ fn fixture_params() -> TrainParams {
         tweedie_variance_power: 1.5,
         poisson_max_delta_step: 0.7,
         quantile_alpha: 0.5,
-        pl_split_candidates: 8,
+        pl_split_candidates: 0,
     }
 }
 

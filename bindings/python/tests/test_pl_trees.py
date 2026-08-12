@@ -89,9 +89,9 @@ class TestParamValidation:
     @pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
     def test_pl_split_candidates_public_parameter_contract(self, estimator_type):
         default = estimator_type()
-        assert default.pl_split_candidates == 8
-        assert default.get_params(deep=False)["pl_split_candidates"] == 8
-        assert "pl_split_candidates=8" in repr(default)
+        assert default.pl_split_candidates == 0
+        assert default.get_params(deep=False)["pl_split_candidates"] == 0
+        assert "pl_split_candidates=0" in repr(default)
 
         explicit = estimator_type(pl_split_candidates=0)
         assert explicit.pl_split_candidates == 0
