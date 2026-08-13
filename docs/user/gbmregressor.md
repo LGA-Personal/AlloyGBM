@@ -450,6 +450,22 @@ the same target stream as a fresh `N + M`-round fit.
     `α* = -(ZᵀHZ + λI)⁻¹ Zᵀg`, regularised by the same `lambda_l2` you pass to
     the estimator.
 
+- `pl_split_candidates: int = 0`
+  - `0` (default) preserves the standard split-selection path and current model
+    artifacts.
+  - A positive value enables experimental PL-aware split selection: standard
+    gain shortlists at most that many eligible numeric features, then every
+    threshold and missing direction for those features is rescored with the PL
+    criterion. Values above the eligible feature count are clipped.
+
+  The implementation reuses one feature-histogram scratch allocation per worker,
+  so storage is bounded independently of the candidate count. Positive values
+  are slower than `0` and can improve or regress held-out quality depending on
+  the dataset; tune them as an explicit training-time tradeoff. MorphBoost and
+  native-categorical winners retain their existing split behavior. The setting
+  does not change prediction cost or the artifact format. The full five-seed
+  matrix is in [the PR #136 report](../benchmarks/pl_topk_pr136.md).
+
   **When to use `"linear"`**: datasets where the residual signal within each tree
   node is approximately linear in the input features (e.g. smooth tabular
   regression, classification with well-separated linear decision boundaries).

@@ -5,7 +5,8 @@ use alloygbm_core::{
 
 use crate::error::{EngineError, EngineResult};
 use crate::split_options::{
-    CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, SplitSelectionOptions,
+    CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, PreparedLinearSplit,
+    SplitSelectionOptions, SplitShortlist,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +59,24 @@ pub trait BackendOps: Sync {
         _categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split(histograms)
+    }
+    fn shortlist_standard_splits(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        _max_numeric_features: usize,
+    ) -> EngineResult<SplitShortlist> {
+        Ok(SplitShortlist {
+            best_overall: self.best_split_with_options(
+                histograms,
+                options,
+                feature_weights,
+                categorical_features,
+            )?,
+            numeric_candidates: Vec::new(),
+        })
     }
     fn best_split_with_factor_context(
         &self,
@@ -188,6 +207,28 @@ pub trait BackendOps: Sync {
     ) -> EngineResult<Option<SplitCandidate>> {
         Err(EngineError::NotImplemented(
             "best_split_linear not implemented for this backend".to_string(),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_shortlisted_linear_feature(
+        &self,
+        _binned_matrix: &BinnedMatrix,
+        _gradients: &[GradientPair],
+        _node: &NodeSlice,
+        _split_feature_index: u32,
+        _linear_context: &LinearContext,
+        _feature_scaler: &LinearFeatureScaler,
+        _raw_feature_values: &[f32],
+        _row_count: usize,
+        _feature_count: usize,
+        _options: SplitSelectionOptions,
+        _learning_rate: f32,
+        _parent_leaf_value: f32,
+        _parent_linear_leaf: Option<&LinearLeaf>,
+    ) -> EngineResult<Option<PreparedLinearSplit>> {
+        Err(EngineError::NotImplemented(
+            "shortlisted linear feature evaluation not implemented for this backend".to_string(),
         ))
     }
 

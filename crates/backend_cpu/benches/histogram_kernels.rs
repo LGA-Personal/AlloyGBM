@@ -1,7 +1,8 @@
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{
     BinnedMatrix, DroConfig, DroMetric, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, MorphConfig, MorphPrecomputed, NodeSlice,
+    HistogramBundle, LinearFeatureScaler, LinearHistogramBin, MorphConfig, MorphPrecomputed,
+    NodeSlice,
 };
 use alloygbm_engine::{BackendOps, MorphContext, SplitSelectionOptions};
 use std::hint::black_box;
@@ -138,15 +139,52 @@ fn build_histograms_baseline_reference(
         .expect("reference histograms have a valid layout")
 }
 
+fn run_pl_histogram_storage_case(backend: &CpuBackend, feature_count: usize) {
+    let fixture = build_fixture(1_024, feature_count, 63, 8);
+    let raw_feature_values: Vec<f32> = (0..fixture.binned_matrix.row_count * feature_count)
+        .map(|index| ((index % 97) as f32 - 48.0) / 13.0)
+        .collect();
+    let regressor_features: Vec<u32> = (0..feature_count.min(8) as u32).collect();
+    let bundle = backend
+        .build_linear_histograms(
+            &fixture.binned_matrix,
+            &fixture.gradients,
+            &fixture.node,
+            &fixture.feature_tiles,
+            &regressor_features,
+            &LinearFeatureScaler::identity(feature_count),
+            &raw_feature_values,
+            fixture.binned_matrix.row_count,
+            feature_count,
+        )
+        .expect("PL histogram storage benchmark should succeed");
+    let retained_bin_capacity: usize = bundle
+        .feature_histograms
+        .iter()
+        .map(|histogram| histogram.bins.capacity())
+        .sum();
+    let retained_bytes = retained_bin_capacity * std::mem::size_of::<LinearHistogramBin>();
+    println!(
+        "pl_histogram_storage: production_base=ea4df36 features={feature_count} bins_per_feature={} bin_size_bytes={} retained_bundle_bytes={retained_bytes}",
+        fixture.binned_matrix.max_bin as usize + 2,
+        std::mem::size_of::<LinearHistogramBin>(),
+    );
+    black_box(bundle);
+}
+
 fn main() {
     let backend = CpuBackend;
-    println!("production_base: 2b2e3ef");
+    println!("production_base: ea4df36");
     println!("runtime_target_arch: {}", std::env::consts::ARCH);
     println!("runtime_avx2_enabled: {}", runtime_avx2_enabled());
     println!(
         "runtime_avx2_override: {}",
         std::env::var(DISABLE_AVX2_ENV_VAR).unwrap_or_else(|_| "unset".to_string())
     );
+
+    for feature_count in [8, 32, 128] {
+        run_pl_histogram_storage_case(&backend, feature_count);
+    }
 
     let tiny_fixture = build_fixture(256, 8, 31, 4);
     run_case("histogram_build_tiny_baseline_ref", 10, 220, || {

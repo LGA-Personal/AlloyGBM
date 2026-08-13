@@ -189,6 +189,9 @@ Additional lighter-weight scripts target specific features:
 - `benchmarks/pl_trees_benchmark.py` — piecewise-linear-leaf
   convergence-curve and λ-sweep analysis across regression, classification,
   and ranking scenarios. Report at `docs/benchmarks/pl_trees_v1.md`.
+- `benchmarks/pl_topk_performance.py` — isolated five-seed compatibility,
+  quality, RSS, and runtime matrix for experimental PL-aware split shortlisting.
+  Report at `docs/benchmarks/pl_topk_pr136.md`.
 - `benchmarks/dro_robustness.py` — deterministic clean-holdout comparison of
   standard and DRO leaves after clean versus outlier-contaminated training.
   It includes scalar and joint shared-tree paths. Report at

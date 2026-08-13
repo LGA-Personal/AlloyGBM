@@ -308,8 +308,24 @@ pub fn best_split_linear_for_feature(
     options: SplitSelectionOptions,
     ctx: &LinearContext,
 ) -> Option<SplitCandidate> {
+    best_split_linear_for_bins(
+        linear_fh.feature_index,
+        &linear_fh.bins,
+        node_id,
+        options,
+        ctx,
+    )
+}
+
+pub(crate) fn best_split_linear_for_bins(
+    feature_index: u32,
+    bins: &[LinearHistogramBin],
+    node_id: u32,
+    options: SplitSelectionOptions,
+    ctx: &LinearContext,
+) -> Option<SplitCandidate> {
     let d = ctx.d();
-    if d == 0 || linear_fh.bins.len() < 2 {
+    if d == 0 || bins.len() < 2 {
         return None;
     }
     let missing_bin_idx = options.missing_bin_index;
@@ -320,7 +336,7 @@ pub fn best_split_linear_for_feature(
     let mut p_grad = 0.0_f32;
     let mut p_hess = 0.0_f32;
     let mut p_count = 0_u32;
-    for bin in &linear_fh.bins {
+    for bin in bins {
         p_grad += bin.grad_sum;
         p_hess += bin.hess_sum;
         p_count += bin.count;
@@ -333,8 +349,8 @@ pub fn best_split_linear_for_feature(
     }
 
     // ── Missing-bin contribution ─────────────────────────────────────────────
-    let (m_xtg, m_xt_hx, m_grad, m_hess, m_count) = if missing_bin_idx < linear_fh.bins.len() {
-        let mb = &linear_fh.bins[missing_bin_idx];
+    let (m_xtg, m_xt_hx, m_grad, m_hess, m_count) = if missing_bin_idx < bins.len() {
+        let mb = &bins[missing_bin_idx];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
         copy_xt_hx(&mb.xt_hx, &mut mxthx);
         (mb.xtg, mxthx, mb.grad_sum, mb.hess_sum, mb.count)
@@ -352,7 +368,7 @@ pub fn best_split_linear_for_feature(
     let parent_gain = compute_pl_gain_one_side(&p_xtg, &p_xt_hx, d, ctx.l2_lambda);
 
     // ── Non-missing totals (for right-side via subtraction) ──────────────────
-    let scan_limit = linear_fh.bins.len().min(missing_bin_idx);
+    let scan_limit = bins.len().min(missing_bin_idx);
     let nm_grad = p_grad - m_grad;
     let nm_hess = p_hess - m_hess;
     let nm_count = p_count.saturating_sub(m_count);
@@ -372,7 +388,7 @@ pub fn best_split_linear_for_feature(
     let mut best_gain = 0.0_f32;
     let min_rows = options.min_rows_per_leaf as u32;
 
-    for (threshold_bin, bin) in linear_fh.bins.iter().enumerate().take(scan_limit) {
+    for (threshold_bin, bin) in bins.iter().enumerate().take(scan_limit) {
         // Accumulate left side.
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
@@ -462,7 +478,7 @@ pub fn best_split_linear_for_feature(
                 best_gain = gain;
                 best_candidate = Some(SplitCandidate {
                     node_id,
-                    feature_index: linear_fh.feature_index,
+                    feature_index,
                     threshold_bin: threshold_bin as u16,
                     gain,
                     default_left,
@@ -511,11 +527,35 @@ pub fn leaf_linear_stats_for_split(
     f32,
     f32,
 ) {
-    let scan_limit = linear_fh.bins.len().min(missing_bin_idx);
+    leaf_linear_stats_for_bins(
+        &linear_fh.bins,
+        threshold_bin,
+        missing_bin_idx,
+        default_left,
+    )
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn leaf_linear_stats_for_bins(
+    bins: &[LinearHistogramBin],
+    threshold_bin: usize,
+    missing_bin_idx: usize,
+    default_left: bool,
+) -> (
+    [f32; MAX_PL_REGRESSORS],
+    [f32; MAX_PL_MATRIX_ENTRIES],
+    f32,
+    f32,
+    [f32; MAX_PL_REGRESSORS],
+    [f32; MAX_PL_MATRIX_ENTRIES],
+    f32,
+    f32,
+) {
+    let scan_limit = bins.len().min(missing_bin_idx);
 
     // Missing bin.
-    let (m_xtg, m_xt_hx, m_grad, m_hess) = if missing_bin_idx < linear_fh.bins.len() {
-        let mb = &linear_fh.bins[missing_bin_idx];
+    let (m_xtg, m_xt_hx, m_grad, m_hess) = if missing_bin_idx < bins.len() {
+        let mb = &bins[missing_bin_idx];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
         copy_xt_hx(&mb.xt_hx, &mut mxthx);
         (mb.xtg, mxthx, mb.grad_sum, mb.hess_sum)
@@ -533,11 +573,7 @@ pub fn leaf_linear_stats_for_split(
     let mut l_xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
     let mut l_grad = 0.0_f32;
     let mut l_hess = 0.0_f32;
-    for bin in linear_fh
-        .bins
-        .iter()
-        .take(scan_limit.min(threshold_bin + 1))
-    {
+    for bin in bins.iter().take(scan_limit.min(threshold_bin + 1)) {
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
         add_xtg(&bin.xtg, &mut l_xtg);
@@ -549,7 +585,7 @@ pub fn leaf_linear_stats_for_split(
     let mut nm_xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
     let mut nm_grad = 0.0_f32;
     let mut nm_hess = 0.0_f32;
-    for bin in linear_fh.bins.iter().take(scan_limit) {
+    for bin in bins.iter().take(scan_limit) {
         nm_grad += bin.grad_sum;
         nm_hess += bin.hess_sum;
         add_xtg(&bin.xtg, &mut nm_xtg);
@@ -616,6 +652,100 @@ pub fn leaf_linear_stats_for_split(
         eff_r_grad,
         eff_r_hess,
     )
+}
+
+fn linear_leaf_l2_penalty(leaf: &LinearLeaf, learning_rate: f32, l2_lambda: f32) -> Option<f64> {
+    if !learning_rate.is_finite() || learning_rate <= 0.0 || !l2_lambda.is_finite() {
+        return None;
+    }
+    let scale = f64::from(learning_rate);
+    let intercept = f64::from(leaf.intercept) / scale;
+    let mut squared_norm = intercept * intercept;
+    for &weight in &leaf.weights {
+        let weight = f64::from(weight) / scale;
+        squared_norm += weight * weight;
+    }
+    squared_norm
+        .is_finite()
+        .then_some(0.5 * f64::from(l2_lambda) * squared_norm)
+}
+
+/// Measure the second-order reduction delivered by the actual independently
+/// solved PL intercept and slope updates, relative to an unsplit PL leaf.
+///
+/// The historical matrix gain omits intercept/slope cross terms. That makes it
+/// a useful threshold scanner, but it can overstate a candidate whose solved
+/// updates reinforce each other. This final guard evaluates the model that will
+/// actually be committed without retaining any additional histogram storage.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn realized_pl_split_gain(
+    binned_matrix: &BinnedMatrix,
+    gradients: &[alloygbm_core::GradientPair],
+    node: &alloygbm_core::NodeSlice,
+    raw_feature_values: &[f32],
+    feature_count: usize,
+    split: &SplitCandidate,
+    parent_leaf_value: f32,
+    parent_linear_leaf: Option<&LinearLeaf>,
+    left_leaf: &LinearLeaf,
+    right_leaf: &LinearLeaf,
+    learning_rate: f32,
+    l2_lambda: f32,
+) -> Option<f32> {
+    if split.is_categorical || feature_count != binned_matrix.feature_count {
+        return None;
+    }
+    let inverse_learning_rate = 1.0_f64 / f64::from(learning_rate);
+    if !inverse_learning_rate.is_finite() {
+        return None;
+    }
+
+    let mut parent_reduction = 0.0_f64;
+    let mut child_reduction = 0.0_f64;
+    for &row in &node.row_indices {
+        let row = row as usize;
+        let gradient = gradients.get(row)?;
+        let row_offset = row.checked_mul(feature_count)?;
+        if row_offset + feature_count > raw_feature_values.len() {
+            return None;
+        }
+        let parent_update = f64::from(parent_linear_leaf.map_or(parent_leaf_value, |leaf| {
+            leaf.eval(raw_feature_values, row_offset)
+        })) * inverse_learning_rate;
+        let bin = binned_matrix.bin_at(row, split.feature_index as usize);
+        let child_leaf = if bin == binned_matrix.missing_bin() {
+            if split.default_left {
+                left_leaf
+            } else {
+                right_leaf
+            }
+        } else if bin <= split.threshold_bin {
+            left_leaf
+        } else {
+            right_leaf
+        };
+        let child_update =
+            f64::from(child_leaf.eval(raw_feature_values, row_offset)) * inverse_learning_rate;
+        if !parent_update.is_finite() || !child_update.is_finite() {
+            return None;
+        }
+        let grad = f64::from(gradient.grad);
+        let hess = f64::from(gradient.hess);
+        parent_reduction += -grad * parent_update - 0.5 * hess * parent_update * parent_update;
+        child_reduction += -grad * child_update - 0.5 * hess * child_update * child_update;
+    }
+
+    parent_reduction -= if let Some(parent_leaf) = parent_linear_leaf {
+        linear_leaf_l2_penalty(parent_leaf, learning_rate, l2_lambda)?
+    } else {
+        let unit_value = f64::from(parent_leaf_value) * inverse_learning_rate;
+        0.5 * f64::from(l2_lambda) * unit_value * unit_value
+    };
+    child_reduction -= linear_leaf_l2_penalty(left_leaf, learning_rate, l2_lambda)?;
+    child_reduction -= linear_leaf_l2_penalty(right_leaf, learning_rate, l2_lambda)?;
+    let gain = child_reduction - parent_reduction;
+    let gain = gain as f32;
+    (gain.is_finite() && gain > 0.0).then_some(gain)
 }
 
 /// Solve for PL leaf weights: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
@@ -1144,6 +1274,58 @@ mod tests {
             let net = gain_l + gain_r - gain_p;
             // Net gain can be negative if parent is already well-fit; just assert no NaN/inf.
             assert!(net.is_finite(), "gain should be finite, got {net}");
+        }
+    }
+
+    #[test]
+    fn shortlisted_linear_borrowed_scanner_matches_owned_oracle() {
+        for bin_count in [2_usize, 3, 8, 64, 255] {
+            let mut state = 0xA5A5_1F3D_u32 ^ bin_count as u32;
+            let mut bins = Vec::with_capacity(bin_count);
+            for _ in 0..bin_count {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let x = 0.25 + (state % 100) as f32 / 40.0;
+                let grad = ((state >> 8) as i16 as f32) / 8192.0;
+                let hess = 0.5 + (state % 37) as f32 / 20.0;
+                let mut bin = LinearHistogramBin {
+                    grad_sum: grad,
+                    hess_sum: hess,
+                    count: 1 + state % 5,
+                    ..LinearHistogramBin::default()
+                };
+                bin.xtg[0] = grad * x;
+                bin.xt_hx[0] = hess * x * x;
+                bins.push(bin);
+            }
+            let feature = LinearFeatureHistogram {
+                feature_index: 9,
+                bins,
+            };
+            for missing_bin_index in [bin_count, bin_count - 1] {
+                let options = SplitSelectionOptions {
+                    l1_alpha: 0.1,
+                    l2_lambda: 0.5,
+                    min_child_hessian: 0.1,
+                    min_rows_per_leaf: 1,
+                    missing_bin_index,
+                    ..SplitSelectionOptions::default()
+                };
+                let context = LinearContext {
+                    regressor_features: vec![0],
+                    l2_lambda: 0.5,
+                };
+                assert_eq!(
+                    best_split_linear_for_bins(
+                        feature.feature_index,
+                        &feature.bins,
+                        23,
+                        options,
+                        &context,
+                    ),
+                    best_split_linear_for_feature(&feature, 23, options, &context),
+                    "borrowed scanner mismatch for bins={bin_count} missing={missing_bin_index}",
+                );
+            }
         }
     }
 

@@ -13,6 +13,100 @@ use alloygbm_core::{
     LinearHistogramBin, LinearHistogramBundle, MAX_PL_REGRESSORS, NodeSlice,
 };
 use alloygbm_engine::{EngineError, EngineResult};
+use std::cell::RefCell;
+
+thread_local! {
+    static LINEAR_HISTOGRAM_SCRATCH: RefCell<Vec<LinearHistogramBin>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+pub(crate) fn with_linear_histogram_scratch<R>(
+    bin_count: usize,
+    callback: impl FnOnce(&mut [LinearHistogramBin]) -> R,
+) -> R {
+    LINEAR_HISTOGRAM_SCRATCH.with(|scratch| {
+        let mut bins = scratch.borrow_mut();
+        bins.resize(bin_count, LinearHistogramBin::default());
+        for bin in bins.iter_mut().take(bin_count) {
+            *bin = LinearHistogramBin::default();
+        }
+        callback(&mut bins[..bin_count])
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn with_shortlisted_linear_histogram<R>(
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    node: &NodeSlice,
+    split_feature_index: u32,
+    regressor_features: &[u32],
+    feature_scaler: &LinearFeatureScaler,
+    raw_feature_values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    callback: impl FnOnce(&[LinearHistogramBin]) -> R,
+) -> EngineResult<R> {
+    let d = regressor_features.len();
+    if d == 0 || d > MAX_PL_REGRESSORS {
+        return Err(EngineError::ContractViolation(format!(
+            "regressor_features.len() must be in 1..={MAX_PL_REGRESSORS}, got {d}"
+        )));
+    }
+    if split_feature_index as usize >= binned_matrix.feature_count
+        || feature_count != binned_matrix.feature_count
+        || row_count != binned_matrix.row_count
+        || gradients.len() != row_count
+        || raw_feature_values.len() < row_count.saturating_mul(feature_count)
+        || regressor_features
+            .iter()
+            .any(|&feature| feature as usize >= feature_count)
+    {
+        return Err(EngineError::ContractViolation(
+            "shortlisted linear histogram dimensions are inconsistent".to_string(),
+        ));
+    }
+    node.validate_bounds(row_count)?;
+
+    let bin_count = binned_matrix.max_bin.max(binned_matrix.missing_bin()) as usize + 1;
+    let result = with_linear_histogram_scratch(bin_count, |bins| {
+        for &row_index in &node.row_indices {
+            let row_index = row_index as usize;
+            let split_bin = binned_matrix
+                .row_bin(row_index * binned_matrix.feature_count + split_feature_index as usize)
+                as usize;
+            let bin = &mut bins[split_bin];
+            let gradient = gradients[row_index];
+            bin.grad_sum += gradient.grad;
+            bin.hess_sum += gradient.hess;
+            bin.count += 1;
+
+            let mut x_array = [0.0_f32; MAX_PL_REGRESSORS];
+            for (slot, &feature) in x_array.iter_mut().zip(regressor_features).take(d) {
+                *slot = feature_scaler.scaled_value(
+                    feature,
+                    raw_feature_values[row_index * feature_count + feature as usize],
+                );
+            }
+            let x = f32x8::from(x_array);
+            bin.xtg = (f32x8::from(bin.xtg) + f32x8::splat(gradient.grad) * x).to_array();
+            for (row, &x_row) in x_array.iter().enumerate().take(d) {
+                let base = row * MAX_PL_REGRESSORS;
+                let current: [f32; MAX_PL_REGRESSORS] = bin.xt_hx[base..base + MAX_PL_REGRESSORS]
+                    .try_into()
+                    .expect("matrix row has eight entries");
+                let updated = f32x8::from(current) + f32x8::splat(gradient.hess * x_row) * x;
+                bin.xt_hx[base..base + MAX_PL_REGRESSORS].copy_from_slice(&updated.to_array());
+            }
+        }
+        for bin in bins.iter_mut() {
+            sanitize_linear_bin(bin);
+        }
+        callback(bins)
+    });
+    Ok(result)
+}
 
 /// Build a [`LinearHistogramBundle`] for a single tree node.
 ///
@@ -177,7 +271,7 @@ fn sanitize_linear_bin(bin: &mut LinearHistogramBin) {
 mod tests {
     use super::*;
     use alloygbm_core::subtract_linear_histogram_bundle;
-    use alloygbm_core::{BinnedMatrix, FeatureTile, GradientPair, NodeSlice};
+    use alloygbm_core::{BinnedMatrix, FeatureTile, GradientPair, MISSING_BIN_U8, NodeSlice};
 
     /// Build a minimal BinnedMatrix for tests: 2 features, 4 rows, 3 bins each.
     fn fixture_binned() -> BinnedMatrix {
@@ -224,6 +318,92 @@ mod tests {
             start_feature: 0,
             end_feature: 2,
         }]
+    }
+
+    #[test]
+    fn linear_histogram_scratch_reuses_one_feature_allocation() {
+        let first = with_linear_histogram_scratch(65, |bins| {
+            bins[0].count = 99;
+            (
+                bins.as_ptr(),
+                bins.len(),
+                bins.iter().all(|bin| bin.count == 0) as usize,
+            )
+        });
+        let second =
+            with_linear_histogram_scratch(65, |bins| (bins.as_ptr(), bins.len(), bins[0].count));
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.1, 65);
+        assert_eq!(second.1, 65);
+        assert_eq!(second.2, 0);
+    }
+
+    #[test]
+    fn linear_histogram_scratch_recovers_after_callback_panic() {
+        let panic = std::panic::catch_unwind(|| {
+            with_linear_histogram_scratch(8, |_bins| panic!("intentional scratch unwind"));
+        });
+        assert!(panic.is_err());
+        with_linear_histogram_scratch(8, |bins| {
+            assert_eq!(bins.len(), 8);
+            assert!(bins.iter().all(|bin| bin.count == 0));
+        });
+    }
+
+    #[test]
+    fn linear_histogram_scratch_is_isolated_between_rayon_workers() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let pointers = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("scratch test pool builds")
+            .install(|| {
+                use rayon::prelude::*;
+                (0..4)
+                    .into_par_iter()
+                    .map(|_| {
+                        let barrier = std::sync::Arc::clone(&barrier);
+                        with_linear_histogram_scratch(16, |bins| {
+                            bins[0].count = rayon::current_thread_index().unwrap_or(99) as u32 + 1;
+                            barrier.wait();
+                            bins.as_ptr() as usize
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(pointers.len(), 4);
+        let unique = pointers
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            unique.len() >= 2,
+            "Rayon workers must not share scratch storage"
+        );
+    }
+
+    #[test]
+    fn shortlisted_linear_histogram_reserves_the_u8_missing_sentinel() {
+        let binned = BinnedMatrix::new(2, 1, 1, vec![0, MISSING_BIN_U8]).expect("valid bins");
+        let gradients = vec![
+            GradientPair::new(1.0, 1.0).expect("finite gradient"),
+            GradientPair::new(-1.0, 1.0).expect("finite gradient"),
+        ];
+        let node = NodeSlice::new(0, vec![0, 1]).expect("valid node");
+        let raw = vec![1.0, 2.0];
+        let missing_count = with_shortlisted_linear_histogram(
+            &binned,
+            &gradients,
+            &node,
+            0,
+            &[0],
+            &LinearFeatureScaler::identity(1),
+            &raw,
+            2,
+            1,
+            |bins| bins[binned.missing_bin() as usize].count,
+        )
+        .expect("missing sentinel accumulation succeeds");
+        assert_eq!(missing_count, 1);
     }
 
     #[test]

@@ -336,6 +336,7 @@ def test_invalid_known_parameters_are_rejected_at_fit(
 def test_sklearn_clone_preserves_the_complete_parameter_surface() -> None:
     model = GBMRegressor(
         n_estimators=2,
+        pl_split_candidates=3,
         categorical_feature_indices=[0],
         monotone_constraints={1: -1},
         interaction_constraints=[[0, 1]],
@@ -345,6 +346,7 @@ def test_sklearn_clone_preserves_the_complete_parameter_surface() -> None:
 
     assert cloned is not model
     assert cloned.get_params(deep=False) == model.get_params(deep=False)
+    assert cloned.pl_split_candidates == 3
 
 
 class _ArrayConvertible:

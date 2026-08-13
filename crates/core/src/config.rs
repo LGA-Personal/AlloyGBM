@@ -209,6 +209,9 @@ pub struct TrainParams {
     /// Ignored for all other objectives.
     /// Defaults to 0.5 (median).
     pub quantile_alpha: f32,
+    /// Number of numeric features shortlisted by scalar gain for piecewise-linear
+    /// split rescoring. Zero preserves scalar split selection; ignored for constant leaves.
+    pub pl_split_candidates: usize,
 }
 
 impl Default for TrainParams {
@@ -241,6 +244,7 @@ impl Default for TrainParams {
             tweedie_variance_power: 1.5,
             poisson_max_delta_step: 0.7,
             quantile_alpha: 0.5,
+            pl_split_candidates: 0,
         }
     }
 }

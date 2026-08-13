@@ -3,12 +3,12 @@ use crate::split_helpers::goes_left_for_split;
 use crate::*;
 use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
-    LeafModelKind, MISSING_BIN_U8, MorphConfig, MorphPrecomputed, TrainParams, TrainingDataset,
-    TreeGrowth, discover_exact_feature_bundles,
+    LeafModelKind, LinearFeatureScaler, MISSING_BIN_U8, MorphConfig, MorphPrecomputed, TrainParams,
+    TrainingDataset, TreeGrowth, discover_exact_feature_bundles,
 };
 use alloygbm_engine::{
-    BackendOps, FactorSplitContext, HistogramExecution, MorphContext, SquaredErrorObjective,
-    Trainer,
+    BackendOps, FactorSplitContext, HistogramExecution, LinearContext, MorphContext,
+    SquaredErrorObjective, Trainer,
 };
 
 fn sample_binned_matrix() -> BinnedMatrix {
@@ -166,6 +166,7 @@ fn fixture_params() -> TrainParams {
         tweedie_variance_power: 1.5,
         poisson_max_delta_step: 0.7,
         quantile_alpha: 0.5,
+        pl_split_candidates: 0,
     }
 }
 
@@ -222,6 +223,277 @@ fn split_candidate(
             row_count: 0,
         },
     }
+}
+
+fn shortlist_standard_fixture(feature_count: usize) -> HistogramBundle {
+    let features = (0..feature_count)
+        .map(|feature_index| {
+            let scale = (feature_index + 1) as f32;
+            FeatureHistogram {
+                feature_index: feature_index as u32,
+                bins: vec![
+                    HistogramBin {
+                        grad_sum: 2.0 * scale,
+                        hess_sum: 2.0,
+                        grad_sq_sum: 0.0,
+                        count: 2,
+                    },
+                    HistogramBin {
+                        grad_sum: -2.0 * scale,
+                        hess_sum: 2.0,
+                        grad_sq_sum: 0.0,
+                        count: 2,
+                    },
+                    HistogramBin {
+                        grad_sum: 0.0,
+                        hess_sum: 0.0,
+                        grad_sq_sum: 0.0,
+                        count: 0,
+                    },
+                ],
+            }
+        })
+        .collect();
+    HistogramBundle::from_feature_histograms(17, features, false)
+        .expect("shortlist fixture is valid")
+}
+
+#[test]
+fn shortlist_standard_respects_k_weighting_and_production_winner() {
+    let backend = CpuBackend;
+    let histograms = shortlist_standard_fixture(5);
+    let options = SplitSelectionOptions {
+        missing_bin_index: 2,
+        ..SplitSelectionOptions::default()
+    };
+    let weights = [1.0, 100.0, 1.0, 1.0, 1.0];
+
+    let shortlist = backend
+        .shortlist_standard_splits(&histograms, options, &weights, &[], 2)
+        .expect("shortlist succeeds");
+    let production = backend
+        .best_split_with_options(&histograms, options, &weights, &[])
+        .expect("production selection succeeds");
+
+    assert_eq!(shortlist.best_overall, production);
+    assert_eq!(
+        shortlist
+            .numeric_candidates
+            .iter()
+            .map(|candidate| candidate.feature_index)
+            .collect::<Vec<_>>(),
+        vec![1, 4]
+    );
+}
+
+#[test]
+fn shortlist_standard_handles_zero_exhaustive_ties_and_parallel_features() {
+    let backend = CpuBackend;
+    for feature_count in [4, CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD] {
+        let histograms = shortlist_standard_fixture(feature_count);
+        let options = SplitSelectionOptions {
+            missing_bin_index: 2,
+            ..SplitSelectionOptions::default()
+        };
+        let empty = backend
+            .shortlist_standard_splits(&histograms, options, &[], &[], 0)
+            .expect("zero shortlist succeeds");
+        assert!(empty.numeric_candidates.is_empty());
+
+        let exhaustive = backend
+            .shortlist_standard_splits(&histograms, options, &[], &[], usize::MAX)
+            .expect("exhaustive shortlist succeeds");
+        assert_eq!(exhaustive.numeric_candidates.len(), feature_count);
+        assert_eq!(
+            exhaustive.numeric_candidates[0].feature_index,
+            (feature_count - 1) as u32
+        );
+        assert_eq!(
+            exhaustive.numeric_candidates.last().unwrap().feature_index,
+            0
+        );
+        for _ in 0..8 {
+            assert_eq!(
+                backend
+                    .shortlist_standard_splits(
+                        &histograms,
+                        options,
+                        &vec![0.0; feature_count],
+                        &[],
+                        feature_count,
+                    )
+                    .expect("tied shortlist succeeds")
+                    .numeric_candidates
+                    .iter()
+                    .map(|candidate| candidate.feature_index)
+                    .collect::<Vec<_>>(),
+                (0..feature_count as u32).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn shortlist_standard_keeps_categorical_overall_out_of_numeric_candidates() {
+    let backend = CpuBackend;
+    let mut features = shortlist_standard_fixture(2)
+        .features()
+        .map(|view| {
+            let mut bins = view
+                .grad_sums()
+                .iter()
+                .zip(view.hess_sums())
+                .zip(view.counts())
+                .map(|((&grad_sum, &hess_sum), &count)| HistogramBin {
+                    grad_sum,
+                    hess_sum,
+                    grad_sq_sum: 0.0,
+                    count,
+                })
+                .collect::<Vec<_>>();
+            bins.push(HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                count: 0,
+            });
+            FeatureHistogram {
+                feature_index: view.feature_index(),
+                bins,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut categorical_bins = vec![
+        HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        4
+    ];
+    categorical_bins[0] = HistogramBin {
+        grad_sum: 50.0,
+        hess_sum: 2.0,
+        grad_sq_sum: 0.0,
+        count: 2,
+    };
+    categorical_bins[1] = HistogramBin {
+        grad_sum: -50.0,
+        hess_sum: 2.0,
+        grad_sq_sum: 0.0,
+        count: 2,
+    };
+    features.push(FeatureHistogram {
+        feature_index: 2,
+        bins: categorical_bins,
+    });
+    let histograms = HistogramBundle::from_feature_histograms(17, features, false)
+        .expect("mixed shortlist fixture is valid");
+    let options = SplitSelectionOptions {
+        missing_bin_index: 3,
+        ..SplitSelectionOptions::default()
+    };
+    let categorical = [CategoricalFeatureInfo {
+        feature_index: 2,
+        num_categories: 2,
+    }];
+
+    let shortlist = backend
+        .shortlist_standard_splits(&histograms, options, &[], &categorical, 8)
+        .expect("mixed shortlist succeeds");
+
+    assert!(shortlist.best_overall.as_ref().unwrap().is_categorical);
+    assert_eq!(shortlist.numeric_candidates.len(), 2);
+    assert!(
+        shortlist
+            .numeric_candidates
+            .iter()
+            .all(|candidate| !candidate.is_categorical)
+    );
+}
+
+#[test]
+fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
+    let backend = CpuBackend;
+    let binned =
+        BinnedMatrix::new(4, 1, 1, vec![0_u8, 0, 1, 1]).expect("shortlisted PL matrix is valid");
+    let gradients = vec![
+        GradientPair {
+            grad: 2.0,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 2.0,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: -2.0,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: -2.0,
+            hess: 1.0,
+        },
+    ];
+    let node = sample_node();
+    let raw = vec![1.0; 4];
+    let scaler = LinearFeatureScaler::identity(1);
+    let regressors = vec![0];
+    let context = LinearContext {
+        regressor_features: regressors.clone(),
+        l2_lambda: 1.0,
+    };
+    let options = SplitSelectionOptions {
+        l2_lambda: 1.0,
+        missing_bin_index: binned.missing_bin() as usize,
+        ..SplitSelectionOptions::default()
+    };
+    let owned = backend
+        .build_linear_histograms(
+            &binned,
+            &gradients,
+            &node,
+            &[FeatureTile::new(0, 1).expect("single feature tile")],
+            &regressors,
+            &scaler,
+            &raw,
+            4,
+            1,
+        )
+        .expect("owned linear histogram builds");
+    let oracle_split = backend
+        .best_split_linear(&owned, options, &[], &[], &context)
+        .expect("owned split search succeeds")
+        .expect("owned split exists");
+    let oracle_leaves = backend
+        .compute_linear_leaf_pair(
+            &owned,
+            oracle_split.feature_index,
+            oracle_split.threshold_bin as usize,
+            oracle_split.default_left,
+            options.missing_bin_index,
+            0.1,
+            context.l2_lambda,
+            &scaler,
+        )
+        .expect("owned leaves solve");
+
+    let prepared = backend
+        .evaluate_shortlisted_linear_feature(
+            &binned, &gradients, &node, 0, &context, &scaler, &raw, 4, 1, options, 0.1, 0.0, None,
+        )
+        .expect("shortlisted evaluation succeeds")
+        .expect("shortlisted split exists");
+
+    assert_eq!(prepared.split.feature_index, oracle_split.feature_index);
+    assert_eq!(prepared.split.threshold_bin, oracle_split.threshold_bin);
+    assert_eq!(prepared.split.default_left, oracle_split.default_left);
+    assert_eq!(prepared.split.threshold_bin, 0);
+    assert!(prepared.split.default_left);
+    assert!((prepared.split.gain - (32.0 / 9.0)).abs() < 1e-5);
+    assert_eq!(prepared.left_leaf.regressor_features, regressors);
+    assert_eq!((prepared.left_leaf, prepared.right_leaf), oracle_leaves);
 }
 
 fn legacy_parallel_partition_with_stats(

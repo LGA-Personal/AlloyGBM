@@ -1,5 +1,5 @@
 use alloygbm_core::{SplitCandidate, leaf_gain_term};
-use alloygbm_engine::{MorphContext, SplitSelectionOptions};
+use alloygbm_engine::{MorphContext, SplitSelectionOptions, feature_weighted_gain};
 
 /// Controls which gain formula is used inside `best_split_for_feature_inner`.
 ///
@@ -30,12 +30,7 @@ pub(crate) struct MissingDirectionCandidate {
 /// The gain stored in `SplitCandidate` remains unweighted (the true gain);
 /// the weighted gain is only used when comparing splits across features.
 pub(crate) fn apply_feature_weight(candidate: &SplitCandidate, feature_weights: &[f32]) -> f32 {
-    let fi = candidate.feature_index as usize;
-    if fi < feature_weights.len() {
-        candidate.gain * feature_weights[fi]
-    } else {
-        candidate.gain
-    }
+    feature_weighted_gain(candidate, feature_weights)
 }
 
 pub(crate) fn gain_materially_exceeds(candidate: f32, current: f32) -> bool {

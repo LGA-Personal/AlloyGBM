@@ -444,6 +444,22 @@ Piecewise-linear leaves
     regression ``α* = -(ZᵀHZ + λI)⁻¹ Zᵀg``, regularised by the same
     ``lambda_l2`` you pass to the estimator.
 
+- ``pl_split_candidates: int = 0``
+
+  - ``0`` (default) preserves the standard split-selection path and current
+    model artifacts.
+  - A positive value enables experimental PL-aware split selection: standard
+    gain shortlists at most that many eligible numeric features, then every
+    threshold and missing direction for those features is rescored with the PL
+    criterion. Values above the eligible feature count are clipped.
+
+The opt-in path reuses one feature-histogram scratch allocation per worker, so
+storage is bounded independently of candidate count. Positive values are slower
+than ``0`` and held-out quality is dataset-dependent; validate them explicitly.
+MorphBoost and native-categorical winners retain their existing split behavior.
+Prediction cost and the artifact format are unchanged. See
+``docs/benchmarks/pl_topk_pr136.md`` for the PR #136 evidence.
+
 Empirically, ``"linear"`` converges in fewer rounds on data with linear
 within-node residual structure (~10× faster on linearly-structured datasets,
 +3.5% RMSE on California Housing, +1.75pp accuracy on Breast Cancer), at a

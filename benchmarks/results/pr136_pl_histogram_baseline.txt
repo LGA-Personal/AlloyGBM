@@ -1,0 +1,154 @@
+run=1
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=0.599 iterations=220 ns_per_iter=2721.97
+histogram_build_tiny_backend: total_ms=0.622 iterations=220 ns_per_iter=2829.36
+histogram_build_small_baseline_ref: total_ms=2.115 iterations=140 ns_per_iter=15106.84
+histogram_build_small_backend: total_ms=2.701 iterations=140 ns_per_iter=19295.84
+histogram_build_medium_baseline_ref: total_ms=46.348 iterations=80 ns_per_iter=579352.09
+histogram_build_medium_backend: total_ms=17.765 iterations=80 ns_per_iter=222068.75
+best_split_small: total_ms=11.356 iterations=500 ns_per_iter=22711.83
+best_split_medium: total_ms=38.356 iterations=500 ns_per_iter=76712.42
+best_split_dro_16: total_ms=10.245 iterations=500 ns_per_iter=20490.00
+best_split_dro_64: total_ms=11.702 iterations=500 ns_per_iter=23403.33
+best_split_dro_255: total_ms=61.182 iterations=500 ns_per_iter=122364.75
+best_split_morph_16: total_ms=11.370 iterations=500 ns_per_iter=22739.42
+best_split_morph_64: total_ms=12.311 iterations=500 ns_per_iter=24621.58
+best_split_morph_255: total_ms=68.021 iterations=500 ns_per_iter=136041.83
+run=2
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=0.491 iterations=220 ns_per_iter=2231.25
+histogram_build_tiny_backend: total_ms=0.540 iterations=220 ns_per_iter=2456.82
+histogram_build_small_baseline_ref: total_ms=1.855 iterations=140 ns_per_iter=13246.43
+histogram_build_small_backend: total_ms=2.259 iterations=140 ns_per_iter=16138.99
+histogram_build_medium_baseline_ref: total_ms=47.359 iterations=80 ns_per_iter=591986.97
+histogram_build_medium_backend: total_ms=15.578 iterations=80 ns_per_iter=194719.27
+best_split_small: total_ms=11.162 iterations=500 ns_per_iter=22323.08
+best_split_medium: total_ms=37.495 iterations=500 ns_per_iter=74989.92
+best_split_dro_16: total_ms=10.946 iterations=500 ns_per_iter=21891.33
+best_split_dro_64: total_ms=10.910 iterations=500 ns_per_iter=21819.00
+best_split_dro_255: total_ms=60.759 iterations=500 ns_per_iter=121517.58
+best_split_morph_16: total_ms=10.639 iterations=500 ns_per_iter=21278.17
+best_split_morph_64: total_ms=11.768 iterations=500 ns_per_iter=23536.83
+best_split_morph_255: total_ms=65.691 iterations=500 ns_per_iter=131381.42
+run=3
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=0.516 iterations=220 ns_per_iter=2346.21
+histogram_build_tiny_backend: total_ms=0.567 iterations=220 ns_per_iter=2578.98
+histogram_build_small_baseline_ref: total_ms=2.045 iterations=140 ns_per_iter=14608.04
+histogram_build_small_backend: total_ms=2.264 iterations=140 ns_per_iter=16168.16
+histogram_build_medium_baseline_ref: total_ms=46.887 iterations=80 ns_per_iter=586092.19
+histogram_build_medium_backend: total_ms=15.013 iterations=80 ns_per_iter=187668.24
+best_split_small: total_ms=11.666 iterations=500 ns_per_iter=23331.50
+best_split_medium: total_ms=37.352 iterations=500 ns_per_iter=74703.08
+best_split_dro_16: total_ms=10.847 iterations=500 ns_per_iter=21694.67
+best_split_dro_64: total_ms=11.693 iterations=500 ns_per_iter=23386.00
+best_split_dro_255: total_ms=59.683 iterations=500 ns_per_iter=119366.42
+best_split_morph_16: total_ms=10.337 iterations=500 ns_per_iter=20674.33
+best_split_morph_64: total_ms=11.751 iterations=500 ns_per_iter=23501.58
+best_split_morph_255: total_ms=65.047 iterations=500 ns_per_iter=130094.50
+run=4
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=0.495 iterations=220 ns_per_iter=2251.70
+histogram_build_tiny_backend: total_ms=0.544 iterations=220 ns_per_iter=2474.62
+histogram_build_small_baseline_ref: total_ms=2.503 iterations=140 ns_per_iter=17880.06
+histogram_build_small_backend: total_ms=2.279 iterations=140 ns_per_iter=16277.97
+histogram_build_medium_baseline_ref: total_ms=48.158 iterations=80 ns_per_iter=601980.74
+histogram_build_medium_backend: total_ms=15.753 iterations=80 ns_per_iter=196908.85
+best_split_small: total_ms=10.561 iterations=500 ns_per_iter=21122.17
+best_split_medium: total_ms=37.434 iterations=500 ns_per_iter=74867.92
+best_split_dro_16: total_ms=10.872 iterations=500 ns_per_iter=21743.33
+best_split_dro_64: total_ms=11.488 iterations=500 ns_per_iter=22976.50
+best_split_dro_255: total_ms=60.757 iterations=500 ns_per_iter=121513.83
+best_split_morph_16: total_ms=10.384 iterations=500 ns_per_iter=20769.00
+best_split_morph_64: total_ms=12.440 iterations=500 ns_per_iter=24880.42
+best_split_morph_255: total_ms=65.493 iterations=500 ns_per_iter=130987.00
+run=5
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=0.494 iterations=220 ns_per_iter=2244.89
+histogram_build_tiny_backend: total_ms=0.542 iterations=220 ns_per_iter=2464.20
+histogram_build_small_baseline_ref: total_ms=1.856 iterations=140 ns_per_iter=13256.25
+histogram_build_small_backend: total_ms=2.253 iterations=140 ns_per_iter=16093.15
+histogram_build_medium_baseline_ref: total_ms=46.826 iterations=80 ns_per_iter=585320.31
+histogram_build_medium_backend: total_ms=15.193 iterations=80 ns_per_iter=189909.38
+best_split_small: total_ms=10.882 iterations=500 ns_per_iter=21764.25
+best_split_medium: total_ms=38.613 iterations=500 ns_per_iter=77226.42
+best_split_dro_16: total_ms=11.774 iterations=500 ns_per_iter=23548.92
+best_split_dro_64: total_ms=11.260 iterations=500 ns_per_iter=22520.33
+best_split_dro_255: total_ms=60.720 iterations=500 ns_per_iter=121439.17
+best_split_morph_16: total_ms=10.990 iterations=500 ns_per_iter=21980.92
+best_split_morph_64: total_ms=11.345 iterations=500 ns_per_iter=22689.75
+best_split_morph_255: total_ms=73.479 iterations=500 ns_per_iter=146957.08
+run=6
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=0.497 iterations=220 ns_per_iter=2257.58
+histogram_build_tiny_backend: total_ms=0.544 iterations=220 ns_per_iter=2470.64
+histogram_build_small_baseline_ref: total_ms=1.877 iterations=140 ns_per_iter=13409.82
+histogram_build_small_backend: total_ms=2.257 iterations=140 ns_per_iter=16120.54
+histogram_build_medium_baseline_ref: total_ms=46.617 iterations=80 ns_per_iter=582718.75
+histogram_build_medium_backend: total_ms=14.666 iterations=80 ns_per_iter=183323.44
+best_split_small: total_ms=10.359 iterations=500 ns_per_iter=20718.92
+best_split_medium: total_ms=39.634 iterations=500 ns_per_iter=79268.42
+best_split_dro_16: total_ms=11.827 iterations=500 ns_per_iter=23653.50
+best_split_dro_64: total_ms=11.332 iterations=500 ns_per_iter=22663.17
+best_split_dro_255: total_ms=61.096 iterations=500 ns_per_iter=122192.75
+best_split_morph_16: total_ms=11.268 iterations=500 ns_per_iter=22535.50
+best_split_morph_64: total_ms=12.131 iterations=500 ns_per_iter=24261.33
+best_split_morph_255: total_ms=65.478 iterations=500 ns_per_iter=130956.92
+run=7
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=0.495 iterations=220 ns_per_iter=2250.38
+histogram_build_tiny_backend: total_ms=0.542 iterations=220 ns_per_iter=2461.74
+histogram_build_small_baseline_ref: total_ms=1.910 iterations=140 ns_per_iter=13645.83
+histogram_build_small_backend: total_ms=2.244 iterations=140 ns_per_iter=16025.60
+histogram_build_medium_baseline_ref: total_ms=48.235 iterations=80 ns_per_iter=602941.68
+histogram_build_medium_backend: total_ms=14.723 iterations=80 ns_per_iter=184039.06
+best_split_small: total_ms=11.201 iterations=500 ns_per_iter=22401.42
+best_split_medium: total_ms=38.880 iterations=500 ns_per_iter=77760.50
+best_split_dro_16: total_ms=10.765 iterations=500 ns_per_iter=21530.58
+best_split_dro_64: total_ms=11.882 iterations=500 ns_per_iter=23763.33
+best_split_dro_255: total_ms=59.761 iterations=500 ns_per_iter=119522.67
+best_split_morph_16: total_ms=10.387 iterations=500 ns_per_iter=20774.00
+best_split_morph_64: total_ms=11.964 iterations=500 ns_per_iter=23927.50
+best_split_morph_255: total_ms=64.491 iterations=500 ns_per_iter=128981.58

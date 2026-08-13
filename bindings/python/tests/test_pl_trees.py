@@ -8,6 +8,7 @@ import tempfile
 
 import numpy as np
 import pytest
+from sklearn.base import clone
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
 
@@ -84,6 +85,34 @@ class TestParamValidation:
         m = GBMRegressor(leaf_model="linear")
         r = repr(m)
         assert "leaf_model='linear'" in r
+
+    @pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+    def test_pl_split_candidates_public_parameter_contract(self, estimator_type):
+        default = estimator_type()
+        assert default.pl_split_candidates == 0
+        assert default.get_params(deep=False)["pl_split_candidates"] == 0
+        assert "pl_split_candidates=0" in repr(default)
+
+        explicit = estimator_type(pl_split_candidates=0)
+        assert explicit.pl_split_candidates == 0
+        assert clone(explicit).pl_split_candidates == 0
+        assert pickle.loads(pickle.dumps(explicit)).pl_split_candidates == 0
+
+        explicit.set_params(pl_split_candidates=17)
+        assert explicit.pl_split_candidates == 17
+        assert explicit.get_params(deep=False)["pl_split_candidates"] == 17
+
+    @pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+    @pytest.mark.parametrize("value", [True, False, -1, 1.5, 2**32])
+    def test_pl_split_candidates_rejects_invalid_values(self, estimator_type, value):
+        estimator = estimator_type(pl_split_candidates=value, n_estimators=1)
+        fit_kwargs = {"group": [0, 0, 1, 1]} if estimator_type is GBMRanker else {}
+        with pytest.raises(ValueError, match="pl_split_candidates"):
+            estimator.fit(
+                np.asarray([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32),
+                np.asarray([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
+                **fit_kwargs,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +221,71 @@ class TestPLRegressor:
             "linear leaves should retain their raw-scale advantage after numeric-solve changes: "
             f"linear RMSE={linear_rmse:.4f}, constant RMSE={constant_rmse:.4f}"
         )
+
+    @pytest.mark.parametrize(
+        ("tree_growth", "max_leaves"),
+        [("level", None), ("leaf", 8)],
+    )
+    def test_topk_is_deterministic_across_growth_and_thread_counts(
+        self, tree_growth, max_leaves
+    ):
+        X, y = _linear_regression_data(n=320, n_features=4, seed=23)
+        X[::17, 1] = np.nan
+        common = dict(
+            n_estimators=12,
+            max_depth=3,
+            max_leaves=max_leaves,
+            tree_growth=tree_growth,
+            leaf_model="linear",
+            pl_split_candidates=8,
+            training_policy="manual",
+            seed=91,
+        )
+
+        single = GBMRegressor(n_jobs=1, **common).fit(X, y)
+        parallel = GBMRegressor(n_jobs=4, **common).fit(X, y)
+
+        assert single.artifact_bytes == parallel.artifact_bytes
+        np.testing.assert_array_equal(single.predict(X), parallel.predict(X))
+
+    @pytest.mark.parametrize(
+        ("tree_growth", "max_leaves"),
+        [("level", None), ("leaf", 8)],
+    )
+    def test_default_matches_explicit_topk_compatibility_mode(
+        self, tree_growth, max_leaves
+    ):
+        X, y = _linear_regression_data(n=320, n_features=4, seed=31)
+        X[::19, 2] = np.nan
+        common = dict(
+            n_estimators=12,
+            max_depth=3,
+            max_leaves=max_leaves,
+            tree_growth=tree_growth,
+            leaf_model="linear",
+            training_policy="manual",
+            n_jobs=2,
+            seed=17,
+        )
+
+        default = GBMRegressor(**common).fit(X, y)
+        compatibility = GBMRegressor(pl_split_candidates=0, **common).fit(X, y)
+
+        assert default.artifact_bytes == compatibility.artifact_bytes
+        np.testing.assert_array_equal(default.predict(X), compatibility.predict(X))
+
+    def test_exhaustive_candidate_limit_is_clipped_and_finite(self):
+        X, y = _linear_regression_data(n=240, n_features=4, seed=29)
+        model = GBMRegressor(
+            n_estimators=8,
+            max_depth=2,
+            leaf_model="linear",
+            pl_split_candidates=10_000,
+            training_policy="manual",
+            seed=7,
+        ).fit(X, y)
+
+        assert np.isfinite(np.asarray(model.predict(X))).all()
 
 
 # ---------------------------------------------------------------------------

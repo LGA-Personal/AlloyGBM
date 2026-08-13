@@ -1,0 +1,27 @@
+   Compiling alloygbm-core v0.12.10 (/Users/lashby/Projects/AlloyGBM/.worktrees/pl-top-k-histograms/crates/core)
+   Compiling alloygbm-categorical v0.12.10 (/Users/lashby/Projects/AlloyGBM/.worktrees/pl-top-k-histograms/crates/categorical)
+   Compiling alloygbm-engine v0.12.10 (/Users/lashby/Projects/AlloyGBM/.worktrees/pl-top-k-histograms/crates/engine)
+   Compiling alloygbm-backend-cpu v0.12.10 (/Users/lashby/Projects/AlloyGBM/.worktrees/pl-top-k-histograms/crates/backend_cpu)
+    Finished `bench` profile [optimized] target(s) in 6.17s
+     Running benches/histogram_kernels.rs (target/release/deps/histogram_kernels-f4aba424e333baa7)
+production_base: ea4df36
+runtime_target_arch: aarch64
+runtime_avx2_enabled: false
+runtime_avx2_override: unset
+pl_histogram_storage: production_base=ea4df36 features=8 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=156000
+pl_histogram_storage: production_base=ea4df36 features=32 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=624000
+pl_histogram_storage: production_base=ea4df36 features=128 bins_per_feature=65 bin_size_bytes=300 retained_bundle_bytes=2496000
+histogram_build_tiny_baseline_ref: total_ms=1.029 iterations=220 ns_per_iter=4676.14
+histogram_build_tiny_backend: total_ms=1.124 iterations=220 ns_per_iter=5107.76
+histogram_build_small_baseline_ref: total_ms=3.355 iterations=140 ns_per_iter=23963.10
+histogram_build_small_backend: total_ms=3.857 iterations=140 ns_per_iter=27549.11
+histogram_build_medium_baseline_ref: total_ms=52.416 iterations=80 ns_per_iter=655204.16
+histogram_build_medium_backend: total_ms=15.224 iterations=80 ns_per_iter=190304.69
+best_split_small: total_ms=11.581 iterations=500 ns_per_iter=23162.17
+best_split_medium: total_ms=36.250 iterations=500 ns_per_iter=72499.67
+best_split_dro_16: total_ms=11.557 iterations=500 ns_per_iter=23114.75
+best_split_dro_64: total_ms=11.973 iterations=500 ns_per_iter=23946.50
+best_split_dro_255: total_ms=58.005 iterations=500 ns_per_iter=116010.92
+best_split_morph_16: total_ms=11.895 iterations=500 ns_per_iter=23790.33
+best_split_morph_64: total_ms=12.049 iterations=500 ns_per_iter=24098.42
+best_split_morph_255: total_ms=64.083 iterations=500 ns_per_iter=128166.58

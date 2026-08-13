@@ -124,6 +124,7 @@ pub(crate) fn build_train_params(
     tweedie_variance_power: f32,
     poisson_max_delta_step: f32,
     quantile_alpha: f32,
+    pl_split_candidates: usize,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -153,6 +154,7 @@ pub(crate) fn build_train_params(
         tweedie_variance_power,
         poisson_max_delta_step,
         quantile_alpha,
+        pl_split_candidates,
     }
 }
 

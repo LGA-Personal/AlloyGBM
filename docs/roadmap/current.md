@@ -8,6 +8,17 @@ The `0.12.10` release is a patch optimization release: it speeds existing piecew
 
 **No artifact format change.** Test counts: 452 cargo + 657 pytest.
 
+## Experimental PL Split Shortlisting
+
+**Status: implemented as opt-in.** Linear-leaf estimators accept
+`pl_split_candidates`; `0` remains the compatibility-preserving default.
+Positive values bound PL-aware split rescoring to a standard-gain shortlist and
+retain only one feature's matrix histogram per worker. The proposed default of
+`8` was rejected because broad A/B evidence showed mixed quality and excessive
+cost versus the existing path. On wide fixtures, however, `k=8` required only
+13.96–20.66% of exhaustive rescoring time. See the
+[PR #136 report](../benchmarks/pl_topk_pr136.md).
+
 ## Architectural Backlog
 
 The following findings from the [July 2026 core review](../reviews/2026-07-02-v0.12.10-core-resolutions.md)

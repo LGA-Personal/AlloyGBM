@@ -5,7 +5,8 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
-    HistogramExecution, LinearContext, MorphContext, SplitSelectionOptions,
+    HistogramExecution, LinearContext, MorphContext, PreparedLinearSplit, SplitSelectionOptions,
+    SplitShortlist,
 };
 use rayon::prelude::*;
 
@@ -116,6 +117,83 @@ impl BackendOps for CpuBackend {
             categorical_features,
             None,
         ))
+    }
+
+    fn shortlist_standard_splits(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        max_numeric_features: usize,
+    ) -> EngineResult<SplitShortlist> {
+        let find_best = |fh: HistogramFeatureView<'_>| -> Option<SplitCandidate> {
+            let feature_index = fh.feature_index() as usize;
+            if let Some(info) = categorical_features
+                .iter()
+                .find(|info| info.feature_index == feature_index)
+            {
+                Self::best_split_for_categorical_feature(
+                    fh,
+                    histograms.node_id,
+                    options,
+                    info.num_categories,
+                    None,
+                )
+            } else {
+                Self::best_split_for_feature(fh, histograms.node_id, options, None)
+            }
+        };
+
+        let per_feature: Vec<Option<SplitCandidate>> =
+            if histograms.feature_count() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+                (0..histograms.feature_count())
+                    .into_par_iter()
+                    .map(|index| find_best(histograms.feature(index).expect("bounded feature")))
+                    .collect()
+            } else {
+                histograms.features().map(find_best).collect()
+            };
+
+        let best_overall = per_feature
+            .iter()
+            .flatten()
+            .cloned()
+            .reduce(|current, candidate| {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&candidate, feature_weights),
+                    apply_feature_weight(&current, feature_weights),
+                ) {
+                    candidate
+                } else {
+                    current
+                }
+            });
+
+        let mut remaining: Vec<SplitCandidate> = per_feature
+            .into_iter()
+            .flatten()
+            .filter(|candidate| !candidate.is_categorical)
+            .collect();
+        let target = max_numeric_features.min(remaining.len());
+        let mut numeric_candidates = Vec::with_capacity(target);
+        for _ in 0..target {
+            let mut best_index = 0;
+            for index in 1..remaining.len() {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&remaining[index], feature_weights),
+                    apply_feature_weight(&remaining[best_index], feature_weights),
+                ) {
+                    best_index = index;
+                }
+            }
+            numeric_candidates.push(remaining.remove(best_index));
+        }
+
+        Ok(SplitShortlist {
+            best_overall,
+            numeric_candidates,
+        })
     }
 
     fn best_split_with_factor_context(
@@ -459,6 +537,94 @@ impl BackendOps for CpuBackend {
         };
 
         Ok(result)
+    }
+
+    fn evaluate_shortlisted_linear_feature(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split_feature_index: u32,
+        linear_context: &LinearContext,
+        feature_scaler: &LinearFeatureScaler,
+        raw_feature_values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+        options: SplitSelectionOptions,
+        learning_rate: f32,
+        parent_leaf_value: f32,
+        parent_linear_leaf: Option<&LinearLeaf>,
+    ) -> EngineResult<Option<PreparedLinearSplit>> {
+        pl_histogram::with_shortlisted_linear_histogram(
+            binned_matrix,
+            gradients,
+            node,
+            split_feature_index,
+            &linear_context.regressor_features,
+            feature_scaler,
+            raw_feature_values,
+            row_count,
+            feature_count,
+            |bins| {
+                let mut split = pl::best_split_linear_for_bins(
+                    split_feature_index,
+                    bins,
+                    node.node_id,
+                    options,
+                    linear_context,
+                )?;
+                let (l_xtg, l_xthx, l_grad, l_hess, r_xtg, r_xthx, r_grad, r_hess) =
+                    pl::leaf_linear_stats_for_bins(
+                        bins,
+                        split.threshold_bin as usize,
+                        options.missing_bin_index,
+                        split.default_left,
+                    );
+                let left_leaf = pl::solve_pl_leaf(
+                    &l_xtg,
+                    &l_xthx,
+                    pl::LinearLeafSolveParams {
+                        grad_sum: l_grad,
+                        hess_sum: l_hess,
+                        learning_rate,
+                        l2_lambda: linear_context.l2_lambda,
+                    },
+                    &linear_context.regressor_features,
+                    feature_scaler,
+                );
+                let right_leaf = pl::solve_pl_leaf(
+                    &r_xtg,
+                    &r_xthx,
+                    pl::LinearLeafSolveParams {
+                        grad_sum: r_grad,
+                        hess_sum: r_hess,
+                        learning_rate,
+                        l2_lambda: linear_context.l2_lambda,
+                    },
+                    &linear_context.regressor_features,
+                    feature_scaler,
+                );
+                split.gain = pl::realized_pl_split_gain(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    raw_feature_values,
+                    feature_count,
+                    &split,
+                    parent_leaf_value,
+                    parent_linear_leaf,
+                    &left_leaf,
+                    &right_leaf,
+                    learning_rate,
+                    linear_context.l2_lambda,
+                )?;
+                Some(PreparedLinearSplit {
+                    split,
+                    left_leaf,
+                    right_leaf,
+                })
+            },
+        )
     }
 
     fn compute_linear_leaf_pair(

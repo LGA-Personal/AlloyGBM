@@ -113,6 +113,21 @@ class TestNativeCategoricalSplits(unittest.TestCase):
         self.assertGreater(mean_high, 2.0)
         self.assertGreater(mean_high - mean_low, 1.0)
 
+    def test_native_cat_with_topk_linear_leaves_is_finite(self) -> None:
+        X, y, cats = _make_cat_regression_data()
+        model = GBMRegressor(
+            n_estimators=10,
+            max_depth=3,
+            max_cat_threshold=64,
+            categorical_feature_indices=[0],
+            leaf_model="linear",
+            pl_split_candidates=8,
+            training_policy="manual",
+            seed=42,
+        ).fit(X, y, categorical_feature_values_list=[cats])
+
+        self.assertTrue(np.isfinite(np.asarray(model.predict(X))).all())
+
     def test_monotone_native_categorical_overlap_is_rejected(self) -> None:
         X, y, cats = _make_cat_regression_data()
         model = GBMRegressor(
