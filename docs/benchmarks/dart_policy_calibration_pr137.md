@@ -5,9 +5,10 @@ Status: implemented and revision-hardened on `codex/dart-drop-calibration`; the 
 ## Decision
 
 The fixed five-seed matrix selected `dart_max_drop=5`, the largest candidate that
-passed all eight predeclared gates. Candidate `2` also passed. Candidates `10`
-and `20` were rejected by the stress pressure and stress fit-time gates. The
-incumbent `50` remains available as an explicit compatibility override.
+passed all eight predeclared gates. Candidate `2` also passed. Candidate `10`
+was rejected by the stress-pressure gate; candidate `20` was rejected by both
+stress pressure and stress fit time. The incumbent `50` remains available as
+an explicit compatibility override.
 
 The matrix contains 10 fixtures x 5 seeds x 5 explicit caps = 250 records.
 Every arm passed an explicit cap, so the matrix decision is independent of the
@@ -72,7 +73,7 @@ were fixed before selection:
 | Individual-seed primary quality | <= 1.10 | pass | pass | pass | pass |
 | Accuracy / NDCG loss | <= 0.02 / 0.01 | pass | pass | pass | pass |
 | Stress configured pressure ratio | <= 0.50 | pass | pass | **fail** | **fail** |
-| Stress fit-time ratio | <= 0.85 | pass | pass | **fail** | **fail** |
+| Stress fit-time ratio | <= 0.85 | pass | pass | pass | **fail** |
 | Peak RSS | max(15%, 32 MiB) over incumbent | pass | pass | pass | pass |
 | Compatibility and determinism | all required checks | pass | pass | pass | pass |
 
@@ -145,8 +146,9 @@ cap50 capture. Each compatibility fit was repeated in the subprocess; all
 repeated prediction and artifact hashes matched.
 
 The complete 64-character lowercase SHA-256 values remain in the committed
-JSON evidence files. The machine comparator consumes capture metadata, actual
-caps, determinism repeats, and hash parity. The separate regression suite
+JSON evidence files. Capture generation repeats every fit and aborts on a hash
+mismatch; the machine comparator consumes capture metadata, actual caps,
+stored-check consistency, and hash parity. The separate regression suite
 also pins exact artifact and prediction equality for selected-cap `n_jobs=1`
 versus `n_jobs=2`, repeated explicit-50 regression/multiclass/ranking fits,
 selected-default level/leaf fits, and selected-default warm-start predictions
