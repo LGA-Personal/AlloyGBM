@@ -9,11 +9,140 @@ sanity check that DART produces different predictions from Standard
 from __future__ import annotations
 
 import pickle
+from pathlib import Path
+import importlib.util
+import sys
 
 import numpy as np
 import pytest
+from sklearn.base import clone
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+
+
+def _calibrated_selected_cap() -> int:
+    repo_root = Path(__file__).resolve().parents[3]
+    module_path = repo_root / "benchmarks" / "dart_policy_calibration.py"
+    spec = importlib.util.spec_from_file_location("pr137_dart_policy_calibration", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    fixture_specs, records = module.read_matrix(
+        repo_root / "benchmarks" / "results" / "pr137_dart_policy_matrix.json"
+    )
+    return module.evaluate_candidate_caps(records, specs=fixture_specs).selected_cap
+
+
+@pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+def test_dart_default_surfaces_match_generated_selected_cap(estimator_type):
+    selected_cap = _calibrated_selected_cap()
+    model = estimator_type(boosting_mode="dart")
+
+    assert model.dart_max_drop == selected_cap
+    assert model.get_params()["dart_max_drop"] == selected_cap
+    assert f"dart_max_drop={selected_cap}" in repr(model)
+
+    cloned = clone(model)
+    assert cloned.dart_max_drop == selected_cap
+    assert cloned.get_params()["dart_max_drop"] == selected_cap
+
+    restored = pickle.loads(pickle.dumps(model))
+    assert restored.dart_max_drop == selected_cap
+    assert restored.get_params()["dart_max_drop"] == selected_cap
+
+    explicit_incumbent = estimator_type(boosting_mode="dart", dart_max_drop=50)
+    assert explicit_incumbent.dart_max_drop == 50
+    assert explicit_incumbent.get_params()["dart_max_drop"] == 50
+
+
+@pytest.mark.parametrize("task", ["regression", "multiclass", "ranking"])
+def test_explicit_50_artifact_and_prediction_are_repeatable(task):
+    rng = np.random.default_rng(1370)
+    X = rng.normal(size=(120, 4)).astype(np.float32)
+    if task == "regression":
+        y = (X[:, 0] - 0.5 * X[:, 1]).astype(np.float32)
+        fit_kwargs = {}
+    elif task == "multiclass":
+        y = np.arange(len(X), dtype=np.int64) % 3
+        fit_kwargs = {}
+    else:
+        y = (X[:, 0] + X[:, 1]).astype(np.float32)
+        fit_kwargs = {"group": np.repeat(np.arange(12), 10)}
+
+    common = dict(
+        n_estimators=8,
+        max_depth=3,
+        learning_rate=0.06,
+        training_policy="manual",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        dart_max_drop=50,
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=137,
+    )
+    if task == "regression":
+        estimator_type = GBMRegressor
+    elif task == "multiclass":
+        estimator_type = GBMClassifier
+    else:
+        estimator_type = GBMRanker
+
+    first = estimator_type(**common).fit(X, y, **fit_kwargs)
+    second = estimator_type(**common).fit(X, y, **fit_kwargs)
+    assert bytes(first.artifact_bytes) == bytes(second.artifact_bytes)
+    np.testing.assert_array_equal(first.predict(X), second.predict(X))
+
+
+@pytest.mark.parametrize("tree_growth", ["level", "leaf"])
+def test_selected_default_equals_explicit_selected_artifact(tree_growth):
+    rng = np.random.default_rng(1371)
+    X = rng.normal(size=(160, 5)).astype(np.float32)
+    y = (X[:, 0] - 0.7 * X[:, 1] + 0.15 * X[:, 2] ** 2).astype(np.float32)
+    common = dict(
+        n_estimators=12,
+        max_depth=3,
+        max_leaves=8 if tree_growth == "leaf" else None,
+        learning_rate=0.06,
+        training_policy="manual",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        tree_growth=tree_growth,
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=1371,
+    )
+    default = GBMRegressor(**common).fit(X, y)
+    explicit = GBMRegressor(
+        **common,
+        dart_max_drop=_calibrated_selected_cap(),
+    ).fit(X, y)
+    assert bytes(default.artifact_bytes) == bytes(explicit.artifact_bytes)
+    np.testing.assert_array_equal(default.predict(X), explicit.predict(X))
+
+
+def test_selected_explicit_cap_is_deterministic_across_n_jobs():
+    rng = np.random.default_rng(1372)
+    X = rng.normal(size=(192, 6)).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] * X[:, 2] - X[:, 3]).astype(np.float32)
+    common = dict(
+        n_estimators=12,
+        max_depth=3,
+        learning_rate=0.06,
+        training_policy="manual",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        dart_max_drop=_calibrated_selected_cap(),
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=1372,
+    )
+    serial = GBMRegressor(**common, n_jobs=1).fit(X, y)
+    parallel = GBMRegressor(**common, n_jobs=2).fit(X, y)
+    assert bytes(serial.artifact_bytes) == bytes(parallel.artifact_bytes)
+    np.testing.assert_array_equal(serial.predict(X), parallel.predict(X))
 
 
 # ----- Smoke tests -----

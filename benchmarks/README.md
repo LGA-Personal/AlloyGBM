@@ -204,6 +204,10 @@ Additional lighter-weight scripts target specific features:
   report is `docs/benchmarks/review_guardrails_v1.md`; `--quick --gate` is the
   CI-sized contract run. DART timings are descriptive, and its 1.50x quality
   gate applies only to explicit default-like profiles (`drop_rate <= 0.10`).
+- `benchmarks/dart_policy_calibration.py` — fixed five-seed, ten-fixture DART
+  expected-drop calibration for PR #137. The committed matrix, compatibility
+  captures, rejected-cap reasons, and selected default are recorded in
+  `docs/benchmarks/dart_policy_calibration_pr137.md`.
 - `benchmarks/monotone_constraints_benchmark.py` — deterministic scalar
   monotone-constraint acceptance evidence across regression and binary
   objectives. The full report is `docs/benchmarks/monotone_constraints_v1.md`;

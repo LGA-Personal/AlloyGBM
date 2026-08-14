@@ -36,6 +36,29 @@ def test_multiclass_dart_trains_and_predicts_proba():
     assert np.all(proba >= 0) and np.all(proba <= 1)
 
 
+def test_multiclass_dart_default_matches_explicit_default_cap():
+    X, y = _toy_multiclass(n_rows=180, seed=1373)
+    common = dict(
+        n_estimators=12,
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        training_policy="manual",
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=1373,
+    )
+    default = GBMClassifier(**common)
+    explicit = GBMClassifier(**common, dart_max_drop=default.dart_max_drop)
+
+    default.fit(X, y)
+    explicit.fit(X, y)
+
+    assert bytes(default.artifact_bytes) == bytes(explicit.artifact_bytes)
+    np.testing.assert_array_equal(
+        default.predict_proba(X), explicit.predict_proba(X)
+    )
+
+
 def test_multiclass_dart_differs_from_standard():
     X, y = _toy_multiclass()
     d = GBMClassifier(

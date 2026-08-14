@@ -8,6 +8,20 @@ The `0.12.10` release is a patch optimization release: it speeds existing piecew
 
 **No artifact format change.** Test counts: 452 cargo + 657 pytest.
 
+## DART Expected-Drop Calibration (PR #137)
+
+**Status: implemented.** The public Python default for `dart_max_drop` is now
+`5`, selected as the largest passing cap from a fixed five-seed, ten-fixture
+matrix. The matrix covered regression, binary and four-class classification,
+grouped ranking, level/leaf growth, weighted/forest policies, long horizons,
+and class-tree pool pressure. Stress pressure/time use five 200/300-round
+fixtures and 25 records per cap; the 100-round multiclass fixture remains in
+the matrix for other gates only. All candidates passed held-out quality,
+completion, finite-value, and compatibility checks; cap `10` failed stress
+pressure and cap `20` failed stress pressure/time. Explicit `dart_max_drop=50`
+restores the previous default, and no Rust/native, artifact, or predictor
+behavior changed. See the [PR #137 evidence report](../benchmarks/dart_policy_calibration_pr137.md).
+
 ## Experimental PL Split Shortlisting
 
 **Status: implemented as opt-in.** Linear-leaf estimators accept

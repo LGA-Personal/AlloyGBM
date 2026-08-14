@@ -82,6 +82,10 @@ and ``boosting_mode="dart"`` with ``dart_drop_rate`` /
 ``dart_max_drop`` / ``dart_normalize_type`` / ``dart_sample_type`` are
 both supported on the ranking objective (see :doc:`estimator`
 "Boosting mode" for the full semantics).
+The calibrated public default for ``GBMRanker`` is ``dart_max_drop=5``.
+This inherited default does not apply to joint ``MultiLabelGBMRanker`` mode,
+which requires an explicit ``dart_max_drop`` when ``boosting_mode="dart"`` is
+selected; explicit ``dart_max_drop=50`` is forwarded unchanged there.
 
 Methods
 -------

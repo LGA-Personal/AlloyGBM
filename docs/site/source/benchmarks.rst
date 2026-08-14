@@ -51,6 +51,13 @@ harnesses are also provided:
   descriptive; the 1.50x RMSE gate applies only to explicit default-like
   profiles with ``drop_rate <= 0.10``, while the stress profile remains
   reported and contract-checked.
+- ``benchmarks/dart_policy_calibration.py`` -- fixed five-seed, ten-fixture
+  DART expected-drop calibration for PR #137. The committed matrix,
+  compatibility captures, rejected-cap reasons, and selected default are
+  recorded in ``docs/benchmarks/dart_policy_calibration_pr137.md``. The machine
+  comparator validates the fixed matrix/capture contract and hash parity;
+  warm-start and ``n_jobs`` are separate regression sentinels rather than JSON
+  compatibility records.
 - ``benchmarks/monotone_constraints_benchmark.py`` -- deterministic scalar
   monotone-constraint acceptance evidence for regression and binary models.
   The report is ``docs/benchmarks/monotone_constraints_v1.md``; finite numeric

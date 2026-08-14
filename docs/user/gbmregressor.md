@@ -55,8 +55,13 @@ one-dimensional inputs are rejected before native training.
 - `dart_drop_rate: float = 0.1`
   - Per-tree drop probability per round when `boosting_mode="dart"`.
     Must be in `(0, 1)`.
-- `dart_max_drop: int = 50`
-  - Cap on the number of trees dropped per round.  Must be `>= 1`.
+- `dart_max_drop: int = 5`
+  - Cap on the number of trees dropped per round. Must be `>= 1`. The public
+    default was selected by the fixed PR #137 calibration matrix. For a
+    positive drop rate, expected selected work per round is approximately
+    `min(dart_max_drop, max(1, dart_drop_rate * existing_tree_count))`, with
+    the forced-one rule applying when sampling selects no tree. Pass
+    `dart_max_drop=50` to restore the previous default explicitly.
 - `dart_normalize_type: str = "tree"`
   - Rescale policy after the new tree is fit.  `"tree"` mode sets
     new-tree weight to `1/(K+1)` and dropped-tree weights to
@@ -68,12 +73,15 @@ one-dimensional inputs are rejected before native training.
     biases dropout probability toward heavier-weight trees.
 
 GOSS and DART are supported on the binary classifier / regression /
-ranking single-output objective.  The multiclass softmax path
-explicitly rejects non-`"standard"` boosting modes pending per-class
-gradient scoring (v0.10.x follow-up).
+ranking single-output objectives and multiclass classification. For
+multiclass DART, the cap applies to the actual class-tree pool: a four-class
+round adds four existing trees, not one logical-round unit. See the
+[PR #137 calibration report](../benchmarks/dart_policy_calibration_pr137.md)
+for the fixed matrix and compatibility evidence; the timing gate is
+machine-dependent rather than a universal speed claim.
 
 As of v0.10.0, **DART + `warm_start`** is supported on
-`GBMRegressor`, binary `GBMClassifier`, and `GBMRanker`. The
+`GBMRegressor`, `GBMClassifier` (including multiclass), and `GBMRanker`. The
 continuation seeds `dart_state.tree_weights` from the prior model's
 per-stump `tree_weight` snapshot and pre-populates the dropout
 bookkeeping arrays so new-round dropouts can correctly subtract /

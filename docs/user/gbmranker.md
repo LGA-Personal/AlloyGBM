@@ -284,7 +284,7 @@ strategy:
 | `goss_top_rate` | float | `0.2` | Top gradient fraction to keep (GOSS). |
 | `goss_other_rate` | float | `0.1` | Fraction sampled from low-gradient rows (GOSS). |
 | `dart_drop_rate` | float | `0.1` | Fraction of trees dropped per round (DART). |
-| `dart_max_drop` | int | `50` | Maximum trees dropped per round (DART). |
+| `dart_max_drop` | int | not set | Required explicitly when joint `boosting_mode="dart"` is selected; joint mode has no implicit cap. |
 | `dart_normalize_type` | str | `"tree"` | `"tree"` or `"forest"` normalization (DART). |
 | `dart_sample_type` | str | `"uniform"` | `"uniform"` or `"weighted"` dropout (DART). |
 | `ranking_sigma` | float | `1.0` | Sigmoid sharpness for joint `rank:pairwise` and `rank:ndcg` objectives. |
@@ -301,6 +301,12 @@ strategy:
 | `factor_exposure_transform` | str | `"none"` | v0.12.10+. `"none"`, `"center"`, or `"standardize"` preprocessing for fit-time `factor_exposures`. |
 
 `fit()` also accepts `factor_exposures=` (shape `(n_rows, n_factors)`, dtype float32). Already accepted in independent mode; honored in joint mode as of v0.10.6.
+
+The calibrated public default `dart_max_drop=5` applies to `GBMRanker` and to
+independent `MultiLabelGBMRanker` sub-rankers when the parameter is omitted.
+Joint mode does not inherit that default or synthesize a cap: pass an explicit
+`dart_max_drop` whenever joint `boosting_mode="dart"` is selected. An explicit
+`dart_max_drop=50` is forwarded unchanged.
 
 ```python
 model = MultiLabelGBMRanker(

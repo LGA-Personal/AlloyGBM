@@ -49,6 +49,15 @@ profile evidence. DART timing is descriptive; the 1.50x RMSE gate applies only
 to explicit default-like profiles with `drop_rate <= 0.10`, while the aggressive
 stress profile remains reported and contract-checked.
 
+The PR #137 DART policy harness at `benchmarks/dart_policy_calibration.py`
+evaluates explicit caps `2`, `5`, `10`, `20`, and `50` across ten fixed
+fixtures and five seeds. Its [calibration report](../benchmarks/dart_policy_calibration_pr137.md)
+records the selected default, all gate results, compatibility hashes, and
+rejected candidates. The machine comparator owns the fixed matrix/capture
+contract and hash parity; warm-start and `n_jobs` are separate passing
+regression sentinels, not JSON compatibility records. Timing remains a
+same-host policy-selection gate rather than a universal performance claim.
+
 A deterministic scalar monotone-constraint harness lives at
 `benchmarks/monotone_constraints_benchmark.py`; its committed evidence is
 [monotone_constraints_v1.md](../benchmarks/monotone_constraints_v1.md). It

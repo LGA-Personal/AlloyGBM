@@ -60,11 +60,16 @@ Boosting mode
   ``(0, 1)`` and ``goss_top_rate + goss_other_rate <= 1.0``.
 - ``dart_drop_rate: float = 0.1`` -- per-tree drop probability per
   round when ``boosting_mode="dart"``.  Must be in ``(0, 1)``.
-- ``dart_max_drop: int = 50`` -- cap on the number of trees dropped
-  and therefore on dropped-tree traversal work per round.  Must be
-  ``>= 1``.  DART uses reusable aggregate scratch storage to restore
-  normalized dropped-tree contributions without a second walk over
-  those trees.
+- ``dart_max_drop: int = 5`` -- cap on the number of trees dropped
+  and therefore on dropped-tree traversal work per round. Must be
+  ``>= 1``. The public default was selected by the fixed PR #137
+  calibration matrix. For a positive drop rate, expected selected work
+  per round is approximately
+  ``min(dart_max_drop, max(1, dart_drop_rate * existing_tree_count))``;
+  the forced-one rule applies when sampling selects no tree. Pass
+  ``dart_max_drop=50`` to restore the previous default explicitly. DART
+  uses reusable aggregate scratch storage to restore normalized dropped-tree
+  contributions without a second walk over those trees.
 - ``dart_normalize_type: str = "tree"`` -- rescale policy after the
   new tree is fit.  ``"tree"`` mode sets new-tree weight to
   ``1 / (K + 1)`` and each dropped-tree weight to ``K / (K + 1)``;
@@ -76,13 +81,16 @@ Boosting mode
   toward heavier-weight trees.
 
 GOSS and DART are supported on the binary classifier / regression /
-ranking single-output objective.  The multiclass softmax path
-explicitly rejects non-``"standard"`` boosting modes pending
-per-class gradient scoring (v0.10.x follow-up — applies to both
-GOSS and DART).
+ranking single-output objectives and multiclass classification. For
+multiclass DART, the cap applies to the actual class-tree pool: a four-class
+round adds four existing trees, not one logical-round unit. See the
+``docs/benchmarks/dart_policy_calibration_pr137.md`` report for the fixed
+matrix and compatibility evidence; the timing gate is machine-dependent
+rather than a universal speed claim.
 
 As of v0.10.0, **DART + ``warm_start``** is supported on
-``GBMRegressor``, binary ``GBMClassifier``, and ``GBMRanker``. The
+``GBMRegressor``, ``GBMClassifier`` (including multiclass), and
+``GBMRanker``. The
 continuation seeds ``dart_state.tree_weights`` from the prior model's
 per-stump ``tree_weight`` snapshot and pre-populates the dropout
 bookkeeping arrays so new-round dropouts can correctly subtract /
