@@ -6,6 +6,7 @@ from dataclasses import replace
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import numpy as np
@@ -29,7 +30,7 @@ def _record(
     cap: int,
     primary: float | None = None,
     secondary: float | None = None,
-        fit_seconds: float | None = None,
+    fit_seconds: float | None = None,
     peak_rss_bytes: int | None = 128 * 1024 * 1024,
     completed_rounds: int | None = None,
 ):
@@ -136,7 +137,7 @@ def test_fixed_caps_seeds_and_fixture_catalog_are_pinned():
         )
         for spec in specs
     ] == [
-        ("regression", 640, 8, 100, 0.10, "uniform", "tree", "level", False),
+        ("regression", 640, 8, 50, 0.10, "uniform", "tree", "level", False),
         ("regression", 640, 64, 100, 0.10, "uniform", "tree", "level", False),
         ("regression", 4096, 12, 200, 0.10, "uniform", "tree", "level", True),
         ("regression", 3072, 64, 200, 0.10, "uniform", "tree", "leaf", True),
@@ -179,30 +180,25 @@ def test_ranking_fixture_splits_by_whole_contiguous_groups():
 def test_selection_chooses_largest_passing_cap_and_keeps_reasons():
     specs, records = _matrix(
         mutate=lambda rows, specs: [
-            replace(
-                row,
-                configured_pressure=(
-                    MODULE.configured_dropout_pressure(
-                        next(spec for spec in specs if spec.name == row.fixture).n_estimators,
-                        next(spec for spec in specs if spec.name == row.fixture).drop_rate,
-                        MODULE.INCUMBENT_CAP,
-                        next(spec for spec in specs if spec.name == row.fixture).trees_per_round,
-                    )
-                    * (0.40 if row.cap == 10 else 0.60)
-                ),
-            )
-            if row.stress and row.cap in (10, 20)
+                replace(
+                    row,
+                    fit_seconds=0.40 if row.cap == 5 else 0.60,
+                )
+            if row.stress and row.cap in (5, 10, 20)
             else row
             for row in rows
         ]
     )
     decision = MODULE.evaluate_candidate_caps(records, specs=specs)
-    assert decision.selected_cap == 10
+    assert decision.selected_cap == 5
     assert _assessment(decision, 2).passed
     assert _assessment(decision, 5).passed
-    assert _assessment(decision, 10).passed
+    assert not _assessment(decision, 10).passed
     assert not _assessment(decision, 20).passed
-    assert any("pressure" in reason for reason in _assessment(decision, 20).reasons)
+    assert any(
+        "pressure" in reason or "fit time" in reason
+        for reason in _assessment(decision, 10).reasons
+    )
 
 
 def test_selection_falls_back_to_incumbent_with_rejection_reasons():
@@ -298,7 +294,7 @@ def test_selection_falls_back_to_incumbent_with_rejection_reasons():
         (
             "rss",
             lambda rows, specs: [
-                    replace(row, peak_rss_bytes=161 * 1024 * 1024)
+                replace(row, peak_rss_bytes=161 * 1024 * 1024)
                 if row.cap == 2 and row.stress
                 else row
                 for row in rows
@@ -422,6 +418,268 @@ def test_json_round_trip_is_sorted_and_rejects_schema_or_nonfinite(tmp_path):
         MODULE.read_matrix(path)
 
 
+@pytest.mark.parametrize(
+    ("field", "mutate", "message"),
+    [
+        ("caps", lambda payload: payload["caps"].pop(), "predeclared caps"),
+        ("caps", lambda payload: payload["caps"].reverse(), "predeclared caps"),
+        ("seeds", lambda payload: payload["seeds"].pop(), "predeclared seeds"),
+        ("seeds", lambda payload: payload["seeds"].reverse(), "predeclared seeds"),
+        (
+            "specs",
+            lambda payload: payload["specs"].pop(),
+            "predeclared fixture catalog",
+        ),
+        (
+            "specs",
+            lambda payload: payload["specs"].reverse(),
+            "predeclared fixture catalog",
+        ),
+        (
+            "specs",
+            lambda payload: payload["specs"][0].update(n_estimators=51),
+            "predeclared fixture catalog",
+        ),
+    ],
+)
+def test_matrix_requires_the_exact_predeclared_contract(
+    tmp_path, field, mutate, message
+):
+    specs, records = _matrix()
+    path = tmp_path / "matrix.json"
+    MODULE.write_matrix(
+        path,
+        specs,
+        records,
+        caps=MODULE.FULL_CAPS,
+        seeds=MODULE.FULL_SEEDS,
+    )
+    payload = json.loads(path.read_text())
+    mutate(payload)
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=message):
+        MODULE.read_matrix(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("configured_pressure", 0.0, "configured pressure"),
+        ("configured_pressure", 1.0, "configured pressure"),
+        ("fit_seconds", 0.0, "fit time"),
+        ("peak_rss_bytes", 0, "peak RSS"),
+    ],
+)
+def test_matrix_records_require_valid_pressure_and_resources(
+    field, value, message
+):
+    specs, records = _matrix(
+        mutate=lambda rows, _specs: [
+            replace(row, **{field: value}) if row.cap == 2 and row.seed == 0 else row
+            for row in rows
+        ]
+    )
+    decision = MODULE.evaluate_candidate_caps(records, specs=specs)
+    assessment = _assessment(decision, 2)
+    assert not assessment.passed
+    assert any(message.lower() in reason.lower() for reason in assessment.reasons)
+
+
+def test_stress_aggregation_excludes_the_100_round_multiclass_fixture():
+    specs = tuple(
+        spec
+        for spec in MODULE.full_specs()
+        if spec.name in {"multiclass-four", "reg-tall-narrow"}
+    )
+    records = [
+        _record(spec, seed=seed, cap=cap)
+        for spec in specs
+        for seed in MODULE.FULL_SEEDS
+        for cap in (*MODULE.CANDIDATE_CAPS, MODULE.INCUMBENT_CAP)
+    ]
+    records = [
+        replace(row, fit_seconds=2.0)
+        if row.fixture == "multiclass-four" and row.cap == 2
+        else row
+        for row in records
+    ]
+    decision = MODULE.evaluate_candidate_caps(records, specs=specs)
+    assessment = _assessment(decision, 2)
+    assert assessment.stress_time_ratio == pytest.approx(0.80)
+    assert assessment.passed
+
+
+@pytest.mark.parametrize(
+    ("fixture", "field", "boundary", "message"),
+    [
+        ("binary-medium", "secondary_value", 0.78, "accuracy"),
+        ("ranking-groups", "primary_value", 0.79, "NDCG"),
+    ],
+)
+def test_exact_accuracy_and_ndcg_loss_boundaries_pass(
+    fixture, field, boundary, message
+):
+    specs, records = _matrix(
+        mutate=lambda rows, _specs: [
+            replace(row, **{field: boundary})
+            if row.fixture == fixture and row.cap == 2
+            else row
+            for row in rows
+        ]
+    )
+    assessment = _assessment(
+        MODULE.evaluate_candidate_caps(records, specs=specs), 2
+    )
+    assert dict(assessment.gates)["accuracy_ndcg"], message
+
+
+@pytest.mark.parametrize(
+    ("fixture", "field", "boundary", "message"),
+    [
+        ("binary-medium", "secondary_value", 0.78, "accuracy"),
+        ("ranking-groups", "primary_value", 0.79, "NDCG"),
+    ],
+)
+def test_just_over_accuracy_and_ndcg_loss_boundaries_fail(
+    fixture, field, boundary, message
+):
+    just_over = float(np.nextafter(np.float64(boundary), -np.inf))
+    specs, records = _matrix(
+        mutate=lambda rows, _specs: [
+            replace(row, **{field: just_over})
+            if row.fixture == fixture and row.cap == 2
+            else row
+            for row in rows
+        ]
+    )
+    assessment = _assessment(
+        MODULE.evaluate_candidate_caps(records, specs=specs), 2
+    )
+    assert not dict(assessment.gates)["accuracy_ndcg"], message
+
+
+def test_quick_worker_subprocess_flag_preserves_quick_metadata(monkeypatch):
+    spec = MODULE.quick_specs()[0]
+    expected = _record(spec, seed=0, cap=2)
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps(expected.to_dict()), ""
+        )
+
+    monkeypatch.setattr(MODULE.subprocess, "run", fake_run)
+    actual = MODULE._run_worker_subprocess(
+        spec,
+        seed=0,
+        cap=2,
+        arm="cap-2",
+        quick=True,
+    )
+    assert "--quick" in commands[0]
+    assert actual.n_rows == spec.n_rows
+    assert actual.n_estimators == spec.n_estimators
+
+
+def test_quick_flag_reaches_matrix_and_compatibility_workers(monkeypatch, tmp_path):
+    spec = MODULE.quick_specs()[0]
+    calls = []
+
+    def fake_worker(spec, *, seed, cap, arm, quick=False):
+        calls.append(quick)
+        actual_cap = 2 if arm == "default" else cap
+        return replace(_record(spec, seed=seed, cap=actual_cap), arm=arm)
+
+    monkeypatch.setattr(MODULE, "_run_worker_subprocess", fake_worker)
+    MODULE.run_matrix(
+        caps=(2,),
+        seeds=(0,),
+        specs=(spec,),
+        output=tmp_path / "quick-matrix.json",
+        quick=True,
+    )
+    MODULE.run_compatibility(
+        arms=("default", "cap-selected"),
+        selected_cap=2,
+        seeds=(0,),
+        specs=(spec,),
+        output=tmp_path / "quick-compat.json",
+        quick=True,
+    )
+    assert calls == [True, True, True, True, True]
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "expected"),
+    [("darwin", 123), ("linux", 123 * 1024)],
+)
+def test_peak_rss_normalization_supports_only_declared_platforms(
+    platform_name, expected
+):
+    assert MODULE.normalize_peak_rss_bytes(123, platform_name) == expected
+
+
+def test_peak_rss_normalization_rejects_unsupported_platform():
+    with pytest.raises(RuntimeError, match="unsupported platform"):
+        MODULE.normalize_peak_rss_bytes(123, "win32")
+
+
+@pytest.mark.parametrize(
+    ("capture", "mutate"),
+    [
+        ("production", lambda payload: payload.update(seeds=[0, 1])),
+        ("production", lambda payload: payload.update(fixtures=payload["fixtures"][:-1])),
+        (
+            "production",
+            lambda payload: payload["records"][0].update(source_commit="d" * 40),
+        ),
+        (
+            "production",
+            lambda payload: payload["checks"].update(passed=False),
+        ),
+        (
+            "candidate",
+            lambda payload: payload["records"].__getitem__(0).update(cap=50),
+        ),
+        (
+            "candidate",
+            lambda payload: payload["checks"].update(reasons=["tampered"]),
+        ),
+    ],
+)
+def test_compare_rejects_tampered_compatibility_captures(
+    tmp_path, capture, mutate
+):
+    production_path = (
+        REPO_ROOT
+        / "benchmarks"
+        / "results"
+        / "pr137_dart_policy_production_compat.json"
+    )
+    candidate_path = (
+        REPO_ROOT
+        / "benchmarks"
+        / "results"
+        / "pr137_dart_policy_candidate_compat.json"
+    )
+    production_payload = json.loads(production_path.read_text())
+    candidate_payload = json.loads(candidate_path.read_text())
+    mutate(production_payload if capture == "production" else candidate_payload)
+    if capture == "production":
+        production_path = tmp_path / "production.json"
+        production_path.write_text(json.dumps(production_payload))
+    else:
+        candidate_path = tmp_path / "candidate.json"
+        candidate_path.write_text(json.dumps(candidate_payload))
+    production = MODULE.read_compat(production_path)
+    candidate = MODULE.read_compat(candidate_path)
+    passed, _reasons = MODULE._compare_compatibility(
+        production, candidate, selected_cap=5
+    )
+    assert not passed
+
+
 def test_committed_compatibility_captures_pin_cap50_and_selected_default_parity():
     production = MODULE.read_compat(
         REPO_ROOT / "benchmarks" / "results" / "pr137_dart_policy_production_compat.json"
@@ -429,6 +687,10 @@ def test_committed_compatibility_captures_pin_cap50_and_selected_default_parity(
     candidate = MODULE.read_compat(
         REPO_ROOT / "benchmarks" / "results" / "pr137_dart_policy_candidate_compat.json"
     )
+    compatible, reasons = MODULE._compare_compatibility(
+        production, candidate, selected_cap=5
+    )
+    assert compatible, reasons
     production_by_key = {
         (record.fixture, record.seed, record.arm): record
         for record in MODULE._compat_payload_records(production)

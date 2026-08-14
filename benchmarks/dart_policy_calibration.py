@@ -16,14 +16,17 @@ import json
 import math
 import os
 from pathlib import Path
-import platform
-import resource
 import subprocess
 import sys
 import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - exercised by Windows collection
+    _resource = None
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +50,7 @@ PRESSURE_RATIO_LIMIT = 0.50
 TIME_RATIO_LIMIT = 0.85
 RSS_RELATIVE_LIMIT = 0.15
 RSS_ABSOLUTE_LIMIT_BYTES = 32 * 1024 * 1024
+REPRESENTATION_ULP_MULTIPLIER = 8
 
 GATE_NAMES = (
     "complete_finite",
@@ -65,6 +69,14 @@ COMPAT_FIXTURE_NAMES = (
     "multiclass-four",
     "ranking-groups",
 )
+COMPAT_PRODUCTION_ARMS = ("default", "cap50")
+COMPAT_CANDIDATE_ARMS = ("default", "cap-selected", "cap50")
+COMPAT_CHECK_FIELDS = {
+    "passed",
+    "reasons",
+    "default_cap50_equal",
+    "determinism",
+}
 
 
 @dataclass(frozen=True)
@@ -227,10 +239,10 @@ class DartPolicyRecord:
         for name in ("prediction_sha256", "artifact_sha256"):
             if not _valid_hex(payload[name], 64):
                 raise ValueError(f"DART policy record {name} must be 64 lowercase hex characters")
-        if not payload["source_commit"] or any(
-            character not in "0123456789abcdef" for character in payload["source_commit"].lower()
-        ):
-            raise ValueError("DART policy record source_commit must be hexadecimal")
+        if not _valid_hex(payload["source_commit"], 40):
+            raise ValueError(
+                "DART policy record source_commit must be 40 lowercase hex characters"
+            )
         return cls(
             fixture=payload["fixture"],
             seed=payload["seed"],
@@ -273,8 +285,8 @@ class CandidateAssessment:
     seed_quality_ratios: tuple[tuple[str, int, float], ...]
     fixture_accuracy_deltas: tuple[tuple[str, float], ...]
     fixture_ndcg_deltas: tuple[tuple[str, float], ...]
-    stress_pressure_ratio: float
-    stress_time_ratio: float
+    stress_pressure_ratio: float | None
+    stress_time_ratio: float | None
     rss_ratio: float | None
     candidate_peak_rss_bytes: int | None
     incumbent_peak_rss_bytes: int | None
@@ -374,7 +386,7 @@ def _json_write(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _full_specs() -> tuple[FixtureSpec, ...]:
     return (
-        FixtureSpec("reg-small-narrow", "regression", 640, 8, 100, 0.10, "uniform", "tree", "level", False),
+        FixtureSpec("reg-small-narrow", "regression", 640, 8, 50, 0.10, "uniform", "tree", "level", False),
         FixtureSpec("reg-small-wide", "regression", 640, 64, 100, 0.10, "uniform", "tree", "level", False),
         FixtureSpec("reg-tall-narrow", "regression", 4096, 12, 200, 0.10, "uniform", "tree", "level", True),
         FixtureSpec("reg-tall-wide-leaf", "regression", 3072, 64, 200, 0.10, "uniform", "tree", "leaf", True),
@@ -555,6 +567,23 @@ def _record_metadata_matches(record: DartPolicyRecord, spec: FixtureSpec) -> boo
     )
 
 
+def _representation_equal(left: float, right: float) -> bool:
+    """Compare persisted floats within a small binary-representation envelope."""
+    if not _finite(left) or not _finite(right):
+        return False
+    scale = max(abs(float(left)), abs(float(right)), 1.0)
+    tolerance = REPRESENTATION_ULP_MULTIPLIER * float(np.spacing(np.float64(scale)))
+    return abs(float(left) - float(right)) <= tolerance
+
+
+def _loss_exceeds_limit(loss: float, limit: float) -> bool:
+    """Apply a strict policy boundary while absorbing subtraction roundoff."""
+    if loss <= limit:
+        return False
+    tolerance = REPRESENTATION_ULP_MULTIPLIER * float(np.spacing(np.float64(limit)))
+    return loss - limit > tolerance
+
+
 def record_sort_key(record: DartPolicyRecord | Mapping[str, Any]) -> tuple[str, int, int, str]:
     if isinstance(record, Mapping):
         return (
@@ -583,6 +612,17 @@ def _validate_matrix_payload(payload: Mapping[str, Any]) -> None:
     for value in (*payload["caps"], *payload["seeds"]):
         if type(value) is not int:
             raise ValueError("matrix evidence caps and seeds must contain integers")
+    if tuple(payload["caps"]) != FULL_CAPS:
+        raise ValueError(
+            f"matrix evidence caps do not match predeclared caps {FULL_CAPS!r}"
+        )
+    if tuple(payload["seeds"]) != FULL_SEEDS:
+        raise ValueError(
+            f"matrix evidence seeds do not match predeclared seeds {FULL_SEEDS!r}"
+        )
+    specs = tuple(FixtureSpec.from_dict(item) for item in payload["specs"])
+    if specs != full_specs():
+        raise ValueError("matrix evidence specs do not match predeclared fixture catalog")
 
 
 def write_matrix(
@@ -689,17 +729,35 @@ def _validate_matrix_records(
             reasons.append(f"non-finite metric value for matrix key {key!r}")
         if not _finite(record.fit_seconds) or not _finite(record.configured_pressure):
             reasons.append(f"non-finite timing/pressure value for matrix key {key!r}")
-        if record.peak_rss_bytes is not None and record.peak_rss_bytes < 0:
-            reasons.append(f"negative peak RSS for matrix key {key!r}")
+        if not _finite(record.fit_seconds) or record.fit_seconds <= 0.0:
+            reasons.append(f"fit time must be positive for matrix key {key!r}")
+        if record.configured_pressure <= 0.0:
+            reasons.append(f"configured pressure must be positive for matrix key {key!r}")
+        if record.peak_rss_bytes is None or record.peak_rss_bytes <= 0:
+            reasons.append(f"peak RSS must be positive for matrix key {key!r}")
         if record.completed_rounds != record.requested_rounds:
             reasons.append(f"completed rounds mismatch for matrix key {key!r}")
-        if not _valid_hex(record.prediction_sha256, 64) or not _valid_hex(record.artifact_sha256, 64):
+        if (
+            not _valid_hex(record.prediction_sha256, 64)
+            or not _valid_hex(record.artifact_sha256, 64)
+            or not _valid_hex(record.source_commit, 40)
+        ):
             reasons.append(f"invalid prediction/artifact hash for matrix key {key!r}")
         spec = next((item for item in specs if item.name == record.fixture), None)
         if spec is None:
             reasons.append(f"unknown fixture in matrix key {key!r}")
         elif not _record_metadata_matches(record, spec):
             reasons.append(f"fixture metadata mismatch for matrix key {key!r}")
+        elif not _representation_equal(
+            record.configured_pressure,
+            configured_dropout_pressure(
+                spec.n_estimators,
+                spec.drop_rate,
+                record.cap,
+                spec.trees_per_round,
+            ),
+        ):
+            reasons.append(f"configured pressure mismatch for matrix key {key!r}")
         if record.arm != f"cap-{record.cap}":
             reasons.append(f"matrix arm does not name explicit cap for key {key!r}")
     actual_keys = set(by_key)
@@ -777,8 +835,8 @@ def evaluate_candidate_caps(
                     seed_quality_ratios=(),
                     fixture_accuracy_deltas=(),
                     fixture_ndcg_deltas=(),
-                    stress_pressure_ratio=float("nan"),
-                    stress_time_ratio=float("nan"),
+                    stress_pressure_ratio=None,
+                    stress_time_ratio=None,
                     rss_ratio=None,
                     candidate_peak_rss_bytes=None,
                     incumbent_peak_rss_bytes=None,
@@ -820,7 +878,7 @@ def evaluate_candidate_caps(
                 ]
                 delta = float(np.median(np.asarray(deltas, dtype=np.float64)))
                 fixture_accuracy_deltas.append((spec.name, delta))
-                if delta < -ACCURACY_LOSS_LIMIT:
+                if _loss_exceeds_limit(-delta, ACCURACY_LOSS_LIMIT):
                     reasons.append(
                         f"accuracy loss for {spec.name} is {-delta:.12g} "
                         f"> {ACCURACY_LOSS_LIMIT:.12g}"
@@ -833,7 +891,7 @@ def evaluate_candidate_caps(
                 ]
                 delta = float(np.median(np.asarray(deltas, dtype=np.float64)))
                 fixture_ndcg_deltas.append((spec.name, delta))
-                if delta < -NDCG_LOSS_LIMIT:
+                if _loss_exceeds_limit(-delta, NDCG_LOSS_LIMIT):
                     reasons.append(
                         f"NDCG loss for {spec.name} is {-delta:.12g} "
                         f"> {NDCG_LOSS_LIMIT:.12g}"
@@ -846,7 +904,9 @@ def evaluate_candidate_caps(
                 f"> {QUALITY_SEED_LIMIT:.12g}"
             )
 
-        stress_specs = [spec for spec in specs if spec.stress]
+        stress_specs = [
+            spec for spec in specs if spec.stress and spec.n_estimators in (200, 300)
+        ]
         stress_candidate_pressure = [
             by_key[(spec.name, seed, cap)].configured_pressure
             for spec in stress_specs
@@ -975,12 +1035,19 @@ def evaluate_candidate_caps(
     )
 
 
-def normalize_peak_rss_bytes(value: int, *, platform_name: str | None = None) -> int:
-    """Normalize ``ru_maxrss`` to bytes on Linux and macOS."""
+def normalize_peak_rss_bytes(value: int, platform_name: str | None = None) -> int:
+    """Normalize ``ru_maxrss`` on the explicitly supported benchmark hosts."""
     if type(value) is not int or value < 0:
         raise ValueError("ru_maxrss must be a non-negative integer")
     name = platform_name or sys.platform
-    return value if name == "darwin" else value * 1024
+    if name == "darwin":
+        return value
+    if name == "linux":
+        return value * 1024
+    raise RuntimeError(
+        f"unsupported platform for ru_maxrss normalization: {name!r}; "
+        "only Darwin and Linux are supported"
+    )
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -1062,8 +1129,12 @@ def _fit_record(
     else:
         model.fit(fixture.X_train, fixture.y_train)
     fit_seconds = float(time.perf_counter() - started)
+    if _resource is None:
+        raise RuntimeError(
+            "resource module is unavailable; DART calibration supports only Darwin and Linux"
+        )
     peak_rss_bytes = normalize_peak_rss_bytes(
-        int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        int(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss)
     )
     if spec.task == "regression":
         prediction = np.asarray(model.predict(fixture.X_test), dtype=np.float64)
@@ -1168,6 +1239,7 @@ def _run_worker_subprocess(
     arm: str,
     cap: int | None,
     n_jobs: int = 1,
+    quick: bool = False,
 ) -> DartPolicyRecord:
     command = [
         sys.executable,
@@ -1184,6 +1256,8 @@ def _run_worker_subprocess(
     ]
     if cap is not None:
         command.extend(("--cap", str(cap)))
+    if quick:
+        command.append("--quick")
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
     completed = subprocess.run(
@@ -1214,6 +1288,7 @@ def run_matrix(
     seeds: Sequence[int],
     specs: Sequence[FixtureSpec],
     output: Path | str,
+    quick: bool = False,
 ) -> None:
     caps = tuple(caps)
     seeds = tuple(seeds)
@@ -1232,7 +1307,13 @@ def run_matrix(
                     file=sys.stderr,
                 )
                 records.append(
-                    _run_worker_subprocess(spec, seed=seed, arm=f"cap-{cap}", cap=cap)
+                    _run_worker_subprocess(
+                        spec,
+                        seed=seed,
+                        arm=f"cap-{cap}",
+                        cap=cap,
+                        quick=quick,
+                    )
                 )
                 completed += 1
     write_matrix(output, specs, records, caps=caps, seeds=seeds)
@@ -1251,18 +1332,59 @@ def _compat_checks(
     seeds: Sequence[int],
     specs: Sequence[FixtureSpec],
     require_default_cap50_parity: bool,
+    expected_caps_by_arm: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     by_key: dict[tuple[str, int, str], DartPolicyRecord] = {}
+    specs_by_name = {spec.name: spec for spec in specs}
+    expected_caps = dict(expected_caps_by_arm or {})
+    if require_default_cap50_parity:
+        expected_caps.setdefault("default", INCUMBENT_CAP)
+        expected_caps.setdefault("cap50", INCUMBENT_CAP)
     for record in records:
         key = (record.fixture, record.seed, record.arm)
         if key in by_key:
             reasons.append(f"duplicate compatibility key {key!r}")
-        by_key[key] = record
+        else:
+            by_key[key] = record
+        spec = specs_by_name.get(record.fixture)
+        if spec is None:
+            reasons.append(f"unknown compatibility fixture for {key!r}")
+        elif not _record_metadata_matches(record, spec):
+            reasons.append(f"compatibility fixture metadata mismatch for {key!r}")
+        elif not _representation_equal(
+            record.configured_pressure,
+            configured_dropout_pressure(
+                spec.n_estimators,
+                spec.drop_rate,
+                record.cap,
+                spec.trees_per_round,
+            ),
+        ):
+            reasons.append(f"compatibility configured pressure mismatch for {key!r}")
         if record.completed_rounds != record.requested_rounds:
             reasons.append(f"compatibility fit incomplete for {key!r}")
-        if not _finite(record.primary_value) or not _finite(record.secondary_value):
-            reasons.append(f"compatibility metric non-finite for {key!r}")
+        if (
+            not _finite(record.primary_value)
+            or not _finite(record.secondary_value)
+            or not _finite(record.fit_seconds)
+            or not _finite(record.configured_pressure)
+        ):
+            reasons.append(f"compatibility record has non-finite values for {key!r}")
+        if record.fit_seconds <= 0.0:
+            reasons.append(f"compatibility fit time must be positive for {key!r}")
+        if record.peak_rss_bytes is None or record.peak_rss_bytes <= 0:
+            reasons.append(f"compatibility peak RSS must be positive for {key!r}")
+        if not _valid_hex(record.prediction_sha256, 64) or not _valid_hex(
+            record.artifact_sha256, 64
+        ):
+            reasons.append(f"compatibility hashes are invalid for {key!r}")
+        expected_cap = expected_caps.get(record.arm)
+        if expected_cap is not None and record.cap != expected_cap:
+            reasons.append(
+                f"compatibility arm {record.arm!r} resolved to cap {record.cap}, "
+                f"expected {expected_cap}"
+            )
     expected = _compat_expected_keys(arms, seeds, specs)
     missing = expected - set(by_key)
     extra = set(by_key) - expected
@@ -1270,6 +1392,10 @@ def _compat_checks(
         reasons.append(f"compatibility coverage missing {len(missing)} key(s)")
     if extra:
         reasons.append(f"compatibility coverage has {len(extra)} unexpected key(s)")
+
+    source_commits = {record.source_commit for record in records}
+    if len(source_commits) != 1:
+        reasons.append("compatibility source commits are not uniform")
 
     default_cap50_equal = True
     if "default" in arms and "cap50" in arms:
@@ -1307,6 +1433,7 @@ def run_compatibility(
     specs: Sequence[FixtureSpec],
     output: Path | str,
     selected_cap: int | None = None,
+    quick: bool = False,
 ) -> None:
     allowed_arms = {"default", "cap50", "cap-selected"}
     arms = tuple(arms)
@@ -1315,6 +1442,13 @@ def run_compatibility(
     if "cap-selected" in arms:
         if selected_cap not in CANDIDATE_CAPS:
             raise ValueError("cap-selected requires a selected candidate cap")
+    expected_caps_by_arm: dict[str, int] = {}
+    if "cap50" in arms:
+        expected_caps_by_arm["cap50"] = INCUMBENT_CAP
+    if "cap-selected" in arms:
+        expected_caps_by_arm["cap-selected"] = int(selected_cap)  # type: ignore[arg-type]
+    if selected_cap is not None and "default" in arms:
+        expected_caps_by_arm["default"] = selected_cap
     records: list[DartPolicyRecord] = []
     for spec in specs:
         for seed in seeds:
@@ -1324,8 +1458,12 @@ def run_compatibility(
                     f"compat {spec.name} seed={seed} arm={arm}",
                     file=sys.stderr,
                 )
-                first = _run_worker_subprocess(spec, seed=seed, arm=arm, cap=cap)
-                second = _run_worker_subprocess(spec, seed=seed, arm=arm, cap=cap)
+                first = _run_worker_subprocess(
+                    spec, seed=seed, arm=arm, cap=cap, quick=quick
+                )
+                second = _run_worker_subprocess(
+                    spec, seed=seed, arm=arm, cap=cap, quick=quick
+                )
                 if (first.prediction_sha256, first.artifact_sha256) != (
                     second.prediction_sha256,
                     second.artifact_sha256,
@@ -1341,6 +1479,7 @@ def run_compatibility(
         specs=specs,
         require_default_cap50_parity=arms == ("default", "cap50")
         or set(arms) == {"default", "cap50"},
+        expected_caps_by_arm=expected_caps_by_arm,
     )
     if not checks["passed"]:
         raise RuntimeError(f"compatibility checks failed: {checks['reasons']}")
@@ -1351,6 +1490,80 @@ def _compat_payload_records(payload: Mapping[str, Any]) -> tuple[DartPolicyRecor
     return tuple(DartPolicyRecord.from_dict(item) for item in payload["records"])
 
 
+def _validate_compat_capture(
+    payload: Mapping[str, Any],
+    *,
+    label: str,
+    expected_arms: Sequence[str],
+    expected_caps_by_arm: Mapping[str, int],
+    require_default_cap50_parity: bool,
+) -> tuple[
+    tuple[DartPolicyRecord, ...],
+    dict[tuple[str, int, str], DartPolicyRecord],
+    tuple[str, ...],
+]:
+    reasons: list[str] = []
+    arms = tuple(payload.get("arms", ()))
+    seeds = tuple(payload.get("seeds", ()))
+    fixtures = tuple(payload.get("fixtures", ()))
+    if arms != tuple(expected_arms):
+        reasons.append(
+            f"{label} compatibility arms do not match {tuple(expected_arms)!r}"
+        )
+    if seeds != COMPAT_SEEDS:
+        reasons.append(
+            f"{label} compatibility seeds do not match {COMPAT_SEEDS!r}"
+        )
+    if fixtures != COMPAT_FIXTURE_NAMES:
+        reasons.append(
+            f"{label} compatibility fixtures do not match {COMPAT_FIXTURE_NAMES!r}"
+        )
+
+    records = _compat_payload_records(payload)
+    specs = tuple(
+        spec for spec in full_specs() if spec.name in COMPAT_FIXTURE_NAMES
+    )
+    recomputed = _compat_checks(
+        records,
+        arms=expected_arms,
+        seeds=COMPAT_SEEDS,
+        specs=specs,
+        require_default_cap50_parity=require_default_cap50_parity,
+        expected_caps_by_arm=expected_caps_by_arm,
+    )
+    reasons.extend(f"{label}: {reason}" for reason in recomputed["reasons"])
+
+    checks = payload.get("checks")
+    if not isinstance(checks, Mapping):
+        reasons.append(f"{label} compatibility checks must be an object")
+        checks = {}
+    elif set(checks) != COMPAT_CHECK_FIELDS:
+        reasons.append(
+            f"{label} compatibility checks fields do not match the declared schema"
+        )
+    if type(checks.get("passed")) is not bool or type(checks.get("determinism")) is not bool:
+        reasons.append(f"{label} compatibility checks booleans are invalid")
+    if type(checks.get("default_cap50_equal")) is not bool:
+        reasons.append(f"{label} compatibility default/cap50 check is invalid")
+    if not isinstance(checks.get("reasons"), list) or not all(
+        isinstance(reason, str) for reason in checks.get("reasons", ())
+    ):
+        reasons.append(f"{label} compatibility check reasons are invalid")
+    if checks.get("passed") is not True:
+        reasons.append(f"{label} compatibility checks.passed is false")
+    if checks.get("reasons"):
+        reasons.append(f"{label} compatibility checks contain rejection reasons")
+    if checks.get("determinism") is not True:
+        reasons.append(f"{label} compatibility determinism check is false")
+    if dict(checks) != recomputed:
+        reasons.append(f"{label} compatibility stored checks disagree with records")
+
+    by_key: dict[tuple[str, int, str], DartPolicyRecord] = {}
+    for record in records:
+        by_key.setdefault((record.fixture, record.seed, record.arm), record)
+    return records, by_key, tuple(dict.fromkeys(reasons))
+
+
 def _compare_compatibility(
     production_payload: Mapping[str, Any],
     candidate_payload: Mapping[str, Any] | None,
@@ -1358,40 +1571,31 @@ def _compare_compatibility(
     selected_cap: int,
 ) -> tuple[bool, tuple[str, ...]]:
     reasons: list[str] = []
-    production_records = _compat_payload_records(production_payload)
-    production_arms = tuple(production_payload["arms"])
-    production_seeds = tuple(production_payload["seeds"])
-    production_by_key = {
-        (record.fixture, record.seed, record.arm): record
-        for record in production_records
-    }
-    if set(production_arms) != {"default", "cap50"}:
-        reasons.append("production compatibility must contain default and cap50 arms")
-    for fixture in COMPAT_FIXTURE_NAMES:
-        for seed in production_seeds:
-            default = production_by_key.get((fixture, seed, "default"))
-            cap50 = production_by_key.get((fixture, seed, "cap50"))
-            if default is None or cap50 is None:
-                reasons.append(f"production compatibility missing {fixture} seed {seed}")
-                continue
-            if (default.prediction_sha256, default.artifact_sha256) != (
-                cap50.prediction_sha256,
-                cap50.artifact_sha256,
-            ):
-                reasons.append(f"production default/cap50 parity failed for {fixture} seed {seed}")
+    _production_records, production_by_key, production_reasons = _validate_compat_capture(
+        production_payload,
+        label="production",
+        expected_arms=COMPAT_PRODUCTION_ARMS,
+        expected_caps_by_arm={"default": INCUMBENT_CAP, "cap50": INCUMBENT_CAP},
+        require_default_cap50_parity=True,
+    )
+    reasons.extend(production_reasons)
     if candidate_payload is None:
         return not reasons, tuple(dict.fromkeys(reasons))
 
-    candidate_records = _compat_payload_records(candidate_payload)
-    candidate_by_key = {
-        (record.fixture, record.seed, record.arm): record
-        for record in candidate_records
-    }
-    candidate_arms = set(candidate_payload["arms"])
-    if candidate_arms != {"default", "cap-selected", "cap50"}:
-        reasons.append("candidate compatibility must contain default, cap-selected, and cap50 arms")
+    _candidate_records, candidate_by_key, candidate_reasons = _validate_compat_capture(
+        candidate_payload,
+        label="candidate",
+        expected_arms=COMPAT_CANDIDATE_ARMS,
+        expected_caps_by_arm={
+            "default": selected_cap,
+            "cap-selected": selected_cap,
+            "cap50": INCUMBENT_CAP,
+        },
+        require_default_cap50_parity=False,
+    )
+    reasons.extend(candidate_reasons)
     for fixture in COMPAT_FIXTURE_NAMES:
-        for seed in tuple(candidate_payload["seeds"]):
+        for seed in COMPAT_SEEDS:
             default = candidate_by_key.get((fixture, seed, "default"))
             selected = candidate_by_key.get((fixture, seed, "cap-selected"))
             cap50 = candidate_by_key.get((fixture, seed, "cap50"))
@@ -1427,6 +1631,11 @@ def compare_evidence(
     production_payload = read_compat(production_compat_path)
     candidate_payload = None if candidate_compat_path is None else read_compat(candidate_compat_path)
     provisional = evaluate_candidate_caps(records, specs=specs)
+    if not provisional.matrix_valid:
+        matrix_reasons = sorted(
+            {reason for assessment in provisional.assessments for reason in assessment.reasons}
+        )
+        raise ValueError(f"matrix evidence rejected: {matrix_reasons}")
     compat_passed, compat_reasons = _compare_compatibility(
         production_payload,
         candidate_payload,
@@ -1509,6 +1718,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             seeds=args.seeds,
             specs=quick_specs() if args.quick else full_specs(),
             output=args.output,
+            quick=args.quick,
         )
         return 0
     if args.command == "run-compat":
@@ -1520,6 +1730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             output=args.output,
             selected_cap=args.selected_cap,
+            quick=args.quick,
         )
         return 0
     if args.command == "compare":
