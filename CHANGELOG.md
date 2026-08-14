@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Recalibrated the public DART expected-drop default.** `dart_max_drop` now
+  defaults to `5` across the Python estimator constructors, selected by a fixed
+  five-seed matrix spanning regression, binary/multiclass classification, and
+  ranking. The cap bounds expected selected-tree work as
+  `min(dart_max_drop, max(1, dart_drop_rate * existing_tree_count))` per
+  round; `dart_max_drop=50` explicitly restores the previous default. The
+  artifact format, dropout behavior, and predictor are unchanged. See the
+  [PR #137 calibration report](docs/benchmarks/dart_policy_calibration_pr137.md).
+
 - **Bounded, opt-in PL-aware split rescoring.** `GBMRegressor`,
   `GBMClassifier`, and `GBMRanker` now expose `pl_split_candidates` for linear
   leaves. The default `0` exactly preserves the production split path; positive

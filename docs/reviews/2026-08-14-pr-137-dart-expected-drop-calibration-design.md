@@ -2,7 +2,7 @@
 
 | Date | Author | Base | Status |
 |---|---|---|---|
-| 2026-08-14 | OpenAI Codex | `main` after PR #136 (`8a76ccb`) | Approved for implementation planning |
+| 2026-08-14 | OpenAI Codex | `main` after PR #136 (`8a76ccb`) | Implemented locally; PR publication intentionally omitted |
 
 ## Objective
 

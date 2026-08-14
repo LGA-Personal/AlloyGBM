@@ -6,7 +6,7 @@
 
 | Date | Author | Production base | Status |
 |---|---|---|---|
-| 2026-08-14 | OpenAI Codex | `8a76ccb` | Planned |
+| 2026-08-14 | OpenAI Codex | `8a76ccb` | Implemented locally; Task 5 verification complete; PR publication intentionally omitted |
 
 **Goal:** Select and ship a lower public `dart_max_drop` default only if a fixed five-seed,
 multi-task A/B matrix proves materially lower long-fit dropout work without material held-out
@@ -50,7 +50,7 @@ Sphinx, subprocess RSS measurement, deterministic SHA-256 evidence.
   internal `record` CLI commands.
 - Later tasks consume `DartPolicyDecision.selected_cap` without reinterpretation.
 
-- [ ] **Step 1: Write failing benchmark-contract tests**
+- [x] **Step 1: Write failing benchmark-contract tests**
 
 Pin constants `(2, 5, 10, 20)`, incumbent `50`, and seeds `(0, 1, 2, 3, 4)`. Require these cases:
 
@@ -73,7 +73,7 @@ Create synthetic records and independently reject median quality `1.0201`, one-s
 excess RSS, non-finite/incomplete fits, and missing/duplicate keys. Pin largest-pass selection and
 the no-pass fallback to 50 with reasons.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```bash
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python -m pytest \
@@ -82,7 +82,7 @@ the no-pass fallback to 50 with reasons.
 
 Expected: missing harness/import failure.
 
-- [ ] **Step 3: Implement deterministic fixtures, metrics, and subprocess records**
+- [x] **Step 3: Implement deterministic fixtures, metrics, and subprocess records**
 
 Use local seeded 80/20 data splits. Regression records RMSE/MAE; binary and multiclass record log
 loss/accuracy; ranking records NDCG@10. Use `training_policy="manual"`, `learning_rate=0.06`,
@@ -94,13 +94,13 @@ values, configured pressure, prediction SHA-256, and artifact SHA-256. Multiclas
 the four-class tree pool. Reject schema mismatch and non-finite JSON on read; write sorted stable
 records with indent 2.
 
-- [ ] **Step 4: Implement the exact selection algorithm**
+- [x] **Step 4: Implement the exact selection algorithm**
 
 Orient lower metrics as `candidate/incumbent` and higher metrics as `incumbent/candidate`. Apply all
 eight design gates without rounding. Aggregate pressure/time over `stress=True` fixtures. Select
 `max(passing_caps)`, otherwise 50. Preserve every ratio and rejection reason.
 
-- [ ] **Step 5: Implement and test CLI commands**
+- [x] **Step 5: Implement and test CLI commands**
 
 ```bash
 python benchmarks/dart_policy_calibration.py run \
@@ -118,7 +118,7 @@ python benchmarks/dart_policy_calibration.py compare \
 Compatibility uses `reg-small-wide`, `binary-medium`, `multiclass-four`, and `ranking-groups`.
 Production default and explicit cap50 hashes must match within the capture.
 
-- [ ] **Step 6: Build release extension, run GREEN, capture and commit evidence**
+- [x] **Step 6: Build release extension, run GREEN, capture and commit evidence**
 
 Run the complete explicit-cap matrix on base behavior. Do not override the generated decision.
 
@@ -145,12 +145,12 @@ git commit -m "bench: calibrate DART expected-drop default"
 - Multi-label independent mode inherits the ranker default; joint mode still forwards explicit
   kwargs. If selection returns 50, leave constructor literals unchanged and continue evidence/docs.
 
-- [ ] **Step 1: Write failing public-default tests from the generated selected cap**
+- [x] **Step 1: Write failing public-default tests from the generated selected cap**
 
 For all three estimators, pin constructor attribute, `get_params`, clone, repr, pickle, and explicit
 50 override. Keep zero/negative validation and `set_params` coverage.
 
-- [ ] **Step 2: Run focused test and verify RED**
+- [x] **Step 2: Run focused test and verify RED**
 
 ```bash
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python -m pytest \
@@ -161,12 +161,12 @@ If the generated decision retains `50`, the existing default assertion is expect
 GREEN. In that branch, add the generated-decision and explicit-override assertions without forcing
 an artificial production change; the retained-default evidence is the behavior under test.
 
-- [ ] **Step 3: Change only both Python constructor default literals**
+- [x] **Step 3: Change only both Python constructor default literals**
 
 Replace both `dart_max_drop: int = 50` declarations in `_core.py` with the selected integer. Do not
 change assignment, validation, parameter order, forwarding, or native code.
 
-- [ ] **Step 4: Build and run focused DART/conformance tests GREEN**
+- [x] **Step 4: Build and run focused DART/conformance tests GREEN**
 
 ```bash
 maturin develop --release
@@ -177,13 +177,13 @@ maturin develop --release
   bindings/python/tests/test_sklearn_conformance.py -q
 ```
 
-- [ ] **Step 5: Capture candidate compatibility and final comparison**
+- [x] **Step 5: Capture candidate compatibility and final comparison**
 
 Run compatibility arms `default cap-selected cap50` over seeds `0 1 2`. Require candidate cap50
 hashes equal production cap50, candidate default equals explicit selected cap, and all fits finish.
 Embed the Task 1 decision and rejected-cap reasons in final comparison JSON.
 
-- [ ] **Step 6: Commit the default and evidence**
+- [x] **Step 6: Commit the default and evidence**
 
 ```bash
 git add bindings/python/alloygbm/_regressor/_core.py bindings/python/tests/test_dart.py \
@@ -203,19 +203,19 @@ git commit -m "feat: recalibrate the DART drop cap default"
 - Modify: `bindings/python/tests/test_joint_multilabel.py`
 - Modify: `benchmarks/tests/test_dart_policy_calibration.py`
 
-- [ ] **Step 1: Add deterministic artifact regression cases**
+- [x] **Step 1: Add deterministic artifact regression cases**
 
 Pin repeated explicit-50 artifacts for regression, multiclass, and ranking. Pin default versus
 explicit-selected artifacts under level-wise and leaf-wise regression. For deterministic fixtures,
 pin prediction and artifact equality across `n_jobs=1` and `n_jobs=2` for the selected explicit cap.
 
-- [ ] **Step 2: Add warm-start and multi-label forwarding coverage**
+- [x] **Step 2: Add warm-start and multi-label forwarding coverage**
 
 Use existing DART tolerance for uninterrupted versus warm-start predictions under the selected
 default. Assert multi-label omission inherits the ranker default and explicit 50 reaches joint
 native kwargs unchanged.
 
-- [ ] **Step 3: Run focused suites and commit**
+- [x] **Step 3: Run focused suites and commit**
 
 ```bash
 /Users/lashby/Projects/AlloyGBM/.venv/bin/python -m pytest \
@@ -241,19 +241,19 @@ git commit -m "test: protect calibrated DART drop policy"
 - Modify: `docs/reviews/2026-07-02-v0.12.10-special-modes-resolutions.md`
 - Modify: both PR #137 design/plan documents
 
-- [ ] **Step 1: Write the evidence report**
+- [x] **Step 1: Write the evidence report**
 
 Include commits, commands, host/packages, fixtures, fixed thresholds, every cap verdict, per-fixture
 median quality, stress pressure/time/RSS, hashes, rejected reasons, and selected default. State that
 same-host timing is not universal.
 
-- [ ] **Step 2: Update public and review documentation**
+- [x] **Step 2: Update public and review documentation**
 
 Document selected default, expected-work formula, forced-one rule, multiclass class-tree pool, and
 `dart_max_drop=50` migration override. Do not claim universal optimality. Replace the open July
 finding, add Unreleased/roadmap entries, benchmark links, and implemented document statuses.
 
-- [ ] **Step 3: Verify docs and commit**
+- [x] **Step 3: Verify docs and commit**
 
 ```bash
 /Users/lashby/Projects/AlloyGBM/.venv/bin/sphinx-build -W -b html \
@@ -265,7 +265,7 @@ git commit -m "docs: close DART expected-drop calibration"
 
 ### Task 5: Final review, verification, and draft PR
 
-- [ ] **Step 1: Run complete verification**
+- [x] **Step 1: Run complete verification**
 
 ```bash
 cargo fmt --all -- --check
@@ -285,12 +285,12 @@ git diff --check 8a76ccb...HEAD
 git status --short
 ```
 
-- [ ] **Step 2: Inspect scope**
+- [x] **Step 2: Inspect scope**
 
 Confirm no Rust production, artifact, or predictor diff; only two Python production literals may
 change. Confirm complete finite evidence, exact cap50 production hashes, and generated cap choice.
 
-- [ ] **Step 3: Push and create draft PR #137**
+- [ ] **Step 3: Push and create draft PR #137** (intentionally omitted per user instruction)
 
 Use the PR template. Include selected cap, algorithm, rejected caps, quality/performance evidence,
 explicit-50 migration, compatibility, verification counts, and document links. Preserve the
