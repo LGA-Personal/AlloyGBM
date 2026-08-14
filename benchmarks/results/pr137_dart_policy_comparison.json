@@ -1,8 +1,8 @@
 {
   "assessments": [
     {
-      "allowed_peak_rss_bytes": 212008960,
-      "candidate_peak_rss_bytes": 178274304,
+      "allowed_peak_rss_bytes": 213041152,
+      "candidate_peak_rss_bytes": 178782208,
       "cap": 2,
       "fixture_accuracy_deltas": [
         [
@@ -23,7 +23,7 @@
       "fixture_quality_ratios": [
         [
           "reg-small-narrow",
-          0.8118111390913506
+          0.9361205577535187
         ],
         [
           "reg-small-wide",
@@ -96,35 +96,35 @@
           true
         ]
       ],
-      "incumbent_peak_rss_bytes": 178454528,
+      "incumbent_peak_rss_bytes": 179486720,
       "passed": true,
       "reasons": [],
-      "rss_ratio": 0.9989900844656628,
+      "rss_ratio": 0.9960748516659059,
       "seed_quality_ratios": [
         [
           "reg-small-narrow",
           0,
-          0.8118111390913506
+          0.9411775012404728
         ],
         [
           "reg-small-narrow",
           1,
-          0.7510222179296668
+          0.9019144742546659
         ],
         [
           "reg-small-narrow",
           2,
-          0.8183124713251346
+          0.9361205577535187
         ],
         [
           "reg-small-narrow",
           3,
-          0.8292216792893353
+          0.9483549004132701
         ],
         [
           "reg-small-narrow",
           4,
-          0.8062952895395622
+          0.9301634509276547
         ],
         [
           "reg-small-wide",
@@ -353,11 +353,11 @@
         ]
       ],
       "stress_pressure_ratio": 0.19227876660817245,
-      "stress_time_ratio": 0.6231909797958356
+      "stress_time_ratio": 0.4614657808033393
     },
     {
-      "allowed_peak_rss_bytes": 212008960,
-      "candidate_peak_rss_bytes": 178094080,
+      "allowed_peak_rss_bytes": 213041152,
+      "candidate_peak_rss_bytes": 179339264,
       "cap": 5,
       "fixture_accuracy_deltas": [
         [
@@ -378,7 +378,7 @@
       "fixture_quality_ratios": [
         [
           "reg-small-narrow",
-          0.9503229365848455
+          0.9964822365514547
         ],
         [
           "reg-small-wide",
@@ -451,35 +451,35 @@
           true
         ]
       ],
-      "incumbent_peak_rss_bytes": 178454528,
+      "incumbent_peak_rss_bytes": 179486720,
       "passed": true,
       "reasons": [],
-      "rss_ratio": 0.9979801689313258,
+      "rss_ratio": 0.9991784573254222,
       "seed_quality_ratios": [
         [
           "reg-small-narrow",
           0,
-          0.9503229365848455
+          0.9964822365514547
         ],
         [
           "reg-small-narrow",
           1,
-          0.9333433696668747
+          0.9948730892087938
         ],
         [
           "reg-small-narrow",
           2,
-          0.9595778708834721
+          0.997354234603385
         ],
         [
           "reg-small-narrow",
           3,
-          0.9556122368801586
+          0.9971533550538049
         ],
         [
           "reg-small-narrow",
           4,
-          0.9449453415985559
+          0.9936272112956415
         ],
         [
           "reg-small-wide",
@@ -708,11 +708,11 @@
         ]
       ],
       "stress_pressure_ratio": 0.4397092003008272,
-      "stress_time_ratio": 0.7236480364419416
+      "stress_time_ratio": 0.6274772976449715
     },
     {
-      "allowed_peak_rss_bytes": 212008960,
-      "candidate_peak_rss_bytes": 178159616,
+      "allowed_peak_rss_bytes": 213041152,
+      "candidate_peak_rss_bytes": 178864128,
       "cap": 10,
       "fixture_accuracy_deltas": [
         [
@@ -733,7 +733,7 @@
       "fixture_quality_ratios": [
         [
           "reg-small-narrow",
-          0.9971023472745703
+          1.0
         ],
         [
           "reg-small-wide",
@@ -795,7 +795,7 @@
         ],
         [
           "stress_time",
-          false
+          true
         ],
         [
           "peak_rss",
@@ -806,38 +806,37 @@
           true
         ]
       ],
-      "incumbent_peak_rss_bytes": 178454528,
+      "incumbent_peak_rss_bytes": 179486720,
       "passed": false,
       "reasons": [
-        "stress pressure ratio is 0.75181749812 > 0.5",
-        "stress fit time ratio is 0.85181194796 > 0.85"
+        "stress pressure ratio is 0.75181749812 > 0.5"
       ],
-      "rss_ratio": 0.998347410943812,
+      "rss_ratio": 0.9965312642628936,
       "seed_quality_ratios": [
         [
           "reg-small-narrow",
           0,
-          0.9982486774067394
+          1.0
         ],
         [
           "reg-small-narrow",
           1,
-          0.9949964095139142
+          1.0
         ],
         [
           "reg-small-narrow",
           2,
-          0.9981959765327496
+          1.0
         ],
         [
           "reg-small-narrow",
           3,
-          0.9956919876368434
+          1.0
         ],
         [
           "reg-small-narrow",
           4,
-          0.9971023472745703
+          1.0
         ],
         [
           "reg-small-wide",
@@ -1066,11 +1065,11 @@
         ]
       ],
       "stress_pressure_ratio": 0.7518174981198295,
-      "stress_time_ratio": 0.8518119479603755
+      "stress_time_ratio": 0.8347855186917797
     },
     {
-      "allowed_peak_rss_bytes": 212008960,
-      "candidate_peak_rss_bytes": 177946624,
+      "allowed_peak_rss_bytes": 213041152,
+      "candidate_peak_rss_bytes": 178667520,
       "cap": 20,
       "fixture_accuracy_deltas": [
         [
@@ -1164,13 +1163,13 @@
           true
         ]
       ],
-      "incumbent_peak_rss_bytes": 178454528,
+      "incumbent_peak_rss_bytes": 179486720,
       "passed": false,
       "reasons": [
         "stress pressure ratio is 1 > 0.5",
-        "stress fit time ratio is 0.956037036339 > 0.85"
+        "stress fit time ratio is 0.995821779481 > 0.85"
       ],
-      "rss_ratio": 0.9971538744032318,
+      "rss_ratio": 0.9954358740301232,
       "seed_quality_ratios": [
         [
           "reg-small-narrow",
@@ -1424,7 +1423,7 @@
         ]
       ],
       "stress_pressure_ratio": 1.0,
-      "stress_time_ratio": 0.956037036338888
+      "stress_time_ratio": 0.9958217794811428
     }
   ],
   "candidate_caps": [
