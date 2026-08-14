@@ -6,7 +6,7 @@
 
 | Date | Author | Production base | Status |
 |---|---|---|---|
-| 2026-08-14 | OpenAI Codex | `8a76ccb` | Implemented and revision-hardened locally; Task 5 verification in progress; PR publication intentionally omitted |
+| 2026-08-14 | OpenAI Codex | `8a76ccb` | Implemented and revision-hardened locally; Task 5 verification complete; PR publication intentionally omitted |
 
 **Goal:** Select and ship a lower public `dart_max_drop` default only if a fixed five-seed,
 multi-task A/B matrix proves materially lower long-fit dropout work without material held-out
