@@ -12,6 +12,8 @@
   round; `dart_max_drop=50` explicitly restores the previous default. The
   artifact format, dropout behavior, and predictor are unchanged. See the
   [PR #137 calibration report](docs/benchmarks/dart_policy_calibration_pr137.md).
+  The strict comparator uses five 200/300-round stress fixtures (25 records
+  per cap); warm-start and `n_jobs` remain separate regression sentinels.
 
 - **Bounded, opt-in PL-aware split rescoring.** `GBMRegressor`,
   `GBMClassifier`, and `GBMRanker` now expose `pl_split_candidates` for linear

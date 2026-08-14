@@ -6,7 +6,7 @@
 
 | Date | Author | Production base | Status |
 |---|---|---|---|
-| 2026-08-14 | OpenAI Codex | `8a76ccb` | Implemented locally; Task 5 verification complete; PR publication intentionally omitted |
+| 2026-08-14 | OpenAI Codex | `8a76ccb` | Implemented and revision-hardened locally; Task 5 verification in progress; PR publication intentionally omitted |
 
 **Goal:** Select and ship a lower public `dart_max_drop` default only if a fixed five-seed,
 multi-task A/B matrix proves materially lower long-fit dropout work without material held-out
@@ -56,7 +56,7 @@ Pin constants `(2, 5, 10, 20)`, incumbent `50`, and seeds `(0, 1, 2, 3, 4)`. Req
 
 | Name | Task | Rows | Features | Rounds | Rate | Policy | Growth | Stress |
 |---|---|---:|---:|---:|---:|---|---|---|
-| `reg-small-narrow` | regression | 640 | 8 | 100 | .10 | uniform/tree | level | no |
+| `reg-small-narrow` | regression | 640 | 8 | 50 | .10 | uniform/tree | level | no |
 | `reg-small-wide` | regression | 640 | 64 | 100 | .10 | uniform/tree | level | no |
 | `reg-tall-narrow` | regression | 4096 | 12 | 200 | .10 | uniform/tree | level | yes |
 | `reg-tall-wide-leaf` | regression | 3072 | 64 | 200 | .10 | uniform/tree | leaf | yes |
@@ -97,7 +97,8 @@ records with indent 2.
 - [x] **Step 4: Implement the exact selection algorithm**
 
 Orient lower metrics as `candidate/incumbent` and higher metrics as `incumbent/candidate`. Apply all
-eight design gates without rounding. Aggregate pressure/time over `stress=True` fixtures. Select
+eight design gates without rounding. Aggregate pressure/time over `stress=True` fixtures with
+200 or 300 rounds, excluding the 100-round multiclass fixture. Select
 `max(passing_caps)`, otherwise 50. Preserve every ratio and rejection reason.
 
 - [x] **Step 5: Implement and test CLI commands**

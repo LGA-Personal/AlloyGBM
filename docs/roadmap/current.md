@@ -14,11 +14,13 @@ The `0.12.10` release is a patch optimization release: it speeds existing piecew
 `5`, selected as the largest passing cap from a fixed five-seed, ten-fixture
 matrix. The matrix covered regression, binary and four-class classification,
 grouped ranking, level/leaf growth, weighted/forest policies, long horizons,
-and class-tree pool pressure. All candidates passed held-out quality,
-completion, finite-value, and compatibility checks; caps `10` and `20` failed
-the predeclared stress pressure/time gates. Explicit `dart_max_drop=50` restores
-the previous default, and no Rust/native, artifact, or predictor behavior
-changed. See the [PR #137 evidence report](../benchmarks/dart_policy_calibration_pr137.md).
+and class-tree pool pressure. Stress pressure/time use five 200/300-round
+fixtures and 25 records per cap; the 100-round multiclass fixture remains in
+the matrix for other gates only. All candidates passed held-out quality,
+completion, finite-value, and compatibility checks; cap `10` failed stress
+pressure and cap `20` failed stress pressure/time. Explicit `dart_max_drop=50`
+restores the previous default, and no Rust/native, artifact, or predictor
+behavior changed. See the [PR #137 evidence report](../benchmarks/dart_policy_calibration_pr137.md).
 
 ## Experimental PL Split Shortlisting
 

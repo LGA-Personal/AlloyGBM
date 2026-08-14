@@ -55,11 +55,10 @@ configurable.
 ``boosting_mode="goss"`` with ``goss_top_rate`` / ``goss_other_rate``
 and ``boosting_mode="dart"`` with ``dart_drop_rate`` /
 ``dart_max_drop`` / ``dart_normalize_type`` / ``dart_sample_type`` are
-both supported on **binary** classification (see :doc:`estimator`
-"Boosting mode" for the full semantics).  Multi-class softmax
-explicitly rejects non-``"standard"`` boosting modes pending
-per-class gradient scoring (v0.10.x follow-up — applies to both GOSS
-and DART).
+supported on binary and multi-class classification (see :doc:`estimator`
+"Boosting mode" for the full semantics).  For multi-class DART,
+``dart_max_drop`` applies to the actual class-tree pool, so a four-class
+round advances dropout pressure by four trees.
 
 Target requirements:
 

@@ -10,6 +10,13 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
+### DART expected-drop default
+
+The public DART default is calibrated to `dart_max_drop=5` from a fixed
+five-seed, multi-task evidence matrix. Callers that need the previous default
+must pass `dart_max_drop=50` explicitly; explicit caps retain their existing
+artifact and prediction behavior.
+
 ### 4. GLM and Quantile regression objectives on Classifier / multiclass
 
 `objective="poisson"`, `"gamma"`, `"tweedie"`, and `"quantile"` are supported on
@@ -278,7 +285,8 @@ The following were limitations in prior versions and have been addressed:
 - No DART boosting mode (now: v0.9.0 — `boosting_mode="dart"` is
   fully supported for `GBMRegressor`, binary `GBMClassifier`, and
   `GBMRanker`. Four DART parameters expose the LightGBM-style API:
-  `dart_drop_rate` (default 0.1), `dart_max_drop` (default 50),
+  `dart_drop_rate` (default 0.1), `dart_max_drop` (default 5; pass 50
+  explicitly to restore the pre-calibration default),
   `dart_normalize_type` (`"tree"` or `"forest"`, default `"tree"`),
   and `dart_sample_type` (`"uniform"` or `"weighted"`, default
   `"uniform"`). The per-round dropout + normalization cycle lives in

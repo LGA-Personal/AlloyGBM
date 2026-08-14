@@ -1,6 +1,6 @@
 # PR #137 DART Expected-Drop Calibration
 
-Status: implemented on `codex/dart-drop-calibration`; the public default is `5`.
+Status: implemented and revision-hardened on `codex/dart-drop-calibration`; the public default is `5`.
 
 ## Decision
 
@@ -37,11 +37,11 @@ SHA-256, and the capture source commit. The fixed commands were:
   --output /tmp/pr137-dart-policy-comparison.json
 ```
 
-The production-default matrix and compatibility capture were recorded before
-the Python default literals changed. Their records carry capture source label
-`92a4964`; no production Python literal had changed from base `8a76ccb` at that
-point. The candidate compatibility capture was refreshed from committed test
-state `92a7a43`.
+The explicit-cap matrix was regenerated from committed harness `14cd42a`; its
+records do not depend on the installed default. The production compatibility
+capture remains the pre-default-change capture from source `92a4964`. The
+candidate compatibility capture was regenerated after comparator hardening
+from committed state `9074faf`.
 
 The host was macOS 26.5.2 arm64 on an Apple arm64 machine with 10 logical CPUs
 and 24 GiB RAM. The shared environment used Python 3.13.5, NumPy 2.5.0,
@@ -77,9 +77,13 @@ were fixed before selection:
 | Compatibility and determinism | all required checks | pass | pass | pass | pass |
 
 Lower-is-better metrics use `candidate / incumbent`; NDCG uses
-`incumbent / candidate`. The comparator validates the complete unique matrix
-keys, finite values, fixture metadata and metric names, four-tree multiclass
-pressure, all eight gates, and largest-passing selection without rounding.
+`incumbent / candidate`. The machine comparator validates the exact
+predeclared matrix catalog, caps, seeds, complete unique keys, finite values,
+positive resources, fixture metadata, recomputed configured pressure,
+four-tree multiclass pressure, all eight gates, and largest-passing selection
+without rounding. It also validates the fixed compatibility capture catalogs,
+actual arm caps, source-commit uniformity, stored-check consistency, and
+cross-capture cap-50 hashes.
 
 ## Quality Ratios
 
@@ -88,7 +92,7 @@ incumbent reference is `1.000000`.
 
 | Fixture | Cap 2 | Cap 5 | Cap 10 | Cap 20 |
 |---|---:|---:|---:|---:|
-| `reg-small-narrow` | 0.811811 | 0.950323 | 0.997102 | 1.000000 |
+| `reg-small-narrow` | 0.936121 | 0.996482 | 1.000000 | 1.000000 |
 | `reg-small-wide` | 0.937803 | 0.985150 | 0.999034 | 1.000000 |
 | `reg-tall-narrow` | 0.666693 | 0.843672 | 0.956706 | 0.998884 |
 | `reg-tall-wide-leaf` | 0.850520 | 0.937087 | 0.982476 | 0.999550 |
@@ -104,29 +108,31 @@ The largest individual-seed quality ratios were `1.001169`, `1.011631`,
 Median accuracy deltas for binary/multiclass were respectively
 `(+0.004878, +0.078125)`, `(0.000000, +0.040625)`,
 `(0.000000, +0.012500)`, and `(0.000000, +0.006250)`. Median NDCG@10
-deltas were `+0.009739`, `+0.004729`, `0.000000`, and `0.000000`.
+deltas (candidate minus incumbent; positive is better) were `+0.009739`,
+`+0.004729`, `0.000000`, and `0.000000`.
 
 ## Work, Time, and RSS
 
-Stress aggregates use the six stress fixtures and 30 records per cap. Ratios
-are against the cap-50 median aggregate. Peak RSS is the maximum across the
-full 250-record matrix; incumbent maximum RSS was `178454528` bytes and the
-allowed ceiling was `212008960` bytes.
+Stress aggregates use the five stress fixtures with 200 or 300 rounds and 25
+records per cap. The 100-round multiclass fixture remains in the 250-record
+matrix for quality and accuracy coverage but is excluded from pressure/time
+aggregation. Ratios are against the cap-50 median aggregate. Peak RSS is the
+maximum across the full 250-record matrix; incumbent maximum RSS was
+`179486720` bytes and the allowed ceiling was `213041152` bytes.
 
 | Cap | Median pressure | Pressure ratio | Median fit seconds | Time ratio | Max RSS bytes | RSS ratio |
 |---:|---:|---:|---:|---:|---:|---:|
-| 2 | 383.5 | 0.192279 | 0.299144 | 0.623191 | 178274304 | 0.998990 |
-| 5 | 877.0 | 0.439709 | 0.347365 | 0.723648 | 178094080 | 0.997980 |
-| 10 | 1499.5 | 0.751817 | 0.408886 | 0.851812 | 178159616 | 0.998347 |
-| 20 | 1994.5 | 1.000000 | 0.458916 | 0.956037 | 177946624 | 0.997153 |
-| 50 | 1994.5 | 1.000000 | 0.480020 | 1.000000 | 178454528 | 1.000000 |
+| 2 | 383.5 | 0.192279 | 0.218926 | 0.461466 | 178782208 | 0.996075 |
+| 5 | 877.0 | 0.439709 | 0.297684 | 0.627477 | 179339264 | 0.999178 |
+| 10 | 1499.5 | 0.751817 | 0.396034 | 0.834786 | 178864128 | 0.996531 |
+| 20 | 1994.5 | 1.000000 | 0.472432 | 0.995822 | 178667520 | 0.995436 |
+| 50 | 1994.5 | 1.000000 | 0.474414 | 1.000000 | 179486720 | 1.000000 |
 
 Rejected candidates retain their exact reasons in the comparison JSON:
 
-- Cap `10`: stress pressure ratio `0.75181749812 > 0.5`; stress fit-time
-  ratio `0.85181194796 > 0.85`.
+- Cap `10`: stress pressure ratio `0.75181749812 > 0.5`.
 - Cap `20`: stress pressure ratio `1.0 > 0.5`; stress fit-time ratio
-  `0.956037036339 > 0.85`.
+  `0.995821779481 > 0.85`.
 
 ## Compatibility Hashes
 
@@ -139,12 +145,15 @@ cap50 capture. Each compatibility fit was repeated in the subprocess; all
 repeated prediction and artifact hashes matched.
 
 The complete 64-character lowercase SHA-256 values remain in the committed
-JSON evidence files. Task 3 additionally pins exact artifact and prediction
-equality for selected-cap `n_jobs=1` versus `n_jobs=2`, repeated explicit-50
-regression/multiclass/ranking fits, selected-default level/leaf fits, and
-selected-default warm-start predictions within the existing `1e-5` relative /
-`1e-6` absolute tolerance. Independent multilabel mode inherits cap `5`; joint
-mode forwards explicit cap `50` unchanged.
+JSON evidence files. The machine comparator consumes capture metadata, actual
+caps, determinism repeats, and hash parity. The separate regression suite
+also pins exact artifact and prediction equality for selected-cap `n_jobs=1`
+versus `n_jobs=2`, repeated explicit-50 regression/multiclass/ranking fits,
+selected-default level/leaf fits, and selected-default warm-start predictions
+within the existing `1e-5` relative / `1e-6` absolute tolerance; warm-start and
+`n_jobs` are not JSON compatibility records or comparator inputs. Independent
+multilabel mode inherits cap `5`; joint mode forwards explicit cap `50`
+unchanged.
 
 ## Implementation
 
