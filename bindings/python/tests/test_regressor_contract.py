@@ -163,6 +163,7 @@ class GBMRegressorContractTests(unittest.TestCase):
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
         params = model.get_params()
+        self.assertEqual(params["dart_max_drop"], 5)
         self.assertEqual(params["learning_rate"], 0.1)
         self.assertEqual(params["max_depth"], 6)
         self.assertEqual(params["n_estimators"], 6)

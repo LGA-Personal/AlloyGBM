@@ -9,11 +9,52 @@ sanity check that DART produces different predictions from Standard
 from __future__ import annotations
 
 import pickle
+from pathlib import Path
+import importlib.util
+import sys
 
 import numpy as np
 import pytest
+from sklearn.base import clone
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+
+
+def _calibrated_selected_cap() -> int:
+    repo_root = Path(__file__).resolve().parents[3]
+    module_path = repo_root / "benchmarks" / "dart_policy_calibration.py"
+    spec = importlib.util.spec_from_file_location("pr137_dart_policy_calibration", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    fixture_specs, records = module.read_matrix(
+        repo_root / "benchmarks" / "results" / "pr137_dart_policy_matrix.json"
+    )
+    return module.evaluate_candidate_caps(records, specs=fixture_specs).selected_cap
+
+
+@pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+def test_dart_default_surfaces_match_generated_selected_cap(estimator_type):
+    selected_cap = _calibrated_selected_cap()
+    model = estimator_type(boosting_mode="dart")
+
+    assert model.dart_max_drop == selected_cap
+    assert model.get_params()["dart_max_drop"] == selected_cap
+    assert f"dart_max_drop={selected_cap}" in repr(model)
+
+    cloned = clone(model)
+    assert cloned.dart_max_drop == selected_cap
+    assert cloned.get_params()["dart_max_drop"] == selected_cap
+
+    restored = pickle.loads(pickle.dumps(model))
+    assert restored.dart_max_drop == selected_cap
+    assert restored.get_params()["dart_max_drop"] == selected_cap
+
+    explicit_incumbent = estimator_type(boosting_mode="dart", dart_max_drop=50)
+    assert explicit_incumbent.dart_max_drop == 50
+    assert explicit_incumbent.get_params()["dart_max_drop"] == 50
 
 
 # ----- Smoke tests -----
