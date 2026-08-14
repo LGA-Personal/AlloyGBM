@@ -209,3 +209,31 @@ def test_dart_warm_start_with_eval_set_early_stopping_stays_coherent():
     # Base model was not mutated.
     base_preds_after = np.asarray(base.predict(X[:5]), dtype=np.float32)
     np.testing.assert_allclose(base_preds_before, base_preds_after, rtol=1e-7)
+
+
+def test_selected_default_warm_start_matches_uninterrupted_with_tolerance():
+    X, y = _toy_regression(n_rows=180, n_features=4, seed=1373)
+    common = dict(
+        max_depth=3,
+        learning_rate=0.06,
+        training_policy="manual",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=1373,
+    )
+    uninterrupted = GBMRegressor(n_estimators=12, **common).fit(X, y)
+    prefix = GBMRegressor(n_estimators=6, **common).fit(X, y)
+    continued = GBMRegressor(
+        n_estimators=6,
+        warm_start=True,
+        **common,
+    ).fit(X, y, init_model=prefix)
+
+    np.testing.assert_allclose(
+        continued.predict(X),
+        uninterrupted.predict(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )

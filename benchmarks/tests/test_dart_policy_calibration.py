@@ -420,3 +420,41 @@ def test_json_round_trip_is_sorted_and_rejects_schema_or_nonfinite(tmp_path):
     path.write_text(json.dumps(bad, allow_nan=True))
     with pytest.raises(ValueError, match="finite"):
         MODULE.read_matrix(path)
+
+
+def test_committed_compatibility_captures_pin_cap50_and_selected_default_parity():
+    production = MODULE.read_compat(
+        REPO_ROOT / "benchmarks" / "results" / "pr137_dart_policy_production_compat.json"
+    )
+    candidate = MODULE.read_compat(
+        REPO_ROOT / "benchmarks" / "results" / "pr137_dart_policy_candidate_compat.json"
+    )
+    production_by_key = {
+        (record.fixture, record.seed, record.arm): record
+        for record in MODULE._compat_payload_records(production)
+    }
+    candidate_by_key = {
+        (record.fixture, record.seed, record.arm): record
+        for record in MODULE._compat_payload_records(candidate)
+    }
+    for fixture in MODULE.COMPAT_FIXTURE_NAMES:
+        for seed in MODULE.COMPAT_SEEDS:
+            production_cap50 = production_by_key[(fixture, seed, "cap50")]
+            candidate_cap50 = candidate_by_key[(fixture, seed, "cap50")]
+            candidate_default = candidate_by_key[(fixture, seed, "default")]
+            candidate_selected = candidate_by_key[(fixture, seed, "cap-selected")]
+            assert (
+                production_cap50.prediction_sha256,
+                production_cap50.artifact_sha256,
+            ) == (
+                candidate_cap50.prediction_sha256,
+                candidate_cap50.artifact_sha256,
+            )
+            assert (
+                candidate_default.prediction_sha256,
+                candidate_default.artifact_sha256,
+            ) == (
+                candidate_selected.prediction_sha256,
+                candidate_selected.artifact_sha256,
+            )
+            assert candidate_default.cap == candidate_selected.cap == 5

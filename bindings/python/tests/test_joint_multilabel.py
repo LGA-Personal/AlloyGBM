@@ -539,6 +539,57 @@ def test_joint_mode_accepts_dart():
     assert np.isfinite(preds).all()
 
 
+def test_independent_multilabel_dart_omission_inherits_ranker_default():
+    rng = np.random.default_rng(1374)
+    n = 96
+    groups = np.repeat(np.arange(12), 8).astype(np.int64)
+    X = rng.normal(size=(n, 3)).astype(np.float32)
+    y = np.column_stack(
+        [
+            (X[:, 0] + 0.1 * rng.normal(size=n)).astype(np.float32),
+            (X[:, 1] + 0.1 * rng.normal(size=n)).astype(np.float32),
+        ]
+    )
+    model = MultiLabelGBMRanker(
+        n_estimators=4,
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        seed=1374,
+    ).fit(X, y, group=groups)
+
+    assert "dart_max_drop" not in model.get_params()
+    assert [ranker.dart_max_drop for ranker in model._sub_rankers] == [5, 5]
+
+
+def test_joint_multilabel_explicit_50_reaches_native_kwargs(monkeypatch):
+    from alloygbm import _alloygbm as native
+
+    rng = np.random.default_rng(1375)
+    n = 48
+    groups = np.repeat(np.arange(6), 8).astype(np.int64)
+    X = rng.normal(size=(n, 2)).astype(np.float32)
+    y = rng.normal(size=(n, 2)).astype(np.float32)
+    captured = {}
+    original = native.train_joint_multi_label_ranker
+
+    def wrapped(*args, **kwargs):
+        captured.update(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(native, "train_joint_multi_label_ranker", wrapped)
+    MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        dart_max_drop=50,
+        seed=1375,
+    ).fit(X, y, group=groups)
+
+    assert captured["dart_max_drop"] == 50
+
+
 def test_joint_dart_save_load_round_trip(tmp_path):
     """v0.10.3: a DART-trained joint model must round-trip via
     save_model/load_model with bit-identical predictions (the DART
