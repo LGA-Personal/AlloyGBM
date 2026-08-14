@@ -459,6 +459,16 @@ def test_matrix_requires_the_exact_predeclared_contract(
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match=message):
         MODULE.read_matrix(path)
+    with pytest.raises(ValueError, match=message):
+        MODULE.compare_evidence(
+            path,
+            production_compat_path=(
+                REPO_ROOT
+                / "benchmarks"
+                / "results"
+                / "pr137_dart_policy_production_compat.json"
+            ),
+        )
 
 
 @pytest.mark.parametrize(
