@@ -7,7 +7,6 @@ from pathlib import Path
 import sys
 
 import numpy as np
-import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -89,7 +88,6 @@ def test_render_markdown_contains_every_scenario():
     assert "reg-medium" in rendered and "cls-medium" in rendered
 
 
-@pytest.mark.slow
 def test_quick_run_end_to_end_passes_gate():
     report = BENCHMARK.run_benchmark(quick=True)
     assert report, "quick run produced no records"
