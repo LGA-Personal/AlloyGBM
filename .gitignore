@@ -43,7 +43,9 @@ catboost_info/
 .claude/
 
 # Development scratch / run artifacts
+# Managed scratch worktrees (see scripts/prune_worktrees.sh)
 .worktrees/
+.claude/worktrees/
 nohup.out
 *.log
 benchmarks/data/
