@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Per-node feature subsampling.** `GBMRegressor`, `GBMClassifier`, and
+  `GBMRanker` now expose `colsample_bynode` (default `1.0`, range `(0.0,
+  1.0]`). At each split-search node, a deterministic draw seeded from
+  `(seed, node_id, feature)` decides whether a feature is a split candidate,
+  composing with `col_subsample`'s per-tree sampling and with
+  `interaction_constraints` at the same per-node histogram filter. When the
+  composed draw would leave zero candidates at a node, colsample is dropped
+  for that node so it always has at least the interaction-allowed set. The
+  default `1.0` is inert and byte-identical to prior behavior; there is no
+  auto-policy for this parameter. Single-output estimators only —
+  `colsample_bylevel` and joint multi-output / multiclass parity are tracked
+  as follow-ups in the roadmap.
+
 - **Recalibrated the public DART expected-drop default.** `dart_max_drop` now
   defaults to `5` across the Python estimator constructors, selected by a fixed
   five-seed matrix spanning regression, binary/multiclass classification, and

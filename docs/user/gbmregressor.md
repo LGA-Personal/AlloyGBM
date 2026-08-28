@@ -22,6 +22,14 @@ one-dimensional inputs are rejected before native training.
     `boosting_mode="goss"` (GOSS uses gradient-based sampling instead).
 - `col_subsample: float = 1.0`
   - Fraction of features sampled per round.
+- `colsample_bynode: float = 1.0`
+  - Fraction of features considered as split candidates at each individual
+    tree node during the split search, composing multiplicatively with
+    `col_subsample`'s per-round (per-tree) sampling and with any
+    `interaction_constraints`. Default `1.0` disables it (inert, byte-identical
+    to prior behavior). Must be in `(0.0, 1.0]`. Single-output estimators only
+    (`GBMRegressor`, `GBMClassifier`, `GBMRanker`); not yet supported on
+    `MultiLabelGBMRanker(multi_label_mode="joint")` or multiclass softmax.
 - `quantile_alpha: float = 0.5`
   - Target quantile for `"quantile"` regression. Must be strictly in `(0.0, 1.0)`.
 
