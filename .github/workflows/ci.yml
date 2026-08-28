@@ -152,6 +152,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python benchmarks/allocation_reuse_benchmark.py --quick --candidate-manifest /tmp/alloygbm-candidate-runtime.json --gate
 
+      - name: Test perf regression benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_perf_regression_benchmark.py -q
+
+      - name: Perf regression benchmark gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/perf_regression_benchmark.py --quick --gate
+
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
 
