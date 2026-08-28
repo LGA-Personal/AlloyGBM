@@ -4809,6 +4809,7 @@ fn sampled_builder_deltas_plus_excluded_replay(
             None,
             raw_features,
             None,
+            None,
         )?
     } else {
         build_tree_level_wise(
@@ -4826,6 +4827,7 @@ fn sampled_builder_deltas_plus_excluded_replay(
             &[],
             None,
             raw_features,
+            None,
             None,
         )?
     };
@@ -10346,4 +10348,191 @@ fn test_quantile_validation_gated_on_objective() {
             )
             .is_ok()
     );
+}
+
+// -- colsample_bynode (per-node feature subsampling) -----------------------
+
+/// Wide synthetic regression fixture: 16 binary features (bit `f` of the row
+/// index) with a target that gives every feature a distinct, sizeable
+/// coefficient so a depth-4 tree has incentive to split on many of them.
+/// `n = 2048` keeps `row_count >= 1024`, which sidesteps the
+/// small-wide-data auto-L2 policy heuristic (`should_apply_auto_split_l2`)
+/// so split gains aren't swamped by regularization in this fixture.
+///
+/// Uses [`MonotoneRegressionBackend`] rather than [`MockBackend`]: the mock
+/// backend's `best_split` is hardcoded to always split on feature 0 and
+/// ignores histogram content entirely, so it would never observe the effect
+/// of per-node feature filtering. `MonotoneRegressionBackend` runs a real
+/// gain-based search over `histograms.features()` despite its name (it's a
+/// generic "real split search" test backend, not monotone-constraint
+/// specific), so it's sensitive to which features colsample_bynode keeps.
+fn colsample_bynode_fixture() -> (TrainingDataset, BinnedMatrix) {
+    let n: usize = 2048;
+    let feature_count = 16;
+    let mut values = Vec::with_capacity(n * feature_count);
+    let mut targets = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut row = Vec::with_capacity(feature_count);
+        let mut target = 0.0f32;
+        for f in 0..feature_count {
+            let bit = ((i >> f) & 1) as f32;
+            row.push(bit);
+            let coef = (feature_count - f) as f32 * if f % 2 == 0 { 1.0 } else { -1.0 };
+            target += coef * bit;
+        }
+        values.extend_from_slice(&row);
+        targets.push(target);
+    }
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(n, feature_count, values).expect("matrix"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned = sample_binned_matrix_for_dataset(&dataset);
+    (dataset, binned)
+}
+
+fn colsample_bynode_train_params(mutate: impl FnOnce(&mut TrainParams)) -> TrainParams {
+    let mut params = TrainParams {
+        learning_rate: 0.3,
+        max_depth: 4,
+        ..TrainParams::default()
+    };
+    mutate(&mut params);
+    params
+}
+
+/// Fit and return every row's prediction as raw bits, so comparisons are
+/// exact byte-for-byte rather than approximate float comparisons.
+fn colsample_bynode_fit_prediction_bits(
+    params: TrainParams,
+    dataset: &TrainingDataset,
+    binned: &BinnedMatrix,
+) -> Vec<u32> {
+    let model = Trainer::new(params)
+        .expect("valid params")
+        .fit_iterations(
+            dataset,
+            binned,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            5,
+        )
+        .expect("training succeeds");
+    (0..dataset.row_count())
+        .map(|row_idx| {
+            let row: Vec<f32> = (0..dataset.matrix.feature_count)
+                .map(|f| dataset.matrix.values[row_idx * dataset.matrix.feature_count + f])
+                .collect();
+            model
+                .predict_row(&row)
+                .expect("prediction succeeds")
+                .to_bits()
+        })
+        .collect()
+}
+
+#[test]
+fn colsample_bynode_one_is_byte_identical_to_default() {
+    let (dataset, binned) = colsample_bynode_fixture();
+    let base = colsample_bynode_fit_prediction_bits(
+        colsample_bynode_train_params(|p| {
+            p.seed = 7;
+        }),
+        &dataset,
+        &binned,
+    );
+    let bynode1 = colsample_bynode_fit_prediction_bits(
+        colsample_bynode_train_params(|p| {
+            p.seed = 7;
+            p.colsample_bynode = 1.0;
+        }),
+        &dataset,
+        &binned,
+    );
+    assert_eq!(
+        base, bynode1,
+        "colsample_bynode=1.0 must be byte-identical to default"
+    );
+}
+
+#[test]
+fn colsample_bynode_below_one_changes_trees_but_stays_finite() {
+    let (dataset, binned) = colsample_bynode_fixture();
+    let base = colsample_bynode_fit_prediction_bits(
+        colsample_bynode_train_params(|p| {
+            p.seed = 7;
+        }),
+        &dataset,
+        &binned,
+    );
+    let sampled = colsample_bynode_fit_prediction_bits(
+        colsample_bynode_train_params(|p| {
+            p.seed = 7;
+            p.colsample_bynode = 0.5;
+        }),
+        &dataset,
+        &binned,
+    );
+    assert_ne!(
+        base, sampled,
+        "colsample_bynode=0.5 should change the fitted trees"
+    );
+    assert!(
+        sampled.iter().all(|bits| f32::from_bits(*bits).is_finite()),
+        "predictions must stay finite"
+    );
+}
+
+#[test]
+fn colsample_bynode_is_deterministic_for_fixed_seed() {
+    let (dataset, binned) = colsample_bynode_fixture();
+    let a = colsample_bynode_fit_prediction_bits(
+        colsample_bynode_train_params(|p| {
+            p.seed = 11;
+            p.colsample_bynode = 0.5;
+        }),
+        &dataset,
+        &binned,
+    );
+    let b = colsample_bynode_fit_prediction_bits(
+        colsample_bynode_train_params(|p| {
+            p.seed = 11;
+            p.colsample_bynode = 0.5;
+        }),
+        &dataset,
+        &binned,
+    );
+    assert_eq!(
+        a, b,
+        "same seed + rate must reproduce identical predictions"
+    );
+}
+
+#[test]
+fn colsample_bynode_keeps_feature_empty_draw_falls_back() {
+    // Direct unit test of the predicate + fallback: with a tiny rate the raw
+    // per-node draw can keep zero features; filter_histograms_for_node must
+    // not return an empty candidate set.
+    let four_feature_bundle = || HistogramBundle::new_zeroed(&[0, 1, 2, 3], 2);
+    for node_id in 0..64u64 {
+        let filtered = crate::colsample::filter_histograms_for_node(
+            &four_feature_bundle(),
+            None,
+            None,
+            Some(crate::colsample::ColsampleBynode {
+                rate: 0.01,
+                seed: 3,
+            }),
+            node_id,
+        );
+        let kept = filtered.map(|b| b.feature_count()).unwrap_or(4);
+        assert!(
+            kept >= 1,
+            "node {node_id} ended with zero candidate features"
+        );
+    }
 }

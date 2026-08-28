@@ -167,6 +167,7 @@ fn fixture_params() -> TrainParams {
         poisson_max_delta_step: 0.7,
         quantile_alpha: 0.5,
         pl_split_candidates: 0,
+        colsample_bynode: 1.0,
     }
 }
 
