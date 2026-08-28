@@ -2736,6 +2736,192 @@ fn joint_dro_radius_zero_matches_standard_byte_for_byte() {
 }
 
 #[test]
+fn joint_robust_split_flag_off_matches_leaf_only_byte_for_byte() {
+    // review 3.3: `joint_dro_robust_split_gain` (default false) must be
+    // byte-identical to the pre-existing DRO-leaf-only path. Same joint DRO
+    // fit (radius > 0), flag explicitly false vs the struct default.
+    use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+    let n_rows = 200;
+    let feature_count = 2;
+    let targets_0: Vec<f32> = (0..n_rows)
+        .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+        .collect();
+    let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+    let bins: Vec<u8> = (0..(n_rows * feature_count))
+        .map(|i| (i % 8) as u8)
+        .collect();
+    let binned_matrix = BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+    let params_dro = TrainParams {
+        seed: 7,
+        max_depth: 3,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        learning_rate: 0.3,
+        leaf_solver: LeafSolverKind::Dro,
+        dro_config: Some(DroConfig {
+            radius: 0.5,
+            metric: DroMetric::Wasserstein,
+        }),
+        ..TrainParams::default()
+    };
+
+    // Explicit flag-off (matches the struct default, but spelled out so this
+    // test still catches a future default flip).
+    let params_flag_off = TrainParams {
+        joint_dro_robust_split_gain: false,
+        ..params_dro.clone()
+    };
+    assert!(
+        !params_dro.joint_dro_robust_split_gain,
+        "TrainParams::default() must keep joint_dro_robust_split_gain off"
+    );
+
+    let baseline = fit_joint_multi_output(
+        &params_dro,
+        feature_count,
+        &binned_matrix,
+        &[targets_0.clone(), targets_1.clone()],
+        None,
+        &[JointObjective::SquaredError, JointObjective::SquaredError],
+        4,
+    )
+    .expect("baseline (flag absent) fit");
+
+    let off = fit_joint_multi_output(
+        &params_flag_off,
+        feature_count,
+        &binned_matrix,
+        &[targets_0, targets_1],
+        None,
+        &[JointObjective::SquaredError, JointObjective::SquaredError],
+        4,
+    )
+    .expect("flag-off fit");
+
+    let a = baseline.model.to_artifact_bytes().expect("ser baseline");
+    let b = off.model.to_artifact_bytes().expect("ser flag-off");
+    assert_eq!(
+        a, b,
+        "joint_dro_robust_split_gain=false must be byte-identical to the prior DRO-leaf-only path"
+    );
+    // Reachability of flag-on actually differing is covered by
+    // `joint_robust_split_flag_on_changes_trees_but_stays_finite` below, on a
+    // fixture designed to be discriminative for it (this fixture's regular,
+    // low-cardinality bin structure happens to leave split *selection*
+    // unchanged even with the flag on, which is a valid outcome here, not a
+    // wiring bug).
+}
+
+#[test]
+fn joint_robust_split_flag_on_changes_trees_but_stays_finite() {
+    // review 3.3: with the DRO leaf solver active and a wide-ish,
+    // heteroscedastic-leaning fixture, flipping `joint_dro_robust_split_gain`
+    // on must change predictions from the flag-off fit while keeping every
+    // prediction finite (no NaN/Inf from the grad_sq-driven effective
+    // gradient or the parent-baseline gain term).
+    use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+    let n_rows = 300;
+    let feature_count = 2;
+    // Heteroscedastic-leaning targets: low-index rows have small-magnitude,
+    // low-variance targets; high-index rows have large-magnitude,
+    // high-variance (alternating sign) targets.
+    let targets_0: Vec<f32> = (0..n_rows)
+        .map(|i| {
+            if i < n_rows / 2 {
+                0.1 * (i as f32 % 3.0 - 1.0)
+            } else if i % 2 == 0 {
+                20.0
+            } else {
+                -20.0
+            }
+        })
+        .collect();
+    let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 0.5 + 1.0).collect();
+    let bins: Vec<u8> = (0..(n_rows * feature_count))
+        .map(|i| (i % 8) as u8)
+        .collect();
+    let binned_matrix = BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+    let params_off = TrainParams {
+        seed: 11,
+        max_depth: 4,
+        min_data_in_leaf: 2,
+        lambda_l2: 0.1,
+        learning_rate: 0.2,
+        leaf_solver: LeafSolverKind::Dro,
+        dro_config: Some(DroConfig {
+            radius: 0.4,
+            metric: DroMetric::Wasserstein,
+        }),
+        joint_dro_robust_split_gain: false,
+        ..TrainParams::default()
+    };
+    let params_on = TrainParams {
+        joint_dro_robust_split_gain: true,
+        ..params_off.clone()
+    };
+
+    let off = fit_joint_multi_output(
+        &params_off,
+        feature_count,
+        &binned_matrix,
+        &[targets_0.clone(), targets_1.clone()],
+        None,
+        &[JointObjective::SquaredError, JointObjective::SquaredError],
+        6,
+    )
+    .expect("flag-off fit");
+    let on = fit_joint_multi_output(
+        &params_on,
+        feature_count,
+        &binned_matrix,
+        &[targets_0, targets_1],
+        None,
+        &[JointObjective::SquaredError, JointObjective::SquaredError],
+        6,
+    )
+    .expect("flag-on fit");
+
+    let a = off.model.to_artifact_bytes().expect("ser off");
+    let b = on.model.to_artifact_bytes().expect("ser on");
+    assert_ne!(
+        a, b,
+        "joint_dro_robust_split_gain=true must change the trained artifact vs flag-off"
+    );
+
+    // Predict on the training rows via each model's own stumps (walk them
+    // directly rather than standing up a full JointPredictor) to confirm
+    // finiteness of the leaf values that made it into the artifact.
+    for stump in &off.model.stumps {
+        if let Some((left_k, right_k)) = stump.multi_output_leaf_values.as_ref() {
+            assert!(
+                left_k.iter().all(|v| v.is_finite()),
+                "flag-off left leaf not finite"
+            );
+            assert!(
+                right_k.iter().all(|v| v.is_finite()),
+                "flag-off right leaf not finite"
+            );
+        }
+    }
+    for stump in &on.model.stumps {
+        if let Some((left_k, right_k)) = stump.multi_output_leaf_values.as_ref() {
+            assert!(
+                left_k.iter().all(|v| v.is_finite()),
+                "flag-on left leaf not finite"
+            );
+            assert!(
+                right_k.iter().all(|v| v.is_finite()),
+                "flag-on right leaf not finite"
+            );
+        }
+    }
+}
+
+#[test]
 fn joint_warm_start_continues_from_prior_state() {
     let n_rows = 80;
     let feature_count = 2;

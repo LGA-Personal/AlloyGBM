@@ -14,7 +14,9 @@ use alloygbm_core::{
 };
 
 use crate::shared_histogram::{
-    MultiOutputHistogram, build_multi_output_histogram_inplace, compute_multi_output_split_gain,
+    MultiOutputHistogram, accumulate_multi_output_grad_sq_inplace,
+    build_multi_output_histogram_inplace, compute_multi_output_split_gain,
+    compute_multi_output_split_gain_dro,
 };
 use crate::{InteractionConstraintIndex, TrainedStump};
 
@@ -110,6 +112,14 @@ pub(super) fn build_joint_round_inner(
     let max_depth = params.max_depth.max(1) as usize;
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
+
+    // Opt-in (default off, byte-identical when off): make joint DRO split
+    // *selection* robust, not just leaf values. Only takes effect when the
+    // DRO leaf solver is actually active (nonzero radius); otherwise this is
+    // a no-op and no grad_sq buffer is allocated. Numeric threshold splits
+    // only — morph and native-categorical splits are unaffected (see the
+    // dispatch sites below and in `build_joint_round_leafwise`).
+    let robust_split = params.joint_dro_robust_split_gain && effective_dro_config(params).is_some();
 
     // v0.10.6: split_penalty neutralization — when active, every candidate's
     // gain is adjusted by a K-output factor-load penalty derived from the
@@ -230,6 +240,14 @@ pub(super) fn build_joint_round_inner(
 
             // Build per-feature K-output histogram from scratch for this node.
             let mut node_hist = MultiOutputHistogram::new(feature_count, n_bins, n_outputs);
+            // robust_split (opt-in): a parallel grad_sq buffer, same shape as
+            // node_hist minus the *2 (grad, hess) component axis. Allocated
+            // only when active so the flag-off path costs nothing extra.
+            let mut grad_sq_buf: Option<Vec<f32>> = if robust_split {
+                Some(vec![0.0_f32; feature_count * n_bins * n_outputs])
+            } else {
+                None
+            };
             // Slice bin/grad/hess for this node's rows; build kernel reads rows
             // sequentially, so we set up a temporary local view.
             // (For a minimal correct implementation, build histograms directly
@@ -265,6 +283,16 @@ pub(super) fn build_joint_round_inner(
                     &subset_h,
                     n_outputs,
                 );
+                if let Some(buf) = grad_sq_buf.as_mut() {
+                    accumulate_multi_output_grad_sq_inplace(
+                        buf,
+                        n_bins,
+                        n_outputs,
+                        feature,
+                        &subset_bins,
+                        &subset_g,
+                    );
+                }
             }
 
             // Find best split across all (feature, threshold_bin) pairs.
@@ -342,7 +370,10 @@ pub(super) fn build_joint_round_inner(
                 }
                 for threshold_bin in 0..max_threshold {
                     // v0.10.4: route numeric gain through the morph variant when
-                    // active; falls through to the standard variant otherwise.
+                    // active (takes priority over robust_split — MorphBoost
+                    // robust split is deferred; see `compute_multi_output_split_gain_dro`'s
+                    // doc-comment). Falls through to the DRO-robust variant
+                    // when `robust_split` is active, else the standard variant.
                     let base_gain = if let Some(m) = morph_ctx {
                         crate::shared_histogram::compute_multi_output_split_gain_morph(
                             &node_hist,
@@ -356,6 +387,18 @@ pub(super) fn build_joint_round_inner(
                             m.total_iterations,
                             &m.grad_means,
                             &m.grad_stds,
+                        )
+                    } else if robust_split {
+                        compute_multi_output_split_gain_dro(
+                            &node_hist,
+                            grad_sq_buf.as_deref().expect(
+                                "grad_sq_buf must be populated when robust_split is active",
+                            ),
+                            feature,
+                            threshold_bin,
+                            params.lambda_l1,
+                            lambda_l2,
+                            effective_dro_config(params),
                         )
                     } else {
                         compute_multi_output_split_gain(
@@ -627,6 +670,10 @@ pub(super) fn build_joint_round_leafwise(
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
 
+    // Opt-in robust split-gain (see `build_joint_round_inner` for the full
+    // rationale): only takes effect with the DRO leaf solver active.
+    let robust_split = params.joint_dro_robust_split_gain && effective_dro_config(params).is_some();
+
     // col_subsample (same logic as build_joint_round; v0.10.2.1 fix
     // mixes round_index into the seed so each tree samples a different
     // feature subset).
@@ -723,6 +770,12 @@ pub(super) fn build_joint_round_leafwise(
 
         // Build multi-output histogram for this node.
         let mut node_hist = MultiOutputHistogram::new(feature_count, n_bins, n_outputs);
+        // robust_split (opt-in): parallel grad_sq buffer, allocated only when active.
+        let mut grad_sq_buf: Option<Vec<f32>> = if robust_split {
+            Some(vec![0.0_f32; feature_count * n_bins * n_outputs])
+        } else {
+            None
+        };
         for feature in 0..feature_count {
             if !feature_allowed[feature] {
                 continue;
@@ -753,6 +806,16 @@ pub(super) fn build_joint_round_leafwise(
                 &subset_h,
                 n_outputs,
             );
+            if let Some(buf) = grad_sq_buf.as_mut() {
+                accumulate_multi_output_grad_sq_inplace(
+                    buf,
+                    n_bins,
+                    n_outputs,
+                    feature,
+                    &subset_bins,
+                    &subset_g,
+                );
+            }
         }
 
         // Sweep features for the best split. Categorical features dispatch
@@ -813,7 +876,10 @@ pub(super) fn build_joint_round_leafwise(
                 continue;
             }
             for threshold_bin in 0..max_threshold {
-                // v0.10.4: route through morph variant when active.
+                // v0.10.4: route through morph variant when active (takes
+                // priority over robust_split; see the level-wise builder's
+                // dispatch comment). Falls through to the DRO-robust variant
+                // when `robust_split` is active, else the standard variant.
                 let base_gain = if let Some(m) = morph_ctx {
                     crate::shared_histogram::compute_multi_output_split_gain_morph(
                         &node_hist,
@@ -827,6 +893,18 @@ pub(super) fn build_joint_round_leafwise(
                         m.total_iterations,
                         &m.grad_means,
                         &m.grad_stds,
+                    )
+                } else if robust_split {
+                    compute_multi_output_split_gain_dro(
+                        &node_hist,
+                        grad_sq_buf
+                            .as_deref()
+                            .expect("grad_sq_buf must be populated when robust_split is active"),
+                        feature,
+                        threshold_bin,
+                        params.lambda_l1,
+                        lambda_l2,
+                        effective_dro_config(params),
                     )
                 } else {
                     compute_multi_output_split_gain(

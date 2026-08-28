@@ -145,6 +145,138 @@ pub fn compute_multi_output_split_gain(
     total
 }
 
+/// Accumulate per-(feature, bin, output) `grad * grad` into a flat buffer
+/// parallel to [`MultiOutputHistogram`], for one feature column in one sweep.
+///
+/// `joint_dro_robust_split_gain` (opt-in, default off) needs `grad_sq` sums
+/// alongside the existing `grad`/`hess` sums so numeric split *selection* can
+/// route through the same DRO effective-gradient formula the leaf step
+/// already uses (`alloygbm_core::leaf_gain_term`). This mirrors
+/// [`build_multi_output_histogram_inplace`]'s sweep (same bin iteration, same
+/// feature/bin/output ordering) but writes into a buffer with NO `*2`
+/// component axis — one `f32` per (feature, bin, output) slot, indexed as
+/// `(feature * n_bins + bin) * n_outputs + output`.
+///
+/// `grads` is row-major with output as the inner axis (same layout as
+/// `build_multi_output_histogram_inplace`'s `grads` parameter): length must
+/// equal `bins.len() * n_outputs`.
+pub fn accumulate_multi_output_grad_sq_inplace(
+    buf: &mut [f32],
+    n_bins: usize,
+    n_outputs: usize,
+    feature: usize,
+    bins: &[u8],
+    grads: &[f32],
+) {
+    debug_assert_eq!(grads.len(), bins.len() * n_outputs);
+    let stride = n_outputs;
+    let feature_offset = feature * n_bins * stride;
+
+    for (row, &bin) in bins.iter().enumerate() {
+        let bin = bin as usize;
+        debug_assert!(bin < n_bins);
+        let bin_offset = feature_offset + bin * stride;
+        for k in 0..n_outputs {
+            let g = grads[row * n_outputs + k];
+            buf[bin_offset + k] += g * g;
+        }
+    }
+}
+
+/// Compute the right-child `grad_sq` buffer as `parent - left`, element-wise.
+/// Mirrors [`subtract_multi_output_histogram`]'s parent-minus-left
+/// subtraction trick, but for the flat `grad_sq` buffer produced by
+/// [`accumulate_multi_output_grad_sq_inplace`] (no component axis, so this is
+/// a plain element-wise subtraction rather than a strided one).
+///
+/// **Not currently wired into a call site**: as of this writing, both joint
+/// round builders (`build_joint_round_inner` / `build_joint_round_leafwise`
+/// in `crate::joint::build_round`) rebuild every node's histogram from
+/// scratch via `node.row_indices` rather than using the parent-minus-child
+/// subtraction trick — so `subtract_multi_output_histogram` itself has no
+/// runtime call site either (only its own unit test exercises it). This
+/// helper is provided for API parity with the grad/hess pair and to support
+/// hooking up the subtraction trick later without extending the contract.
+pub fn subtract_multi_output_grad_sq(parent: &mut [f32], child: &[f32]) {
+    debug_assert_eq!(parent.len(), child.len());
+    for (p, &c) in parent.iter_mut().zip(child.iter()) {
+        *p -= c;
+    }
+}
+
+/// DRO-robust multi-output split gain for a numeric threshold candidate.
+///
+/// Identical structure to [`compute_multi_output_split_gain`] (same
+/// left/right bin partition, same per-output summation) but routes each
+/// side's — and the parent's — gain term through
+/// `alloygbm_core::leaf_gain_term`, which applies the DRO effective-gradient
+/// shrinkage (`leaf_effective_gradient`) using the side's `grad_sq` sum and an
+/// approximate row count (`morph_count_proxy(hess_sum)`, the same per-bin
+/// count proxy the joint MorphBoost gain already uses — see its doc-comment
+/// for why an exact count isn't available on this histogram).
+///
+/// The **parent term is computed from the node's own totals** (`g_total`,
+/// `h_total`, `gsq_total` summed over all bins), never as the sum of the two
+/// child terms — this is the "parent-baseline invariant" that makes DRO
+/// shrinkage change split *selection* (a sum-of-children parent would cancel
+/// out and collapse back to the additive gain decomposition).
+///
+/// `grad_sq` must have length `histogram.n_features * histogram.n_bins *
+/// histogram.n_outputs`, indexed identically to
+/// [`accumulate_multi_output_grad_sq_inplace`]'s output buffer.
+///
+/// Numeric threshold splits only — the caller is responsible for not using
+/// this for native-categorical or MorphBoost split gain (both keep their
+/// existing gain even when `joint_dro_robust_split_gain` is on; see
+/// `crates/engine/src/joint/build_round.rs`).
+pub fn compute_multi_output_split_gain_dro(
+    histogram: &MultiOutputHistogram,
+    grad_sq: &[f32],
+    feature: usize,
+    threshold_bin: usize,
+    lambda_l1: f32,
+    lambda_l2: f32,
+    dro_config: Option<&alloygbm_core::DroConfig>,
+) -> f32 {
+    let n_outputs = histogram.n_outputs;
+    let n_bins = histogram.n_bins;
+    let gsq_stride = n_outputs;
+    let mut total = 0.0_f32;
+    for k in 0..n_outputs {
+        let (mut g_l, mut h_l, mut gsq_l) = (0.0_f32, 0.0_f32, 0.0_f32);
+        let (mut g_r, mut h_r, mut gsq_r) = (0.0_f32, 0.0_f32, 0.0_f32);
+        for b in 0..n_bins {
+            let g = histogram.data[histogram.idx(feature, b, k, HistComponent::Grad)];
+            let h = histogram.data[histogram.idx(feature, b, k, HistComponent::Hess)];
+            let gsq = grad_sq[(feature * n_bins + b) * gsq_stride + k];
+            if b <= threshold_bin {
+                g_l += g;
+                h_l += h;
+                gsq_l += gsq;
+            } else {
+                g_r += g;
+                h_r += h;
+                gsq_r += gsq;
+            }
+        }
+        let g_total = g_l + g_r;
+        let h_total = h_l + h_r;
+        let gsq_total = gsq_l + gsq_r;
+        let cnt_l = morph_count_proxy(h_l);
+        let cnt_r = morph_count_proxy(h_r);
+        let cnt_total = cnt_l.saturating_add(cnt_r);
+        let lgt = |g: f32, h: f32, gsq: f32, cnt: u32| {
+            alloygbm_core::leaf_gain_term(g, h, gsq, cnt, lambda_l1, lambda_l2, dro_config)
+        };
+        // Parent-baseline invariant: the subtracted term uses the node's own
+        // totals (g_total/h_total/gsq_total/cnt_total), NOT
+        // lgt(left) + lgt(right).
+        total += lgt(g_l, h_l, gsq_l, cnt_l) + lgt(g_r, h_r, gsq_r, cnt_r)
+            - lgt(g_total, h_total, gsq_total, cnt_total);
+    }
+    total
+}
+
 /// MorphBoost-augmented multi-output split gain.
 ///
 /// Sums per-output morph gain across K outputs. Each output uses its own
@@ -1034,6 +1166,106 @@ mod tests {
             /*eps=*/ 0.0,
         );
         assert!((total_gain - 16.0).abs() < 1e-5, "got {total_gain}");
+    }
+
+    #[test]
+    fn grad_sq_accumulate_and_subtract_round_trip() {
+        // 3 rows, 1 feature, 4 bins (incl. missing=3), 2 outputs. Mirrors
+        // `build_kernel_accumulates_per_output_grad_hess` but for the
+        // parallel grad_sq buffer (no *2 component axis).
+        let bins: Vec<u8> = vec![0, 1, 0];
+        let grads = [1.0_f32, 10.0, 2.0, 20.0, 3.0, 30.0];
+        let n_bins = 4;
+        let n_outputs = 2;
+        let feature = 0_usize;
+        let gsq_idx = |bin: usize, output: usize| (feature * n_bins + bin) * n_outputs + output;
+        let mut parent = vec![0.0_f32; n_bins * n_outputs];
+        accumulate_multi_output_grad_sq_inplace(
+            &mut parent,
+            n_bins,
+            n_outputs,
+            feature,
+            &bins,
+            &grads,
+        );
+        // Output 0, bin 0 aggregates rows 0+2 -> 1^2 + 3^2 = 10.
+        assert!((parent[gsq_idx(0, 0)] - 10.0).abs() < 1e-6);
+        // Output 1, bin 1 aggregates row 1 only -> 20^2 = 400.
+        assert!((parent[gsq_idx(1, 1)] - 400.0).abs() < 1e-6);
+
+        // Subtract a "left child" that only saw row 2 (bin 0).
+        let mut left = vec![0.0_f32; n_bins * n_outputs];
+        accumulate_multi_output_grad_sq_inplace(
+            &mut left,
+            n_bins,
+            n_outputs,
+            feature,
+            &[0_u8],
+            &[3.0_f32, 30.0],
+        );
+        let mut right = parent.clone();
+        subtract_multi_output_grad_sq(&mut right, &left);
+        // Output 0, bin 0: parent(10.0) - left(9.0) = 1.0 (row 0's 1^2).
+        assert!((right[gsq_idx(0, 0)] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn joint_dro_robust_split_gain_uses_parent_totals_not_sum_of_children() {
+        // v0.10.5 follow-up (review 3.3): pin the parent-baseline invariant
+        // for `compute_multi_output_split_gain_dro` against an INDEPENDENT
+        // reference computed directly from `core::leaf_gain_term`, and prove
+        // the fixture is strong enough to distinguish "parent from totals"
+        // from the (buggy) "parent = sum of children" alternative.
+        //
+        // 1 output, 2 bins. Asymmetric per-side grad/grad_sq so all three
+        // effective gradients are nonzero and eff(parent) != eff(l) + eff(r).
+        use alloygbm_core::{DroConfig, DroMetric};
+
+        let mut hist = MultiOutputHistogram::new(1, 2, 1);
+        set(&mut hist, 0, 0, 0, HistComponent::Grad, 8.0);
+        set(&mut hist, 0, 0, 0, HistComponent::Hess, 4.0);
+        set(&mut hist, 0, 1, 0, HistComponent::Grad, 1.0);
+        set(&mut hist, 0, 1, 0, HistComponent::Hess, 4.0);
+        let grad_sq = vec![21.6_f32, 4.025_f32]; // [(f=0,b=0,k=0), (f=0,b=1,k=0)]
+
+        let dro = DroConfig {
+            radius: 0.1,
+            metric: DroMetric::Wasserstein,
+        };
+        let lambda_l1 = 0.0_f32;
+        let lambda_l2 = 0.7_f32;
+
+        let gain = compute_multi_output_split_gain_dro(
+            &hist,
+            &grad_sq,
+            /*feature=*/ 0,
+            /*threshold_bin=*/ 0,
+            lambda_l1,
+            lambda_l2,
+            Some(&dro),
+        );
+
+        // Independent reference: lgt(bin0) + lgt(bin1) - lgt(totals), where
+        // `cnt` mirrors this module's own `morph_count_proxy(hess_sum)`.
+        let lgt = |g: f32, h: f32, gsq: f32, cnt: u32| {
+            alloygbm_core::leaf_gain_term(g, h, gsq, cnt, lambda_l1, lambda_l2, Some(&dro))
+        };
+        let cnt = morph_count_proxy;
+        let expected = lgt(8.0, 4.0, 21.6, cnt(4.0)) + lgt(1.0, 4.0, 4.025, cnt(4.0))
+            - lgt(9.0, 8.0, 25.625, cnt(8.0));
+        assert!(
+            (gain - expected).abs() < 1e-5,
+            "gain {gain} != reference {expected}"
+        );
+
+        // The fixture must actually distinguish the correct parent-from-totals
+        // baseline from the buggy "parent = sum of children" alternative
+        // (which would cancel out to exactly the sum of the two child terms).
+        let sum_of_children = lgt(8.0, 4.0, 21.6, cnt(4.0)) + lgt(1.0, 4.0, 4.025, cnt(4.0));
+        assert!(
+            (expected - sum_of_children).abs() > 1e-4,
+            "fixture too weak to distinguish parent-baseline from sum-of-children"
+        );
     }
 
     #[test]

@@ -157,6 +157,12 @@ pub(crate) fn build_train_params(
         quantile_alpha,
         pl_split_candidates,
         colsample_bynode,
+        // Joint-only opt-in flag (see `train_joint_multi_label_ranker_in_fit_pool`
+        // in `bindings/python/src/joint.rs`, which builds its own `TrainParams`
+        // literal and sets this field directly). Single-output training never
+        // reads it, so it's hardcoded off here rather than threading a dead
+        // kwarg through `GBMRegressor`/`GBMClassifier`/`GBMRanker`.
+        joint_dro_robust_split_gain: false,
     }
 }
 
