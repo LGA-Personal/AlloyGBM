@@ -327,6 +327,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             f"n_estimators={self.n_estimators}, "
             f"row_subsample={self.row_subsample}, "
             f"col_subsample={self.col_subsample}, "
+            f"colsample_bynode={self.colsample_bynode}, "
             f"early_stopping_rounds={self.early_stopping_rounds}, "
             f"min_validation_improvement={self.min_validation_improvement}, "
             f"min_data_in_leaf={self.min_data_in_leaf}, "

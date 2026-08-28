@@ -358,6 +358,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "max_depth": 4,
                         "row_subsample": 0.75,
                         "col_subsample": 0.5,
+                        "colsample_bynode": 1.0,
                         "min_validation_improvement": 0.01,
                         "seed": 7,
                         "deterministic": False,
@@ -1376,6 +1377,59 @@ class GBMRegressorContractTests(unittest.TestCase):
                 GBMRegressor.predict_from_artifact(b"artifact", [[1.0, 0.0]])
         finally:
             base_module._load_native_predictor_predict_batch = original_loader
+
+
+# -- colsample_bynode (per-node feature subsampling) -------------------------
+
+import pytest
+
+from alloygbm import GBMClassifier, GBMRanker
+
+
+def _wide_xy(seed=0, n=400, f=20):
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, f))
+    y = X[:, 0] * 1.3 - X[:, 2] ** 2 + 0.5 * X[:, 5] + rng.normal(scale=0.3, size=n)
+    return X, y
+
+
+@pytest.mark.parametrize("est", [GBMRegressor, GBMClassifier, GBMRanker])
+def test_colsample_bynode_in_param_surface(est):
+    m = est(colsample_bynode=0.5)
+    assert m.colsample_bynode == 0.5
+    assert m.get_params()["colsample_bynode"] == 0.5
+    assert "colsample_bynode=0.5" in repr(m)
+    m.set_params(colsample_bynode=0.7)
+    assert m.get_params()["colsample_bynode"] == 0.7
+
+
+@pytest.mark.parametrize("val", [0.0, -0.1, 1.5])
+def test_colsample_bynode_rejects_out_of_range(val):
+    with pytest.raises(ValueError):
+        GBMRegressor(colsample_bynode=val).fit(*_wide_xy())
+
+
+def test_colsample_bynode_default_is_byte_identical():
+    X, y = _wide_xy()
+    a = GBMRegressor(n_estimators=40, max_depth=5, seed=3).fit(X, y).predict(X)
+    b = (
+        GBMRegressor(n_estimators=40, max_depth=5, seed=3, colsample_bynode=1.0)
+        .fit(X, y)
+        .predict(X)
+    )
+    np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_colsample_bynode_below_one_changes_and_stays_finite():
+    X, y = _wide_xy()
+    a = np.asarray(GBMRegressor(n_estimators=40, max_depth=5, seed=3).fit(X, y).predict(X))
+    b = np.asarray(
+        GBMRegressor(n_estimators=40, max_depth=5, seed=3, colsample_bynode=0.5)
+        .fit(X, y)
+        .predict(X)
+    )
+    assert not np.array_equal(a, b)
+    assert np.all(np.isfinite(b))
 
 
 if __name__ == "__main__":
