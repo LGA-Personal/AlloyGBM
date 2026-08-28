@@ -20,7 +20,8 @@ default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/d
 default_branch="${default_branch:-main}"
 
 # Drop admin entries for worktrees whose directory is already gone.
-git worktree prune
+# Skipped under --dry-run so the flag truly changes nothing.
+if [[ "$DRY_RUN" == 0 ]]; then git worktree prune; fi
 
 removed=0
 path=""; branch=""; detached=0
