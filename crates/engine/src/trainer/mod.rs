@@ -8,7 +8,7 @@ mod policy;
 mod tree_build;
 mod validate;
 
-pub(crate) use interaction::InteractionConstraintIndex;
+pub(crate) use interaction::{InteractionConstraintIndex, filter_histogram_bundle_by_features};
 use monotone::{
     has_active_monotone_constraints, project_monotone_forest, project_monotone_tree,
     validate_monotone_forest,
@@ -1473,6 +1473,10 @@ impl Trainer {
                         morph_tree_ctx,
                                 raw_feature_values,
                         dataset.factor_exposures.as_ref(),
+                        // colsample_bynode is single-output-only in this PR;
+                        // the multiclass path stays unaffected regardless of
+                        // the configured rate (deferred parity follow-up).
+                        None,
                             )?
                         } else {
                             build_tree_level_wise(
@@ -1491,6 +1495,7 @@ impl Trainer {
                         morph_tree_ctx,
                                 raw_feature_values,
                         dataset.factor_exposures.as_ref(),
+                        None,
                             )?
                         };
 
@@ -2734,6 +2739,11 @@ impl Trainer {
             let mut round_split_options = split_options;
             round_split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
             let raw_fv = &active_dataset.matrix.values;
+            let colsample_bynode =
+                (self.params.colsample_bynode < 1.0).then_some(crate::colsample::ColsampleBynode {
+                    rate: self.params.colsample_bynode,
+                    seed: self.params.seed,
+                });
             let (mut candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
@@ -2752,6 +2762,7 @@ impl Trainer {
                         morph_tree_ctx,
                         raw_fv,
                         active_dataset.factor_exposures.as_ref(),
+                        colsample_bynode,
                     )?
                 } else {
                     build_tree_level_wise(
@@ -2770,6 +2781,7 @@ impl Trainer {
                         morph_tree_ctx,
                         raw_fv,
                         active_dataset.factor_exposures.as_ref(),
+                        colsample_bynode,
                     )?
                 };
 

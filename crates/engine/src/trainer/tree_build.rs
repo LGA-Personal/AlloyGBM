@@ -16,6 +16,7 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
+use crate::colsample::{ColsampleBynode, filter_histograms_for_node};
 use crate::error::{EngineError, EngineResult};
 use crate::morph_state::MorphTreeContext;
 use crate::round::apply_partition_leaf_updates;
@@ -23,9 +24,7 @@ use crate::split_options::{
     CategoricalFeatureInfo, FactorSplitContext, LinearContext, PreparedLinearSplit,
     SplitSelectionOptions, feature_weighted_gain,
 };
-use crate::trainer::interaction::{
-    InteractionConstraintIndex, filter_histogram_bundle_by_features,
-};
+use crate::trainer::interaction::InteractionConstraintIndex;
 use crate::trainer::monotone::{
     BoundedChildren, MonotoneBounds, has_active_monotone_constraints,
     monotone_constraint_for_feature, reconstruct_bounded_child,
@@ -126,6 +125,7 @@ struct LevelProposalContext<'a, B> {
     feature_scaler: &'a LinearFeatureScaler,
     factor_exposures: Option<&'a FactorExposureMatrix>,
     constraint_index: Option<&'a InteractionConstraintIndex>,
+    colsample_bynode: Option<ColsampleBynode>,
     histogram_execution: HistogramExecution,
 }
 
@@ -461,17 +461,14 @@ fn propose_level_node<B: BackendOps>(
         &node.row_indices,
     );
     let parent_row_count = node.row_indices.len();
-    let filtered_histograms_storage;
-    let histograms_for_split = match (context.constraint_index, node_active_groups) {
-        (Some(index), Some(active_groups)) => {
-            filtered_histograms_storage =
-                filter_histogram_bundle_by_features(&histograms, |feature| {
-                    index.feature_allowed(active_groups, feature)
-                });
-            &filtered_histograms_storage
-        }
-        _ => &histograms,
-    };
+    let filtered_histograms_storage = filter_histograms_for_node(
+        &histograms,
+        context.constraint_index,
+        node_active_groups,
+        context.colsample_bynode,
+        node_id as u64,
+    );
+    let histograms_for_split = filtered_histograms_storage.as_ref().unwrap_or(&histograms);
     let Some(SelectedNodeSplit {
         mut split,
         prepared_linear_leaf_pair,
@@ -848,6 +845,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
     morph: Option<MorphTreeContext<'_>>,
     raw_feature_values: &[f32],
     factor_exposures: Option<&FactorExposureMatrix>,
+    colsample_bynode: Option<ColsampleBynode>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
@@ -919,6 +917,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
             feature_scaler: &feature_scaler,
             factor_exposures,
             constraint_index: constraint_index.as_ref(),
+            colsample_bynode,
             histogram_execution,
         };
         let work_items = active_nodes
@@ -1121,6 +1120,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
     morph: Option<MorphTreeContext<'_>>,
     raw_feature_values: &[f32],
     factor_exposures: Option<&FactorExposureMatrix>,
+    colsample_bynode: Option<ColsampleBynode>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
     let max_depth = params.max_depth as usize;
@@ -1159,19 +1159,14 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         factor_exposures,
         &root_node.row_indices,
     );
-    let root_filtered_storage;
-    let root_histograms_for_split = match (
+    let root_filtered_storage = filter_histograms_for_node(
+        &root_histograms,
         constraint_index.as_ref(),
         node_active_groups.get(&0).copied(),
-    ) {
-        (Some(idx), Some(ag)) => {
-            root_filtered_storage = filter_histogram_bundle_by_features(&root_histograms, |f| {
-                idx.feature_allowed(ag, f)
-            });
-            &root_filtered_storage
-        }
-        _ => &root_histograms,
-    };
+        colsample_bynode,
+        root_node_id as u64,
+    );
+    let root_histograms_for_split = root_filtered_storage.as_ref().unwrap_or(&root_histograms);
     let root_selection = select_node_split(
         backend,
         binned_matrix,
@@ -1618,18 +1613,16 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 factor_exposures,
                 &smaller_node.row_indices,
             );
-            let smaller_filtered_storage;
-            let smaller_histograms_for_split =
-                match (constraint_index.as_ref(), child_active_groups) {
-                    (Some(idx), Some(ag)) => {
-                        smaller_filtered_storage =
-                            filter_histogram_bundle_by_features(&smaller_histograms, |f| {
-                                idx.feature_allowed(ag, f)
-                            });
-                        &smaller_filtered_storage
-                    }
-                    _ => &smaller_histograms,
-                };
+            let smaller_filtered_storage = filter_histograms_for_node(
+                &smaller_histograms,
+                constraint_index.as_ref(),
+                child_active_groups,
+                colsample_bynode,
+                smaller_node_id as u64,
+            );
+            let smaller_histograms_for_split = smaller_filtered_storage
+                .as_ref()
+                .unwrap_or(&smaller_histograms);
             if let Some(SelectedNodeSplit {
                 split: child_split,
                 prepared_linear_leaf_pair: child_prepared_linear_leaf_pair,
@@ -1674,18 +1667,16 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 factor_exposures,
                 &larger_node.row_indices,
             );
-            let larger_filtered_storage;
-            let larger_histograms_for_split = match (constraint_index.as_ref(), child_active_groups)
-            {
-                (Some(idx), Some(ag)) => {
-                    larger_filtered_storage =
-                        filter_histogram_bundle_by_features(&larger_histograms, |f| {
-                            idx.feature_allowed(ag, f)
-                        });
-                    &larger_filtered_storage
-                }
-                _ => &larger_histograms,
-            };
+            let larger_filtered_storage = filter_histograms_for_node(
+                &larger_histograms,
+                constraint_index.as_ref(),
+                child_active_groups,
+                colsample_bynode,
+                larger_node_id as u64,
+            );
+            let larger_histograms_for_split = larger_filtered_storage
+                .as_ref()
+                .unwrap_or(&larger_histograms);
             if let Some(SelectedNodeSplit {
                 split: child_split,
                 prepared_linear_leaf_pair: child_prepared_linear_leaf_pair,

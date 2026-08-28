@@ -33,6 +33,24 @@ cost versus the existing path. On wide fixtures, however, `k=8` required only
 13.96–20.66% of exhaustive rescoring time. See the
 [PR #136 report](../benchmarks/pl_topk_pr136.md).
 
+## Per-Node Feature Subsampling (`colsample_bynode`)
+
+**Status: implemented (single-output only).** `GBMRegressor` / `GBMClassifier`
+/ `GBMRanker` accept `colsample_bynode: float = 1.0`, closing the per-node
+column-sampling slice of [core review §1.7](../reviews/2026-07-02-v0.12.10-core-resolutions.md#17-low-hanging-accuracy-features).
+At each split-search node, a deterministic, stateless draw (a pure function of
+`seed`, the node's global tree-node id, and the feature index, via the
+engine's existing `mixed_hash`) decides whether a feature is a split
+candidate, composing with `col_subsample`'s per-tree sampling and with any
+`interaction_constraints` at the same per-node histogram filter. When the
+composed draw would leave zero candidate features at a node, colsample is
+dropped for that node so it always has at least the interaction-allowed set.
+Default `1.0` is inert and byte-identical to prior behavior; there is no
+auto-policy for `colsample_bynode` (unlike `col_subsample`, it always uses the
+user-supplied value). Deferred: `colsample_bylevel`, and `colsample_bynode`
+parity on the joint multi-output trainer (`MultiLabelGBMRanker`) and
+multiclass softmax.
+
 ## Architectural Backlog
 
 The following findings from the [July 2026 core review](../reviews/2026-07-02-v0.12.10-core-resolutions.md)

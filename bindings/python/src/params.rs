@@ -125,6 +125,7 @@ pub(crate) fn build_train_params(
     poisson_max_delta_step: f32,
     quantile_alpha: f32,
     pl_split_candidates: usize,
+    colsample_bynode: f32,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -155,6 +156,7 @@ pub(crate) fn build_train_params(
         poisson_max_delta_step,
         quantile_alpha,
         pl_split_candidates,
+        colsample_bynode,
     }
 }
 

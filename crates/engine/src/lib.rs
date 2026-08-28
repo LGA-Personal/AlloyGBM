@@ -84,6 +84,8 @@ pub(crate) use loss::{binary_crossentropy_loss, squared_error_loss};
 mod sampling;
 pub(crate) use sampling::*;
 
+mod colsample;
+
 mod tiling;
 pub(crate) use tiling::*;
 

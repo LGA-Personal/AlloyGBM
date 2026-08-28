@@ -45,6 +45,12 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if !(0.0..=1.0).contains(&params.colsample_bynode) || params.colsample_bynode == 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "colsample_bynode must be in (0.0, 1.0]".to_string(),
+        ));
+    }
+
     if let Some(rounds) = params.early_stopping_rounds
         && rounds == 0
     {

@@ -69,6 +69,7 @@ class _GBMEstimatorCore(
         n_estimators: int = 6,
         row_subsample: float = 1.0,
         col_subsample: float = 1.0,
+        colsample_bynode: float = 1.0,
         early_stopping_rounds: int | None = None,
         min_validation_improvement: float = 0.0,
         min_data_in_leaf: int = 1,
@@ -137,6 +138,8 @@ class _GBMEstimatorCore(
             raise ValueError("row_subsample must be in (0.0, 1.0]")
         if not (0.0 < col_subsample <= 1.0):
             raise ValueError("col_subsample must be in (0.0, 1.0]")
+        if not (0.0 < colsample_bynode <= 1.0):
+            raise ValueError("colsample_bynode must be in (0.0, 1.0]")
         if early_stopping_rounds is not None and int(early_stopping_rounds) <= 0:
             raise ValueError("early_stopping_rounds must be greater than 0 when set")
         if min_validation_improvement < 0.0:
@@ -422,6 +425,7 @@ class _GBMEstimatorCore(
         self.n_estimators = int(n_estimators)
         self.row_subsample = float(row_subsample)
         self.col_subsample = float(col_subsample)
+        self.colsample_bynode = float(colsample_bynode)
         self.early_stopping_rounds = (
             int(early_stopping_rounds)
             if early_stopping_rounds is not None
@@ -527,6 +531,7 @@ class _GBMEstimatorCore(
         n_estimators: int = 6,
         row_subsample: float = 1.0,
         col_subsample: float = 1.0,
+        colsample_bynode: float = 1.0,
         early_stopping_rounds: int | None = None,
         min_validation_improvement: float = 0.0,
         min_data_in_leaf: int = 1,
@@ -590,6 +595,7 @@ class _GBMEstimatorCore(
         self.n_estimators = n_estimators
         self.row_subsample = row_subsample
         self.col_subsample = col_subsample
+        self.colsample_bynode = colsample_bynode
         self.early_stopping_rounds = early_stopping_rounds
         self.min_validation_improvement = min_validation_improvement
         self.min_data_in_leaf = min_data_in_leaf
@@ -671,6 +677,7 @@ class _GBMEstimatorCore(
             f"n_estimators={self.n_estimators}, "
             f"row_subsample={self.row_subsample}, "
             f"col_subsample={self.col_subsample}, "
+            f"colsample_bynode={self.colsample_bynode}, "
             f"early_stopping_rounds={self.early_stopping_rounds}, "
             f"min_validation_improvement={self.min_validation_improvement}, "
             f"min_data_in_leaf={self.min_data_in_leaf}, "
@@ -739,6 +746,7 @@ class _GBMEstimatorCore(
             "n_estimators": self.n_estimators,
             "row_subsample": self.row_subsample,
             "col_subsample": self.col_subsample,
+            "colsample_bynode": self.colsample_bynode,
             "early_stopping_rounds": self.early_stopping_rounds,
             "min_validation_improvement": self.min_validation_improvement,
             "min_data_in_leaf": self.min_data_in_leaf,
@@ -806,6 +814,7 @@ class _GBMEstimatorCore(
             "n_estimators",
             "row_subsample",
             "col_subsample",
+            "colsample_bynode",
             "early_stopping_rounds",
             "min_validation_improvement",
             "min_data_in_leaf",
@@ -966,6 +975,12 @@ class _GBMEstimatorCore(
             if not (0.0 < col_subsample <= 1.0):
                 raise ValueError("col_subsample must be in (0.0, 1.0]")
             self.col_subsample = col_subsample
+
+        if "colsample_bynode" in params:
+            colsample_bynode = float(params["colsample_bynode"])
+            if not (0.0 < colsample_bynode <= 1.0):
+                raise ValueError("colsample_bynode must be in (0.0, 1.0]")
+            self.colsample_bynode = colsample_bynode
 
         if "early_stopping_rounds" in params:
             if params["early_stopping_rounds"] is None:
@@ -1958,6 +1973,7 @@ class _GBMEstimatorCore(
                     max_depth=_effective_max_depth,
                     row_subsample=self.row_subsample,
                     col_subsample=self.col_subsample,
+                    colsample_bynode=self.colsample_bynode,
                     min_validation_improvement=self.min_validation_improvement,
                     seed=self.seed,
                     deterministic=self.deterministic,
@@ -2118,6 +2134,7 @@ class _GBMEstimatorCore(
                 max_depth=_effective_max_depth,
                 row_subsample=self.row_subsample,
                 col_subsample=self.col_subsample,
+                colsample_bynode=self.colsample_bynode,
                 min_validation_improvement=self.min_validation_improvement,
                 seed=self.seed,
                 deterministic=self.deterministic,
@@ -2236,6 +2253,7 @@ class _GBMEstimatorCore(
                 max_depth=_effective_max_depth,
                 row_subsample=self.row_subsample,
                 col_subsample=self.col_subsample,
+                colsample_bynode=self.colsample_bynode,
                 min_validation_improvement=self.min_validation_improvement,
                 seed=self.seed,
                 deterministic=self.deterministic,
@@ -2724,6 +2742,7 @@ class _GBMEstimatorCore(
                 max_depth=self.max_depth,
                 row_subsample=self.row_subsample,
                 col_subsample=self.col_subsample,
+                colsample_bynode=self.colsample_bynode,
                 min_validation_improvement=self.min_validation_improvement,
                 seed=self.seed,
                 deterministic=self.deterministic,
@@ -2804,6 +2823,7 @@ class _GBMEstimatorCore(
                 max_depth=self.max_depth,
                 row_subsample=self.row_subsample,
                 col_subsample=self.col_subsample,
+                colsample_bynode=self.colsample_bynode,
                 min_validation_improvement=self.min_validation_improvement,
                 seed=self.seed,
                 deterministic=self.deterministic,

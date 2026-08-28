@@ -212,6 +212,11 @@ pub struct TrainParams {
     /// Number of numeric features shortlisted by scalar gain for piecewise-linear
     /// split rescoring. Zero preserves scalar split selection; ignored for constant leaves.
     pub pl_split_candidates: usize,
+    /// Per-node feature subsampling fraction (`colsample_bynode`). At each
+    /// split-search node an independent deterministic subset of this fraction
+    /// of features is drawn as candidates, composing with `col_subsample`
+    /// (per-tree) and interaction constraints. `1.0` disables it (inert).
+    pub colsample_bynode: f32,
 }
 
 impl Default for TrainParams {
@@ -245,6 +250,7 @@ impl Default for TrainParams {
             poisson_max_delta_step: 0.7,
             quantile_alpha: 0.5,
             pl_split_candidates: 0,
+            colsample_bynode: 1.0,
         }
     }
 }

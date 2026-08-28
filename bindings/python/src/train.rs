@@ -907,6 +907,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     morph_config=None,
     leaf_model="constant",
     pl_split_candidates=0,
+    colsample_bynode=1.0,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -960,6 +961,7 @@ pub(crate) fn train_regression_artifact(
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
     pl_split_candidates: usize,
+    colsample_bynode: f32,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1045,6 +1047,7 @@ pub(crate) fn train_regression_artifact(
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
         pl_split_candidates,
+        colsample_bynode,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -1133,6 +1136,7 @@ pub(crate) fn train_regression_artifact(
     morph_config=None,
     leaf_model="constant",
     pl_split_candidates=0,
+    colsample_bynode=1.0,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -1188,6 +1192,7 @@ pub(crate) fn train_regression_artifact_dense(
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
     pl_split_candidates: usize,
+    colsample_bynode: f32,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1273,6 +1278,7 @@ pub(crate) fn train_regression_artifact_dense(
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
         pl_split_candidates,
+        colsample_bynode,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -1383,6 +1389,7 @@ pub(crate) fn train_regression_artifact_dense(
     morph_config=None,
     leaf_model="constant",
     pl_split_candidates=0,
+    colsample_bynode=1.0,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -1464,6 +1471,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
     pl_split_candidates: usize,
+    colsample_bynode: f32,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1550,6 +1558,7 @@ pub(crate) fn train_regression_artifact_with_summary(
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
         pl_split_candidates,
+        colsample_bynode,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -1754,6 +1763,7 @@ mod tests {
     morph_config=None,
     leaf_model="constant",
     pl_split_candidates=0,
+    colsample_bynode=1.0,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -1838,6 +1848,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
     pl_split_candidates: usize,
+    colsample_bynode: f32,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -1924,6 +1935,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
         pl_split_candidates,
+        colsample_bynode,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -2070,6 +2082,7 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     morph_config=None,
     leaf_model="constant",
     pl_split_candidates=0,
+    colsample_bynode=1.0,
     leaf_solver="standard",
     dro_radius=0.05,
     dro_metric="wasserstein",
@@ -2154,6 +2167,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
     pl_split_candidates: usize,
+    colsample_bynode: f32,
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
@@ -2246,6 +2260,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha.unwrap_or(0.5),
         pl_split_candidates,
+        colsample_bynode,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
