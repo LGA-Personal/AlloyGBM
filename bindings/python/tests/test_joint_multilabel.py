@@ -1066,6 +1066,106 @@ def test_joint_dro_works_with_morphboost():
     assert np.isfinite(p).all()
 
 
+# ── review 3.3: opt-in joint-DRO robust split-gain ──────────────────────────
+
+
+def _joint_dro_fixture():
+    """Shared fixture for the robust-split-gain tests below: mirrors
+    `test_joint_dro_changes_predictions_vs_standard`'s shape/seed."""
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(64, 4)).astype(np.float32)
+    y = np.column_stack(
+        [
+            rng.integers(0, 2, size=64),
+            rng.integers(0, 2, size=64),
+        ]
+    ).astype(np.float32)
+    group = np.array([8] * 8, dtype=np.int64)  # 8 groups of 8 rows
+    return X, y, group
+
+
+def test_joint_dro_robust_split_default_off_byte_identical():
+    """`dro_robust_split` defaults to False and must be byte-identical to
+    not passing it at all (the pre-existing DRO-leaf-only path)."""
+    X, y, group = _joint_dro_fixture()
+    common = dict(
+        n_estimators=5,
+        learning_rate=0.3,
+        max_depth=3,
+        seed=11,
+        multi_label_mode="joint",
+        leaf_solver="dro",
+        dro_radius=0.5,
+        dro_metric="wasserstein",
+    )
+
+    base = MultiLabelGBMRanker(**common)
+    base.fit(X, y, group=group)
+    p_base = np.asarray(base.predict(X))
+
+    off = MultiLabelGBMRanker(**common, dro_robust_split=False)
+    off.fit(X, y, group=group)
+    p_off = np.asarray(off.predict(X))
+
+    np.testing.assert_array_equal(p_base, p_off)
+
+
+def test_joint_dro_robust_split_on_changes_and_finite():
+    """`dro_robust_split=True` must change predictions vs. the flag-off /
+    default fit, while keeping every prediction finite."""
+    X, y, group = _joint_dro_fixture()
+    common = dict(
+        n_estimators=5,
+        learning_rate=0.3,
+        max_depth=3,
+        seed=11,
+        multi_label_mode="joint",
+        leaf_solver="dro",
+        dro_radius=0.5,
+        dro_metric="wasserstein",
+    )
+
+    off = MultiLabelGBMRanker(**common)
+    off.fit(X, y, group=group)
+    p_off = np.asarray(off.predict(X))
+
+    on = MultiLabelGBMRanker(**common, dro_robust_split=True)
+    on.fit(X, y, group=group)
+    p_on = np.asarray(on.predict(X))
+
+    assert not np.array_equal(p_off, p_on), (
+        "dro_robust_split=True should change joint DRO predictions vs. the "
+        "flag-off / default fit"
+    )
+    assert np.all(np.isfinite(p_on))
+
+
+def test_joint_dro_robust_split_rejected_without_dro():
+    """`dro_robust_split=True` without an active DRO leaf solver is a no-op
+    (mirrors `dro_radius` being inert without `leaf_solver='dro'`): the
+    engine's `effective_dro_config` gate collapses it to standard behavior,
+    so predictions are byte-identical to not passing it at all."""
+    X, y, group = _joint_dro_fixture()
+    common = dict(
+        n_estimators=5,
+        learning_rate=0.3,
+        max_depth=3,
+        seed=11,
+        multi_label_mode="joint",
+        leaf_solver="standard",
+    )
+
+    standard = MultiLabelGBMRanker(**common)
+    standard.fit(X, y, group=group)
+    p_standard = np.asarray(standard.predict(X))
+
+    robust_without_dro = MultiLabelGBMRanker(**common, dro_robust_split=True)
+    robust_without_dro.fit(X, y, group=group)
+    p_robust_without_dro = np.asarray(robust_without_dro.predict(X))
+
+    np.testing.assert_array_equal(p_standard, p_robust_without_dro)
+
+
 # ── v0.10.6: joint factor neutralization ────────────────────────────────────
 
 
