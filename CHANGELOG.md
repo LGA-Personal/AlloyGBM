@@ -4,6 +4,21 @@
 
 ### Added
 
+- **Experimental opt-in joint-DRO robust split selection.**
+  `MultiLabelGBMRanker(multi_label_mode="joint", leaf_solver="dro", dro_radius>0,
+  dro_robust_split=True)` carries a parallel per-bin `grad_sq` buffer so
+  numeric-threshold split *selection* is scored through the DRO effective
+  gradient (previously only leaf values were DRO-robust), reusing the
+  single-output `leaf_gain_term` so the parent-baseline invariant holds.
+  **Off by default and byte-identical when off.** It is explicitly
+  experimental: the committed evidence benchmark
+  (`benchmarks/joint_dro_robust_split_benchmark.py`,
+  [report](docs/benchmarks/joint_dro_robust_split_evidence.md)) found **no
+  reliable quality benefit** on synthetic homoscedastic/heteroscedastic
+  fixtures and a ~1.1–1.3x fit-time cost when enabled; it is retained for
+  evaluation on real heteroscedastic workloads. Native-categorical and
+  MorphBoost joint splits are unaffected even when the flag is on (deferred).
+
 - **Per-node feature subsampling.** `GBMRegressor`, `GBMClassifier`, and
   `GBMRanker` now expose `colsample_bynode` (default `1.0`, range `(0.0,
   1.0]`). At each split-search node, a deterministic draw seeded from

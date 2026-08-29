@@ -13,9 +13,12 @@ split selection can also route through the DRO effective-gradient formula
 (byte-identical to prior behavior) and leaving native-categorical and
 MorphBoost joint splits on their existing gain regardless of the flag.
 
-**The keep-as-opt-in / ship-as-default / defer-further-work decision is left
-to the human reviewer.** This document states the measured numbers plainly
-and does not editorialize a verdict.
+**Decision (reviewer): shipped as an experimental, off-by-default opt-in**
+(`dro_robust_split`), NOT promoted to a default. The numbers below show no
+reliable quality benefit, so it is not a default; it is retained (byte-identical
+when off, trivial added memory) for evaluation on real heteroscedastic
+downstream workloads that synthetic fixtures under-represent. This document
+states the measured numbers plainly.
 
 ## Method
 
