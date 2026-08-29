@@ -168,6 +168,7 @@ fn fixture_params() -> TrainParams {
         quantile_alpha: 0.5,
         pl_split_candidates: 0,
         colsample_bynode: 1.0,
+        joint_dro_robust_split_gain: false,
     }
 }
 

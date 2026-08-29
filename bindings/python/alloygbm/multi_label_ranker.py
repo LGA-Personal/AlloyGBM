@@ -466,6 +466,15 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "leaf_solver",
         "dro_radius",
         "dro_metric",
+        # review 3.3 (evidence-gated): opt-in, joint-only. Makes numeric split
+        # *selection* DRO-robust (not just leaf values) by carrying per-bin
+        # grad_sq and scoring splits through the DRO effective gradient.
+        # Default False is byte-identical to the leaf-only DRO path above.
+        # Only has an effect when leaf_solver="dro" and dro_radius > 0;
+        # otherwise it's a no-op (mirrors `leaf_solver`/`dro_radius` being
+        # inert without each other). Maps to
+        # `TrainParams.joint_dro_robust_split_gain` in the Rust engine.
+        "dro_robust_split",
         # v0.10.6: joint factor neutralization (all three modes).
         # The shared `factor_exposures` kwarg is consumed in `fit()`; only the
         # configuration kwargs flow through `_per_label_kwargs`.
@@ -927,6 +936,9 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             leaf_solver=str(kw.get("leaf_solver", "standard")),
             dro_radius=float(kw.get("dro_radius", 0.05)),
             dro_metric=str(kw.get("dro_metric", "wasserstein")),
+            # review 3.3 (evidence-gated): opt-in robust split-gain. Default
+            # False is byte-identical to the leaf-only DRO path.
+            dro_robust_split=bool(kw.get("dro_robust_split", False)),
             # v0.10.6: joint factor neutralization.
             factor_exposure_values=fe_values,
             factor_exposure_row_count=fe_row_count,

@@ -134,6 +134,7 @@ impl JointPredictorHandle {
     ranking_sigma=1.0_f32,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
+    dro_robust_split=false,
     n_jobs=None::<FitThreadCount>,
 ))]
 pub(crate) fn train_joint_multi_label_ranker(
@@ -188,6 +189,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
+    dro_robust_split: bool,
     n_jobs: Option<FitThreadCount>,
 ) -> PyResult<JointTrainingBridgeResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
@@ -249,6 +251,7 @@ pub(crate) fn train_joint_multi_label_ranker(
                 ranking_sigma,
                 lambdarank_truncation_level,
                 lambdarank_normalize,
+                dro_robust_split,
             )
         })
     })
@@ -306,6 +309,7 @@ fn train_joint_multi_label_ranker_in_fit_pool(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
+    dro_robust_split: bool,
 ) -> PyResult<JointTrainingBridgeResult> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -466,6 +470,7 @@ fn train_joint_multi_label_ranker_in_fit_pool(
         tweedie_variance_power: tweedie_variance_power.unwrap_or(1.5),
         poisson_max_delta_step: poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha: quantile_alpha.unwrap_or(0.5),
+        joint_dro_robust_split_gain: dro_robust_split,
         ..TrainParams::default()
     };
 

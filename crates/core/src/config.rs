@@ -217,6 +217,16 @@ pub struct TrainParams {
     /// of features is drawn as candidates, composing with `col_subsample`
     /// (per-tree) and interaction constraints. `1.0` disables it (inert).
     pub colsample_bynode: f32,
+    /// Opt-in: make joint multi-output DRO split *selection* robust by carrying
+    /// per-bin `grad_sq` and scoring splits through the DRO effective gradient
+    /// (numeric threshold splits only). `false` keeps the standard Newton split
+    /// gain (DRO applies to leaf values only), which is byte-identical to prior
+    /// behavior. Costs ~1.5× joint-histogram memory when enabled. Only takes
+    /// effect on the joint multi-output trainer when `leaf_solver == Dro` and
+    /// `dro_config` has a nonzero radius (see `joint::helpers::effective_dro_config`);
+    /// otherwise it is a no-op. Native-categorical and MorphBoost joint splits
+    /// are unaffected even when this flag is on (deferred scope).
+    pub joint_dro_robust_split_gain: bool,
 }
 
 impl Default for TrainParams {
@@ -251,6 +261,7 @@ impl Default for TrainParams {
             quantile_alpha: 0.5,
             pl_split_candidates: 0,
             colsample_bynode: 1.0,
+            joint_dro_robust_split_gain: false,
         }
     }
 }
