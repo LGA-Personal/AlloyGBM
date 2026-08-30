@@ -580,6 +580,8 @@ impl BackendOps for CpuBackend {
                         options.missing_bin_index,
                         split.default_left,
                     );
+                // A rejected (unbounded) leaf on either side disqualifies this
+                // candidate; the caller then keeps the scalar-gain split.
                 let left_leaf = pl::solve_pl_leaf(
                     &l_xtg,
                     &l_xthx,
@@ -588,10 +590,11 @@ impl BackendOps for CpuBackend {
                         hess_sum: l_hess,
                         learning_rate,
                         l2_lambda: linear_context.l2_lambda,
+                        max_abs_leaf_value: linear_context.max_abs_leaf_value,
                     },
                     &linear_context.regressor_features,
                     feature_scaler,
-                );
+                )?;
                 let right_leaf = pl::solve_pl_leaf(
                     &r_xtg,
                     &r_xthx,
@@ -600,10 +603,11 @@ impl BackendOps for CpuBackend {
                         hess_sum: r_hess,
                         learning_rate,
                         l2_lambda: linear_context.l2_lambda,
+                        max_abs_leaf_value: linear_context.max_abs_leaf_value,
                     },
                     &linear_context.regressor_features,
                     feature_scaler,
-                );
+                )?;
                 split.gain = pl::realized_pl_split_gain(
                     binned_matrix,
                     gradients,
@@ -637,6 +641,7 @@ impl BackendOps for CpuBackend {
         learning_rate: f32,
         l2_lambda: f32,
         feature_scaler: &LinearFeatureScaler,
+        max_abs_leaf_value: f32,
     ) -> Option<(LinearLeaf, LinearLeaf)> {
         let d = linear_histograms.num_regressors;
         if d == 0 {
@@ -659,10 +664,11 @@ impl BackendOps for CpuBackend {
                 hess_sum: l_hs,
                 learning_rate,
                 l2_lambda,
+                max_abs_leaf_value,
             },
             regressor_features,
             feature_scaler,
-        );
+        )?;
         let right_leaf = pl::solve_pl_leaf(
             &r_xtg,
             &r_xthx,
@@ -671,10 +677,11 @@ impl BackendOps for CpuBackend {
                 hess_sum: r_hs,
                 learning_rate,
                 l2_lambda,
+                max_abs_leaf_value,
             },
             regressor_features,
             feature_scaler,
-        );
+        )?;
 
         Some((left_leaf, right_leaf))
     }
@@ -694,6 +701,7 @@ impl BackendOps for CpuBackend {
         right_rows: &[u32],
         learning_rate: f32,
         l2_lambda: f32,
+        max_abs_leaf_value: f32,
     ) -> Option<(LinearLeaf, LinearLeaf)> {
         pl::solve_pl_leaf_pair_from_partitions(
             binned_matrix,
@@ -709,6 +717,7 @@ impl BackendOps for CpuBackend {
             right_rows,
             learning_rate,
             l2_lambda,
+            max_abs_leaf_value,
         )
     }
 }

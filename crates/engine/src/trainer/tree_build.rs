@@ -314,6 +314,7 @@ fn select_node_split<B: BackendOps>(
     feature_scaler: &LinearFeatureScaler,
     parent_leaf_value: f32,
     parent_linear_leaf: Option<&LinearLeaf>,
+    max_abs_leaf_value: f32,
 ) -> EngineResult<Option<SelectedNodeSplit>> {
     let legacy_path = params.leaf_model != LeafModelKind::Linear
         || params.pl_split_candidates == 0
@@ -369,6 +370,7 @@ fn select_node_split<B: BackendOps>(
             let linear_context = LinearContext {
                 regressor_features,
                 l2_lambda: options.l2_lambda,
+                max_abs_leaf_value,
             };
             backend.evaluate_shortlisted_linear_feature(
                 binned_matrix,
@@ -489,6 +491,7 @@ fn propose_level_node<B: BackendOps>(
         context.feature_scaler,
         parent_leaf_value,
         parent_linear_leaf.as_ref(),
+        context.controls.max_abs_leaf_value,
     )?
     else {
         return Ok(LevelNodeOutcome::no_split(local_node_id));
@@ -663,6 +666,7 @@ fn propose_level_node<B: BackendOps>(
                     &partition.right_row_indices,
                     scheduled_lr,
                     context.split_options.l2_lambda,
+                    context.controls.max_abs_leaf_value,
                 )
             })
             .map(|(mut left_absolute, mut right_absolute)| {
@@ -1184,6 +1188,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         &feature_scaler,
         0.0,
         None,
+        controls.max_abs_leaf_value,
     )?;
 
     let Some(SelectedNodeSplit {
@@ -1404,6 +1409,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                         &partition.right_row_indices,
                         scheduled_lr,
                         split_options.l2_lambda,
+                        controls.max_abs_leaf_value,
                     )
                 })
                 .map(|(mut ll_abs, mut rl_abs)| {
@@ -1643,6 +1649,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 &feature_scaler,
                 smaller_parent_val,
                 smaller_parent_ll.as_ref(),
+                controls.max_abs_leaf_value,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1697,6 +1704,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 &feature_scaler,
                 larger_parent_val,
                 larger_parent_ll.as_ref(),
+                controls.max_abs_leaf_value,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1993,6 +2001,7 @@ mod linear_leaf_path_tests {
             &LinearFeatureScaler::identity(3),
             0.0,
             None,
+            f32::INFINITY,
         )
         .expect("selector succeeds")
         .expect("selector returns a split")

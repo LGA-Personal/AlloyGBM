@@ -251,6 +251,7 @@ pub trait BackendOps: Sync {
         _learning_rate: f32,
         _l2_lambda: f32,
         _feature_scaler: &LinearFeatureScaler,
+        _max_abs_leaf_value: f32,
     ) -> Option<(LinearLeaf, LinearLeaf)> {
         None
     }
@@ -275,6 +276,7 @@ pub trait BackendOps: Sync {
         _right_rows: &[u32],
         _learning_rate: f32,
         _l2_lambda: f32,
+        _max_abs_leaf_value: f32,
     ) -> Option<(LinearLeaf, LinearLeaf)> {
         None
     }

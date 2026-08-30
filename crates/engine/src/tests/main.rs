@@ -1884,6 +1884,7 @@ impl BackendOps for CategoricalAncestorLinearPathBackend {
         _right_rows: &[u32],
         _learning_rate: f32,
         _l2_lambda: f32,
+        _max_abs_leaf_value: f32,
     ) -> Option<(alloygbm_core::LinearLeaf, alloygbm_core::LinearLeaf)> {
         let weights = vec![0.5; regressor_features.len()];
         Some((

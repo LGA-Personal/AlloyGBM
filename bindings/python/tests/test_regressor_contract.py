@@ -166,7 +166,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["dart_max_drop"], 5)
         self.assertEqual(params["learning_rate"], 0.1)
         self.assertEqual(params["max_depth"], 6)
-        self.assertEqual(params["n_estimators"], 6)
+        self.assertEqual(params["n_estimators"], 100)
         self.assertEqual(params["row_subsample"], 1.0)
         self.assertEqual(params["col_subsample"], 1.0)
         self.assertIsNone(params["early_stopping_rounds"])

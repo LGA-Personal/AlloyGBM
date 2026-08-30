@@ -445,6 +445,7 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
     let context = LinearContext {
         regressor_features: regressors.clone(),
         l2_lambda: 1.0,
+        max_abs_leaf_value: f32::INFINITY,
     };
     let options = SplitSelectionOptions {
         l2_lambda: 1.0,
@@ -478,6 +479,7 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
             0.1,
             context.l2_lambda,
             &scaler,
+            f32::INFINITY,
         )
         .expect("owned leaves solve");
 

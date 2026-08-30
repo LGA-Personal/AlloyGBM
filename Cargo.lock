@@ -69,6 +69,7 @@ dependencies = [
  "alloygbm-core",
  "alloygbm-engine",
  "alloygbm-predictor",
+ "rayon",
 ]
 
 [[package]]

@@ -41,12 +41,61 @@ const XT_HX_CHUNKS: usize = MAX_PL_MATRIX_ENTRIES / 8;
 const _CHUNKS_DIVIDE_EVENLY: () = assert!(MAX_PL_MATRIX_ENTRIES.is_multiple_of(8));
 const MAX_PL_DIAGONAL_RATIO: f64 = 1_000_000.0;
 
+/// Ridge floor applied relative to the mean diagonal of `XᵀHX`.
+///
+/// `lambda_l2 = 0` is a legitimate and common configuration for scalar
+/// leaves, but for the PL solve it leaves `XᵀHX` unregularized. Collinear
+/// regressors then yield a near-singular system that still passes the
+/// positive-definiteness and diagonal-ratio guards (both look at the
+/// diagonal only), so Cholesky "succeeds" and returns weights that are
+/// orders of magnitude too large. Flooring the ridge at a small fraction
+/// of the mean diagonal bounds the condition number while staying far
+/// below any user-supplied `lambda_l2` (`max()` keeps explicit
+/// regularization exactly as-is).
+const PL_RELATIVE_RIDGE_FLOOR: f64 = 1e-6;
+
+/// Resolve the effective ridge for a PL solve: the caller's `lambda_l2`,
+/// floored at [`PL_RELATIVE_RIDGE_FLOOR`] × the mean diagonal of `XᵀHX`.
+///
+/// Returns `None` when the trace is not finite/positive, which the callers
+/// already treat as "fall back to a scalar leaf".
+fn effective_pl_ridge(
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> Option<f64> {
+    let mut trace = 0.0_f64;
+    for j in 0..d {
+        let diagonal = f64::from(xt_hx[pl_matrix_index(j, j)]);
+        if !diagonal.is_finite() || diagonal < 0.0 {
+            return None;
+        }
+        trace += diagonal;
+    }
+    if !trace.is_finite() || trace <= 0.0 {
+        return None;
+    }
+    let floor = PL_RELATIVE_RIDGE_FLOOR * (trace / d as f64);
+    Some(f64::from(l2_lambda).max(floor))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct LinearLeafSolveParams {
     pub grad_sum: f32,
     pub hess_sum: f32,
     pub learning_rate: f32,
     pub l2_lambda: f32,
+    /// Magnitude ceiling for the leaf's *output* (not just its intercept).
+    ///
+    /// Scalar leaves are clamped to `±max_abs_leaf_value`; a PL leaf's
+    /// `Σ wⱼ·zⱼ` term has no such bound, so a degenerate solve can produce a
+    /// leaf that predicts arbitrarily large values. `solve_pl_leaf` rejects
+    /// such a leaf (returning `None`, i.e. "use a scalar leaf here") rather
+    /// than clamping at evaluation time, which would break the additivity
+    /// the predictor and SHAP both rely on.
+    ///
+    /// Use `f32::INFINITY` to disable the guard.
+    pub max_abs_leaf_value: f32,
 }
 
 #[inline]
@@ -150,6 +199,8 @@ fn factor_regularized_pl_hessian(
         return None;
     }
 
+    let effective_lambda = effective_pl_ridge(xt_hx, d, l2_lambda)?;
+
     let mut a = [0.0_f64; MAX_PL_MATRIX_ENTRIES];
     let mut min_diagonal = f64::INFINITY;
     let mut max_diagonal = 0.0_f64;
@@ -163,16 +214,22 @@ fn factor_regularized_pl_hessian(
             a[j * d + k] = value;
             a[k * d + j] = value;
         }
-        let diagonal = a[j * d + j] + f64::from(l2_lambda);
+        let diagonal = a[j * d + j] + effective_lambda;
         if !diagonal.is_finite() || diagonal <= 0.0 {
             return None;
         }
         a[j * d + j] = diagonal;
-        min_diagonal = min_diagonal.min(diagonal);
-        max_diagonal = max_diagonal.max(diagonal);
+        // The scale-disparity guard is deliberately measured against the
+        // *caller's* regularization, not the floored one: the floor is a
+        // numerical safety net, and letting it inflate small diagonals would
+        // silently weaken this check (it is proportional to the mean
+        // diagonal, so it lifts the smallest entries the most).
+        let user_diagonal = a[j * d + j] - effective_lambda + f64::from(l2_lambda);
+        min_diagonal = min_diagonal.min(user_diagonal);
+        max_diagonal = max_diagonal.max(user_diagonal);
     }
 
-    if max_diagonal / min_diagonal > MAX_PL_DIAGONAL_RATIO {
+    if min_diagonal <= 0.0 || max_diagonal / min_diagonal > MAX_PL_DIAGONAL_RATIO {
         return None;
     }
 
@@ -804,7 +861,7 @@ pub fn solve_pl_leaf(
     params: LinearLeafSolveParams,
     regressor_features: &[u32],
     feature_scaler: &LinearFeatureScaler,
-) -> LinearLeaf {
+) -> Option<LinearLeaf> {
     let d = regressor_features.len();
     const LEAF_EPS: f32 = 1e-6;
 
@@ -818,16 +875,70 @@ pub fn solve_pl_leaf(
         .iter()
         .map(|&w| params.learning_rate * w)
         .collect();
+
+    if !linear_leaf_output_is_bounded(
+        intercept,
+        &weights,
+        xt_hx,
+        params.hess_sum,
+        params.max_abs_leaf_value,
+    ) {
+        return None;
+    }
+
     let (feature_means, feature_inv_stds) =
         feature_scaler.leaf_means_and_inv_stds(regressor_features);
 
-    LinearLeaf::scaled(
+    Some(LinearLeaf::scaled(
         intercept,
         weights,
         regressor_features.to_vec(),
         feature_means,
         feature_inv_stds,
-    )
+    ))
+}
+
+/// Bound the leaf's output magnitude from the statistics already in hand.
+///
+/// `xt_hx` is accumulated in standardized coordinates, so its `j`-th diagonal
+/// is `Σ_rows h·zⱼ²`. Dividing by `hess_sum` gives `E_h[zⱼ²]`, the
+/// hessian-weighted mean square of regressor `j` *within this leaf*, and
+/// `sqrt` of it the corresponding RMS. The triangle inequality then bounds
+/// the typical output magnitude by
+/// `|intercept| + Σⱼ |wⱼ|·RMS(zⱼ)`.
+///
+/// This deliberately over-estimates (it assumes every regressor sits at its
+/// RMS with signs aligned), so it errs toward the safe direction: a
+/// borderline leaf falls back to a scalar leaf. It costs `O(d)` and needs no
+/// pass over the leaf's rows.
+fn linear_leaf_output_is_bounded(
+    intercept: f32,
+    weights: &[f32],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    hess_sum: f32,
+    max_abs_leaf_value: f32,
+) -> bool {
+    if !intercept.is_finite() || !weights.iter().all(|w| w.is_finite()) {
+        return false;
+    }
+    if !max_abs_leaf_value.is_finite() {
+        // Guard disabled; finiteness above is the only requirement.
+        return true;
+    }
+    let hess_sum = f64::from(hess_sum);
+    if !hess_sum.is_finite() || hess_sum <= 0.0 {
+        return false;
+    }
+
+    let mut bound = f64::from(intercept).abs();
+    for (slot, weight) in weights.iter().enumerate() {
+        let second_moment = f64::from(xt_hx[pl_matrix_index(slot, slot)]) / hess_sum;
+        if !second_moment.is_finite() || second_moment < 0.0 {
+            return false;
+        }
+        bound += f64::from(*weight).abs() * second_moment.sqrt();
+    }
+    bound.is_finite() && bound <= f64::from(max_abs_leaf_value)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -845,6 +956,7 @@ pub fn solve_pl_leaf_pair_from_partitions(
     right_rows: &[u32],
     learning_rate: f32,
     l2_lambda: f32,
+    max_abs_leaf_value: f32,
 ) -> Option<(LinearLeaf, LinearLeaf)> {
     let d = regressor_features.len();
     if d == 0 || d > MAX_PL_REGRESSORS || feature_count == 0 {
@@ -869,6 +981,9 @@ pub fn solve_pl_leaf_pair_from_partitions(
         default_left,
     );
 
+    // Both sides must produce bounded leaves; if either is rejected the
+    // caller falls back to scalar leaves for the whole split, keeping the
+    // two children on the same leaf model.
     Some((
         solve_pl_leaf(
             &l_xtg,
@@ -878,10 +993,11 @@ pub fn solve_pl_leaf_pair_from_partitions(
                 hess_sum: l_hs,
                 learning_rate,
                 l2_lambda,
+                max_abs_leaf_value,
             },
             regressor_features,
             feature_scaler,
-        ),
+        )?,
         solve_pl_leaf(
             &r_xtg,
             &r_xthx,
@@ -890,10 +1006,11 @@ pub fn solve_pl_leaf_pair_from_partitions(
                 hess_sum: r_hs,
                 learning_rate,
                 l2_lambda,
+                max_abs_leaf_value,
             },
             regressor_features,
             feature_scaler,
-        ),
+        )?,
     ))
 }
 
@@ -1025,6 +1142,7 @@ mod tests {
         LinearContext {
             regressor_features: vec![0],
             l2_lambda: 1.0,
+            max_abs_leaf_value: f32::INFINITY,
         }
     }
 
@@ -1122,6 +1240,109 @@ mod tests {
             cholesky_solve_alpha(&xtg, &xt_hx, 2, 0.0),
             [0.0; MAX_PL_REGRESSORS]
         );
+    }
+
+    #[test]
+    fn ridge_floor_applies_only_when_below_caller_lambda() {
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        xt_hx[pl_matrix_index(0, 0)] = 1_000.0;
+        xt_hx[pl_matrix_index(1, 1)] = 3_000.0;
+        // mean diagonal = 2000 => floor = 2000 * 1e-6 = 2e-3
+        let floored = effective_pl_ridge(&xt_hx, 2, 0.0).expect("finite trace");
+        assert!((floored - 2e-3).abs() < 1e-9, "floored={floored}");
+
+        // An explicit lambda above the floor is used verbatim.
+        let explicit = effective_pl_ridge(&xt_hx, 2, 5.0).expect("finite trace");
+        assert_eq!(explicit, 5.0);
+
+        // A degenerate (all-zero) matrix has no usable scale.
+        let zero = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        assert!(effective_pl_ridge(&zero, 2, 0.0).is_none());
+    }
+
+    #[test]
+    fn unregularized_collinear_system_is_bounded_by_the_ridge_floor() {
+        // Two near-duplicate regressors: positive definite and with a benign
+        // diagonal ratio, so neither pre-existing guard fires, but the system
+        // is near-singular. Without the ridge floor the solve returns
+        // enormous weights; with it the weights stay finite and small.
+        let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        xtg[0] = 1.0;
+        xtg[1] = -1.0;
+        xt_hx[pl_matrix_index(0, 0)] = 1_000.0;
+        xt_hx[pl_matrix_index(0, 1)] = 999.999_9;
+        xt_hx[pl_matrix_index(1, 1)] = 1_000.0;
+
+        let alpha = cholesky_solve_alpha(&xtg, &xt_hx, 2, 0.0);
+        assert!(
+            alpha.iter().all(|w| w.is_finite()),
+            "weights must stay finite: {alpha:?}"
+        );
+        assert!(
+            alpha.iter().all(|w| w.abs() < 1_000.0),
+            "ridge floor should bound the solve, got {alpha:?}"
+        );
+    }
+
+    #[test]
+    fn leaf_output_guard_rejects_unbounded_linear_term() {
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        // E_h[z^2] = 400 / 4 = 100 => RMS(z) = 10.
+        xt_hx[pl_matrix_index(0, 0)] = 400.0;
+        let hess_sum = 4.0_f32;
+
+        // |intercept| + |w| * RMS = 1 + 0.5 * 10 = 6 <= 10 -> accepted.
+        assert!(linear_leaf_output_is_bounded(
+            1.0,
+            &[0.5],
+            &xt_hx,
+            hess_sum,
+            10.0
+        ));
+        // 1 + 2.0 * 10 = 21 > 10 -> rejected.
+        assert!(!linear_leaf_output_is_bounded(
+            1.0,
+            &[2.0],
+            &xt_hx,
+            hess_sum,
+            10.0
+        ));
+        // Non-finite weights are always rejected.
+        assert!(!linear_leaf_output_is_bounded(
+            1.0,
+            &[f32::NAN],
+            &xt_hx,
+            hess_sum,
+            f32::INFINITY
+        ));
+        // An infinite ceiling disables the magnitude test but keeps finiteness.
+        assert!(linear_leaf_output_is_bounded(
+            1.0,
+            &[1e9],
+            &xt_hx,
+            hess_sum,
+            f32::INFINITY
+        ));
+    }
+
+    #[test]
+    fn solve_pl_leaf_returns_none_when_output_exceeds_ceiling() {
+        let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        xtg[0] = -50.0;
+        xt_hx[pl_matrix_index(0, 0)] = 100.0;
+        let scaler = LinearFeatureScaler::identity(1);
+        let params = |max_abs_leaf_value: f32| LinearLeafSolveParams {
+            grad_sum: 1.0,
+            hess_sum: 1.0,
+            learning_rate: 1.0,
+            l2_lambda: 0.0,
+            max_abs_leaf_value,
+        };
+
+        assert!(solve_pl_leaf(&xtg, &xt_hx, params(1e-3), &[0], &scaler).is_none());
+        assert!(solve_pl_leaf(&xtg, &xt_hx, params(f32::INFINITY), &[0], &scaler).is_some());
     }
 
     #[test]
@@ -1313,6 +1534,7 @@ mod tests {
                 let context = LinearContext {
                     regressor_features: vec![0],
                     l2_lambda: 0.5,
+                    max_abs_leaf_value: f32::INFINITY,
                 };
                 assert_eq!(
                     best_split_linear_for_bins(
