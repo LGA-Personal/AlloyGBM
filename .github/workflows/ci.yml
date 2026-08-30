@@ -120,6 +120,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python benchmarks/review_guardrails.py --quick --gate
 
+      - name: Mode quality gate contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_mode_quality_gate.py -q
+
+      - name: Per-mode quality gates
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/mode_quality_gate.py --quick --gate
+
       - name: Auto-policy benchmark contract tests
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python -m pytest benchmarks/tests/test_auto_policy_benchmark.py -q
