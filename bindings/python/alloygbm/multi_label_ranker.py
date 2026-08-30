@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from .ranker import GBMRanker
+from .ranker import DEFAULT_LAMBDARANK_TRUNCATION_LEVEL, GBMRanker
 from ._regressor._core import _validate_n_jobs
 from ._regressor._quantization import _QuantizationMixin
 from ._regressor._shap import _ShapMixin
@@ -845,9 +845,14 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             ic_list: list[list[int]] = []
         else:
             ic_list = [[int(x) for x in group] for group in ic_raw]
+        # Mirror GBMRanker's default so joint and independent modes truncate
+        # identically when the caller does not specify a level.
         joint_lambdarank_truncation_level = (
             GBMRanker._validate_lambdarank_truncation_level(
-                kw.get("lambdarank_truncation_level")
+                kw.get(
+                    "lambdarank_truncation_level",
+                    DEFAULT_LAMBDARANK_TRUNCATION_LEVEL,
+                )
             )
         )
         joint_lambdarank_normalize = GBMRanker._validate_lambdarank_normalize(
