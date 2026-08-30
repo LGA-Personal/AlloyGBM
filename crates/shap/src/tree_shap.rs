@@ -854,12 +854,8 @@ pub(crate) fn explain_interactions_from_model(
     let all_matrices: Vec<Vec<Vec<f32>>> = rows
         .par_iter()
         .map(|row| {
-            let mut matrix_f64 = tree_shap_interactions_row(
-                &std_trees,
-                row,
-                model.feature_count,
-                use_float_compare,
-            );
+            let mut matrix_f64 =
+                tree_shap_interactions_row(&std_trees, row, model.feature_count, use_float_compare);
 
             if has_linear {
                 let mut linear_phi = vec![0.0_f64; model.feature_count];

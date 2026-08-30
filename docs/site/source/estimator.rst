@@ -23,6 +23,13 @@ Core parameters
   - per-round row sampling fraction; ignored when ``boosting_mode="goss"`` (GOSS uses gradient-based sampling instead).
 - ``col_subsample: float = 1.0``
   - per-round feature sampling fraction
+- ``colsample_bynode: float = 1.0`` -- fraction of features considered as split
+  candidates at each individual tree node, composing multiplicatively with
+  ``col_subsample``'s per-tree sampling and with any ``interaction_constraints``.
+  Must be in ``(0.0, 1.0]``; ``1.0`` is inert. Supported on ``GBMRegressor``,
+  binary ``GBMClassifier``, and ``GBMRanker``. Multiclass ``GBMClassifier`` and
+  ``MultiLabelGBMRanker(multi_label_mode="joint")`` reject a value below ``1.0``
+  rather than silently ignoring it.
 - ``quantile_alpha: float = 0.5``
   - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 

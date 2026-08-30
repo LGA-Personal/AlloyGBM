@@ -28,8 +28,9 @@ one-dimensional inputs are rejected before native training.
     `col_subsample`'s per-round (per-tree) sampling and with any
     `interaction_constraints`. Default `1.0` disables it (inert, byte-identical
     to prior behavior). Must be in `(0.0, 1.0]`. Single-output estimators only
-    (`GBMRegressor`, `GBMClassifier`, `GBMRanker`); not yet supported on
-    `MultiLabelGBMRanker(multi_label_mode="joint")` or multiclass softmax.
+    (`GBMRegressor`, binary `GBMClassifier`, `GBMRanker`). Multiclass
+    `GBMClassifier` and `MultiLabelGBMRanker(multi_label_mode="joint")` reject
+    a value below `1.0` rather than silently ignoring it.
 - `quantile_alpha: float = 0.5`
   - Target quantile for `"quantile"` regression. Must be strictly in `(0.0, 1.0)`.
 

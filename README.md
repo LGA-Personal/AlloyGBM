@@ -24,6 +24,25 @@ AlloyGBM is a good fit when you want:
 - NaN/missing value support out of the box
 - model persistence via pickle, save/load, or artifact export
 
+## Stability
+
+AlloyGBM `1.0.0` is the first stable release. From this version onward,
+semantic versioning covers:
+
+- **The public Python API** — `GBMRegressor`, `GBMClassifier`, `GBMRanker`,
+  `MultiLabelGBMRanker`, `alloygbm.evaluation`, `alloygbm.validation`,
+  including constructor parameters, fitted attributes, and method signatures.
+- **The binary artifact format** — a `1.x` artifact stays readable by any later
+  `1.x` release.
+- **Determinism** — a fixed `seed` with `deterministic=True` produces
+  byte-identical artifacts across repeated fits *and* across `n_jobs` thread
+  counts.
+
+Not covered: the Rust crates (internal, not published to crates.io), exact
+floating-point model values across releases (algorithmic fixes may shift
+predictions; quality is guarded by benchmark gates), and parameters documented
+as experimental.
+
 ## Installation
 
 PyPI:
@@ -41,7 +60,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.12.10`:
+Wheel targets for `1.0.0`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -381,7 +400,11 @@ artifact_bytes = model.artifact_bytes
 - Warm-starting / incremental training via `warm_start=True`
 - Up to 65,535 bins per feature (`continuous_binning_max_bins`)
 - Opt-in exact exclusive feature bundling for sparse numeric/one-hot columns
-  via `feature_bundling="exact"`
+  via `feature_bundling="exact"` (requires `continuous_binning_strategy="linear"`;
+  reduces memory traffic rather than fit time — see Current Limitations)
+- Per-node feature subsampling via `colsample_bynode`, alongside per-tree `col_subsample`
+- Explicit fit-time thread control via `n_jobs` (fit-scoped Rayon pool; results are
+  identical regardless of thread count)
 - Multiple categorical column support via `categorical_feature_indices`
 - Early stopping with `best_iteration_`, `best_score_`, `evals_result_`
 - Objective-aware training metric tracking (RMSE, log-loss, accuracy, NDCG)
@@ -389,7 +412,7 @@ artifact_bytes = model.artifact_bytes
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 - DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
 - GOSS (gradient-based one-side sampling, LightGBM-style) via `boosting_mode="goss"` + `goss_top_rate` / `goss_other_rate` on regression, binary classification, and ranking. As of v0.10.1, GOSS is also supported on **multiclass classification** (K ≥ 3 classes) — per-row score `s_i = Σₖ |g_{i,k}|` (LightGBM convention) drives a shared sampling mask across all K class gradient buffers. Default `boosting_mode="standard"` is byte-identical to v0.7.5.
-- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. The calibrated public default for `dart_max_drop` is `5`; pass `dart_max_drop=50` to restore the previous default explicitly. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0. **DART + `warm_start` continuation** is supported (v0.10.0+) — pass a fitted DART model via `fit(..., init_model=prior_model)` to add more rounds on top. As of v0.10.1, DART is also supported on **multiclass classification** (K ≥ 3 classes) including warm-start. v0.10.2 lifts the `tree_growth="level"` restriction — multiclass DART now also works with `tree_growth="leaf"` + `max_leaves`.
+- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) / `dart_skip_drop` on regression, binary classification, and ranking. The calibrated public default for `dart_max_drop` is `5`; pass `dart_max_drop=50` to restore the previous default explicitly. `dart_skip_drop` defaults to `0.5` (matching LightGBM): half of rounds skip dropout entirely, which is both faster and more accurate than always dropping. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0. **DART + `warm_start` continuation** is supported (v0.10.0+) — pass a fitted DART model via `fit(..., init_model=prior_model)` to add more rounds on top. As of v0.10.1, DART is also supported on **multiclass classification** (K ≥ 3 classes) including warm-start. v0.10.2 lifts the `tree_growth="level"` restriction — multiclass DART now also works with `tree_growth="leaf"` + `max_leaves`.
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
 - Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`) with optional `factor_exposure_transform`
 - LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)
@@ -425,7 +448,8 @@ The benchmark suite compares AlloyGBM against XGBoost, LightGBM, and CatBoost ac
 
 - AlloyGBM is strongest on `panel_time_series`
 - AlloyGBM is strong on `dow_jones_financial`
-- AlloyGBM is competitive on `dense_numeric`, trails on `california_housing` and `bike_sharing`
+- AlloyGBM leads all three peer libraries on `bike_sharing`
+- AlloyGBM is competitive on `dense_numeric`, trails on `california_housing`
 
 **Classification:**
 
@@ -440,11 +464,18 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
+- Parallel scaling is well short of linear: on a 10-core machine at 250k rows x
+  50 features, `n_jobs=1` takes 4.64 s against 2.40 s with all threads (1.9x on
+  10 cores). Single-threaded work is competitive; thread utilization is the
+  main gap against peer libraries, and is the headline post-1.0 theme.
 - `MultiLabelGBMRanker(multi_label_mode="joint")` supports built-in `squared_error` / `queryrmse` / `rank:*` objectives, plus (as of v0.12.8) the `poisson` / `gamma` / `tweedie` / `quantile` regression objectives. v0.10.2 added leaf-wise growth + `max_leaves`, `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample`. v0.10.3 added native-categorical Python wiring, joint GOSS, joint DART, and joint warm-start. v0.10.4 added joint MorphBoost (`training_mode="morph"` + the full morph kwargs). v0.10.5 added joint DRO leaves (`leaf_solver="dro"` + `dro_radius` / `dro_metric`). **v0.10.6** added joint factor neutralization (all three modes: `pre_target`, `per_round_gradient`, `split_penalty`). Joint mode also accepts `ranking_sigma`, `lambdarank_truncation_level`, and `lambdarank_normalize` — the joint trainer now has full feature parity with the single-output path.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 - `feature_bundling="exact"` is a conservative, training-only optimization for
   zero-conflict sparse numeric groups; it is not supported by joint
-  `MultiLabelGBMRanker`
+  `MultiLabelGBMRanker`. It requires `continuous_binning_strategy="linear"`
+  (bundle discovery treats bin 0 as a feature's empty value, which the default
+  quantile binning does not guarantee — a `UserWarning` names this), and it
+  currently reduces memory traffic rather than fit time
 - Quantile regression objective (`"quantile"`) is supported with linear leaves, DART, and MorphBoost, and (as of v0.12.8) on `GBMRanker` and `MultiLabelGBMRanker` (both modes). It is still rejected for classification and multiclass training.
 
 See [docs/limitations.md](docs/limitations.md) for the full list.

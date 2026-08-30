@@ -302,7 +302,16 @@ mod tests {
         // kick in for every seed.
         let weights = vec![1.0; 100];
         for seed in 0u64..20 {
-            let got = select_dropouts(100, 0.0001, 50, DartSampleType::Uniform, &weights, seed, 0, 0.0);
+            let got = select_dropouts(
+                100,
+                0.0001,
+                50,
+                DartSampleType::Uniform,
+                &weights,
+                seed,
+                0,
+                0.0,
+            );
             assert!(!got.is_empty(), "seed {seed} produced zero drops");
         }
     }

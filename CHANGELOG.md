@@ -1,8 +1,42 @@
 # Changelog
 
-## Unreleased
+## v1.0.0 (2026-08-29)
 
-### Changed (breaking)
+**First stable release.** AlloyGBM's public API, artifact format, and
+determinism guarantees are now covered by semantic versioning: breaking changes
+require a major version. See "Stability guarantees" below for exactly what is
+and is not covered.
+
+This release is the outcome of three review passes (see `docs/reviews/`) that
+audited the whole workspace for correctness, efficiency, and release
+readiness. It carries four deliberate breaking changes to defaults — each one
+because the old default was measurably the wrong choice — and fixes three
+defects that could silently degrade model quality.
+
+### Stability guarantees
+
+Covered by semantic versioning from this release onward:
+
+- The public Python API: `GBMRegressor`, `GBMClassifier`, `GBMRanker`,
+  `MultiLabelGBMRanker`, `alloygbm.evaluation`, `alloygbm.validation`, and
+  their constructor parameters, fitted attributes, and method signatures.
+- The binary artifact format (`AGBM` magic, versioned sections). A v1.x
+  artifact will be readable by any later 1.x release.
+- Determinism: a fixed `seed` with `deterministic=True` produces byte-identical
+  artifacts across repeated fits **and across thread counts** (`n_jobs`).
+
+Explicitly *not* covered:
+
+- The Rust crates (`alloygbm-core`, `-engine`, `-backend-cpu`, `-predictor`,
+  `-shap`, `-categorical`) are internal implementation detail and are not
+  published to crates.io. Their APIs may change in any release.
+- Exact floating-point model *values* across releases. Algorithmic fixes and
+  optimizations may shift predictions; quality is guarded by the benchmark
+  gates rather than by bit-exact reproduction across versions.
+- Parameters documented as experimental (currently `dro_robust_split`).
+
+
+### Changed (breaking, v1.0 readiness review)
 
 - **`n_estimators` now defaults to `100`** (was `6`) on `GBMRegressor`,
   `GBMClassifier`, `GBMRanker`, and the `MultiLabelGBMRanker` joint bridge.
@@ -23,7 +57,7 @@
   `predict_log_proba` is now exactly `log(predict_proba)`, including `-inf`
   on a true zero, per the sklearn contract.
 
-### Fixed
+### Fixed (v1.0 readiness review)
 
 - **Piecewise-linear leaves could diverge with `lambda_l2=0`.** A
   near-singular `XᵀHX` passed the positive-definiteness and diagonal-ratio
@@ -42,7 +76,7 @@
   It now emits a `UserWarning` naming the cause, and the docs state both the
   bin-0 requirement and the fact that bundling is not currently a speed knob.
 
-### Performance
+### Performance (v1.0 readiness review)
 
 - **SHAP is dramatically faster on typical models.** Any model splitting on
   ≤ 25 distinct features was routed to the legacy brute-force `O(2^N)`
@@ -51,7 +85,7 @@
   Rows are also explained in parallel. Measured on a 50-tree depth-6
   12-feature model over 200 rows: 18.2s -> 0.015s (91 ms/row -> 0.07 ms/row).
 
-### Testing
+### Testing (v1.0 readiness review)
 
 - **New per-mode quality gate** (`benchmarks/mode_quality_gate.py`, wired
   into CI) trains 21 mode configurations on fixed seeds and asserts each
@@ -63,7 +97,7 @@
   its scaling check exercises the regime where histogram construction
   dominates.
 
-### Added
+### Added (pre-1.0 development series)
 
 - **Experimental opt-in joint-DRO robust split selection.**
   `MultiLabelGBMRanker(multi_label_mode="joint", leaf_solver="dro", dro_radius>0,
@@ -113,7 +147,7 @@
   median cost versus `0`, although `k=8` used only 13.96–20.66% of exhaustive
   rescoring time on wide fixtures. Prediction and artifact formats are unchanged.
 
-### Fixed
+### Fixed (from the pre-1.0 development series)
 
 - **Vectorized exhaustive MorphBoost numeric split scanning.** Ordinary
   post-warmup numeric Morph scans now evaluate all thresholds and both missing
@@ -202,7 +236,7 @@
   conflicts fall back to the original matrix, fitted diagnostics report
   activation and effective feature counts, and `"off"` remains the default.
 
-### Performance
+### Performance (from the pre-1.0 development series)
 
 - **Vectorized active numeric DRO split scanning.** Scalar-model numeric DRO now
   evaluates every valid threshold and both missing directions with an exhaustive

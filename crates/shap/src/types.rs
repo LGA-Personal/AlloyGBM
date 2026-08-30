@@ -2,9 +2,9 @@ use alloygbm_core::{
     deserialize_model_artifact_v1, format_required_section_mode_error,
     required_section_compatibility_report,
 };
-use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel};
 #[cfg(test)]
 use alloygbm_engine::TrainedStump;
+use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel};
 use std::collections::HashMap;
 
 #[cfg(test)]

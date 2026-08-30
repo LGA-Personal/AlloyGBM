@@ -113,7 +113,10 @@ each library behaves under different learning-rate / depth / round budgets.
 - AlloyGBM is strong on `dow_jones_financial`, especially under the deeper
   low-learning-rate profile.
 - AlloyGBM is competitive but not leading on `dense_numeric`.
-- AlloyGBM currently trails on `california_housing` and `bike_sharing`.
+- AlloyGBM now leads XGBoost, LightGBM, and CatBoost on `bike_sharing`
+  (v1.0.0 re-run, seed 7: AlloyGBM 68.72 RMSE against XGBoost 70.95,
+  LightGBM 72.53, CatBoost 75.80).
+- AlloyGBM currently trails on `california_housing`.
 - AlloyGBM is typically the fastest trainer on most scenario/profile rows.
 
 ### Classification

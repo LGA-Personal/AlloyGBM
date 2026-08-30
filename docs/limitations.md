@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.10. (v0.12.10 was a patch optimization release — PL-leaf solve speedups, faster numeric split-penalty neutralization, factor exposure preprocessing, and package-version export — and changed none of the limitations below.)
+Last updated for v1.0.0.
 
 ## Remaining Limitations
 
@@ -10,21 +10,51 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### DART expected-drop default
+### 2. Parallel scaling is well short of linear
+
+Training parallelizes across feature tiles and across nodes within a level, but
+thread utilization is the main performance gap against peer libraries. Measured
+on a 10-core machine at 250k rows × 50 features: `n_jobs=1` takes 4.64 s and
+unlimited threads 2.40 s — a 1.9× speedup on 10 cores (LightGBM: 1.44 s). The
+single-threaded work is competitive; scaling is not. Tracked as the headline
+post-1.0 theme in `docs/roadmap/current.md`.
+
+### 3. Exact feature bundling is conservative, training-only, and not a speedup
+
+`feature_bundling="exact"` reduces storage and histogram memory traffic, but
+per-original-feature histograms are still materialized and scanned, so
+wall-clock fit time is typically unchanged. Realizing the usual EFB win
+requires a bundle-aware split scanner, which would forfeit the current
+guarantee that bundled and unbundled fits produce byte-identical artifacts.
+
+It also requires each sparse feature's dominant value to occupy bin 0, which
+only `continuous_binning_strategy="linear"` reliably produces — under the
+default `"quantile"` strategy no bundles form, and a `UserWarning` names this
+rather than failing silently.
+
+Discovery is deliberately conservative: it targets contiguous, zero-conflict
+sparse numeric groups in otherwise dense input, and skips categorical,
+constrained, missing-valued, all-zero, and greater-than-quarter-occupied
+columns; ambiguous conflict patterns and validation conflicts leave the
+original matrix active. There is no sparse-matrix input API or approximate
+conflict handling. Independent `MultiLabelGBMRanker` fits are supported, but
+`multi_label_mode="joint"` rejects active feature bundling.
+
+### 4. DART expected-drop default
 
 The public DART default is calibrated to `dart_max_drop=5` from a fixed
 five-seed, multi-task evidence matrix. Callers that need the previous default
 must pass `dart_max_drop=50` explicitly; explicit caps retain their existing
 artifact and prediction behavior.
 
-### 4. GLM and Quantile regression objectives on Classifier / multiclass
+### 5. GLM and Quantile regression objectives on Classifier / multiclass
 
 `objective="poisson"`, `"gamma"`, `"tweedie"`, and `"quantile"` are supported on
 single-output `GBMRegressor`, `GBMRanker`, and `MultiLabelGBMRanker`
 (both `multi_label_mode="independent"` and `"joint"`). The Classifier and
 multiclass softmax paths still reject these objectives.
 
-### 5. `neutralization="pre_target"` is squared-error-only
+### 6. `neutralization="pre_target"` is squared-error-only
 
 The pre-target factor-neutralization mode residualizes targets before
 training. For non-squared-error objectives the
@@ -32,16 +62,6 @@ residualize-target == residualize-gradient identity that pre_target
 relies on breaks down (the gradient under log-link is `μ − y`, not
 `pred − y`). Use `"per_round_gradient"` or `"split_penalty"` with GLM
 objectives.
-
-### 6. Exact feature bundling is conservative and training-only
-
-`feature_bundling="exact"` targets contiguous, zero-conflict sparse numeric
-groups in otherwise dense input. It skips categorical, constrained,
-missing-valued, all-zero, and greater-than-quarter-occupied columns; ambiguous
-conflict patterns and validation conflicts leave the original matrix active.
-It does not add a sparse-matrix input API or approximate conflict handling.
-Independent `MultiLabelGBMRanker` fits are supported, but
-`multi_label_mode="joint"` rejects active feature bundling.
 
 ## Resolved (Previously Limitations)
 

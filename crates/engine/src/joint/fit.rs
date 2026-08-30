@@ -459,7 +459,9 @@ fn fit_joint_inner(
         // fits on residuals of the dropped-out ensemble (mirrors the
         // single-output DART flow at crates/engine/src/lib.rs:4895).
         let dropped_tree_ids: Vec<usize> =
-            if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) = dart_params {
+            if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) =
+                dart_params
+            {
                 let contribution = dart_contribution.as_mut().ok_or_else(|| {
                     "joint DART contribution buffer was not initialized".to_string()
                 })?;

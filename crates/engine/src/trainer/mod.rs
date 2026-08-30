@@ -1305,7 +1305,9 @@ impl Trainer {
             // (PR review C1).
             let mut dart_predictions_backup: Option<Vec<Vec<f32>>> = None;
             let (dropped_tree_indices, material_dropped_classes): (Vec<usize>, Vec<usize>) =
-                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) = dart_params {
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) =
+                    dart_params
+                {
                     let dart_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
                         EngineError::ContractViolation(
                             "multiclass DART contribution buffer was not initialized".to_string(),
@@ -1319,7 +1321,6 @@ impl Trainer {
                         &dart_state.tree_weights,
                         sampling_seed_base,
                         effective_round,
-
                         skip_drop,
                     );
                     let material_classes =
@@ -2586,7 +2587,9 @@ impl Trainer {
             let mut dart_predictions_backup: Option<Vec<f32>> = None;
             let mut dart_validation_backup: Option<Vec<f32>> = None;
             let dropped_tree_ids: Vec<usize> =
-                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) = dart_params {
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) =
+                    dart_params
+                {
                     let train_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
                         EngineError::ContractViolation(
                             "DART contribution buffer was not initialized".to_string(),
@@ -2600,7 +2603,6 @@ impl Trainer {
                         &dart_state.tree_weights,
                         sampling_seed_base,
                         effective_round_index,
-
                         skip_drop,
                     );
                     train_contribution.fill(0.0);

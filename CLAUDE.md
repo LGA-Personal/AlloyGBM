@@ -22,8 +22,9 @@ AlloyGBM/
       histogram.rs              # GradientPair, leaf_effective_gradient, leaf_gain_term, FeatureTile, NodeSlice, NodeStats, HistogramBin, FeatureHistogram, HistogramBundle
       linear_histogram.rs       # MAX_PL_*, LinearHistogramBin, pl_matrix_index, LinearFeatureHistogram, LinearHistogramBundle, subtract_linear_histogram_bundle
       leaf.rs                   # LinearLeaf, LeafValue, SplitCandidate, PartitionResult
-      artifact_format.rs        # MODEL_FORMAT_V1 / MODEL_BINARY_MAGIC / CATEGORICAL_STATE_FORMAT_V1 constants, ModelMetadata, ModelBinaryHeader, ModelSectionKind, ModelSectionDescriptor, all 8 payload types (Morph/Dro/Neutralization/LinearLeafCoefficients/DartTreeWeights/MultiOutputLeafValues/FeatureBaseline + CategoricalState/NativeCategoricalSplits), every encode_*/decode_* helper, required_section_compatibility_report, serialize_metadata_json/deserialize_metadata_json, serialize_model_artifact_v1/deserialize_model_artifact_v1, private JSON parsing helpers (1,710 lines — the largest leaf module)
+      artifact_format.rs        # MODEL_FORMAT_V1 / MODEL_BINARY_MAGIC / CATEGORICAL_STATE_FORMAT_V1 constants, ModelMetadata, ModelBinaryHeader, ModelSectionKind, ModelSectionDescriptor, all 8 payload types (Morph/Dro/Neutralization/LinearLeafCoefficients/DartTreeWeights/MultiOutputLeafValues/FeatureBaseline + CategoricalState/NativeCategoricalSplits), every encode_*/decode_* helper, required_section_compatibility_report, serialize_metadata_json/deserialize_metadata_json, serialize_model_artifact_v1/deserialize_model_artifact_v1, serde-backed metadata JSON (v1.0.0: key-driven, order-independent) (~1,860 lines — the largest leaf module)
       validation.rs             # validate_train_params, validate_dataset_*, validate_binned_matrix, validate_model_contract_v1
+      feature_bundling.rs       # FeatureBundleAssignment, FeatureBundleMap, discover_exact_feature_bundles (EFB)
       simd.rs                   # SIMD primitives (sum_f32, sum_squares_f32)
       tests/mod.rs              # #[cfg(test)] entry
       tests/main.rs             # Core unit tests
@@ -60,7 +61,10 @@ AlloyGBM/
         interaction.rs          # InteractionConstraintIndex + filter_histogram_bundle_by_features
         policy.rs               # split_selection_options_for_training, should_apply_auto_split_l2
         validate.rs             # validate_* fit-contract helpers
-      dart.rs                   # DART dropout + normalize helpers (v0.9.0)
+        monotone.rs             # MonotoneBounds bounds-propagation for monotone constraints
+        multiclass_build.rs     # Multiclass per-class round construction
+      colsample.rs              # ColsampleBynode per-node feature sampling (v1.0.0)
+      dart.rs                   # DART dropout + normalize + skip_drop helpers (v0.9.0; skip_drop v1.0.0)
       shared_histogram.rs       # K-output MultiOutputHistogram primitive (v0.10.0)
       joint/                    # (v0.12.2: joint.rs decomposed into focused modules)
         mod.rs                  # ~42 lines: mod declarations + pub use re-exports only
@@ -73,25 +77,28 @@ AlloyGBM/
       tests/main.rs             # Engine unit tests
       tests/morph_state.rs      # MorphState unit tests
     backend_cpu/src/            # (v0.12.1: lib.rs decomposed; impl CpuBackend intrinsic block stays in lib.rs)
-      lib.rs                    # ~1,507 lines: CpuBackend struct + giant impl CpuBackend block (histogram building + best_split_* methods)
+      lib.rs                    # ~1,820 lines: CpuBackend struct + giant impl CpuBackend block (histogram building + best_split_* methods)
       arena.rs                  # HistogramArena, HistogramKernelPath, workload threshold constants
       split_helpers.rs          # GainStrategy, ScalarSideStats, MissingDirectionCandidate, apply_feature_weight, l1_threshold_gradient, split_gain_term, categorical_bitset_for_prefix*, goes_left_for_split
       factor_split.rs           # FactorSplitScratch, FactorSplitCandidate, factor_split_penalty*, validate_factor_split_context
       backend_ops.rs            # impl BackendOps for CpuBackend (the trait impl, 449 lines)
+      split_scan.rs             # Thread-local cumulative-scan scratch (standard + DRO variants)
+      dro_scan.rs               # SIMD DRO numeric split scanning
+      morph_scan.rs             # SIMD MorphBoost numeric split scanning
       morph.rs                  # MorphBoost split-gain helper (pre-existing)
       pl_histogram.rs           # PL histogram bundle (pre-existing)
       pl.rs                     # PL split finding via Cholesky (pre-existing)
       tests/mod.rs              # #[cfg(test)] entry
       tests/main.rs             # backend_cpu unit tests
-    predictor/src/lib.rs   # Prediction from trained artifacts (post-transforms: identity, sigmoid)
+    predictor/src/lib.rs   # Prediction from trained artifacts; compact node array + load-time delta collapse (post-transforms: identity, sigmoid, exp)
     shap/src/                   # (v0.12.2: lib.rs decomposed into focused modules)
-      lib.rs                    # ~246 lines: mod declarations + pub use re-exports + public explain_* entry points
+      lib.rs                    # ~240 lines: mod decls + pub use re-exports + public explain_* entry points (v1.0.0: every path routes to TreeSHAP)
       error.rs                  # ShapError, ShapResult
       types.rs                  # ShapBatch, ShapInteractionBatch, ShapFeatureContribution, artifact-loader helpers
       binning.rs                # BinningContext + shared binning constants
       linear_leaf.rs            # Linear-leaf (PL) SHAP interventional-decomposition helpers
       importance.rs             # feature_importance_from_artifact_bytes global importance API
-      brute_force.rs            # Legacy brute-force Shapley algorithm
+      brute_force.rs            # Legacy brute-force Shapley — #[cfg(test)] parity oracle only (v1.0.0)
       tree_shap.rs              # TreeSHAP polynomial-time algorithm (Lundberg et al. 2020) — values + interactions
       tests/mod.rs              # #[cfg(test)] entry
       tests/main.rs             # SHAP unit tests
@@ -103,6 +110,7 @@ AlloyGBM/
       callbacks.rs            # CustomPythonObjective + CustomPythonMetricCallback + numpy transfer helpers
       pyclasses.rs            # NativeRuntimeInfo, NativeContinuousBinningMetadata, NativeTrainingSummary/Result, NativeIterationDiagnostics + diagnostics_to_native
       quantization.rs         # dense→binned prep: PreparedTrainingMatrices, quantize_*/derive_*/prepare_*_matrices, binning-strategy parse/validate
+      threading.rs            # FitThreadCount + install_in_fit_pool (n_jobs)
       params.rs               # build_train_params, build_binning_context, parse_* (boosting_mode/neutralization/leaf_model/leaf_solver/dro/morph/tree_growth/training_policy)
       categorical_bridge.rs   # resolve_categorical_*, flatten_rows, Cholesky/residualize neutralization bridge, apply_categorical_encoding_*
       predict.rs              # NativePredictorHandle + predictor_predict_* #[pyfunction]s (predictor entry points only post-v0.12.6)
@@ -128,7 +136,7 @@ AlloyGBM/
       evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py           # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (last updated for v0.12.10; refactor program completed in v0.12.3; CPU-only still pending)
+    limitations.md         # Current limitation analysis (last updated for v1.0.0; CPU-only runtime and parallel scaling are the open themes)
     roadmap/current.md     # Active roadmap and per-release history
     user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
     site/                  # Sphinx site (Read the Docs)
@@ -161,7 +169,7 @@ maturin develop --release      # Build and install Python extension
 - **Newton-Raphson leaf values**: `leaf = -lr * grad_sum / (hess_sum + lambda + eps)` -- general-purpose for any objective
 - **Hand-rolled JSON serde** for `ModelMetadata` in `core/src/artifact_format.rs` (v0.12.1: moved from lib.rs) -- positional parser, very brittle. Adding fields requires careful ordering.
 - **`BinnedMatrix`** uses adaptive `Vec<u8>` or `Vec<u16>` -- up to 65,535 bins, column-major duplicate for cache-friendly histograms
-- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits, LinearLeafCoefficients, FeatureBaseline, DartTreeWeights, MultiOutputLeafValues), JSON metadata header. Includes objective type for post-transform dispatch.
+- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits, LinearLeafCoefficients, FeatureBaseline, DartTreeWeights, MultiOutputLeafValues, MorphMetadata, DroMetadata, NeutralizationMetadata), serde-backed JSON metadata header. Includes objective type for post-transform dispatch. **Stable from v1.0.0**: a 1.x artifact stays readable by any later 1.x release.
 
 ## Key Architectural Patterns
 

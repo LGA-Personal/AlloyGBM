@@ -157,6 +157,19 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
                 "multiclass prediction. Use binary classification or a built-in objective."
             )
 
+        # `colsample_bynode` is enforced only on the single-output tree
+        # builders; the multiclass round loop passes no colsample context, so
+        # accepting the parameter here would silently train an unsampled
+        # model. Reject it instead, matching how joint MultiLabelGBMRanker
+        # rejects kwargs it cannot honour.
+        if self._is_multiclass and float(getattr(self, "colsample_bynode", 1.0)) < 1.0:
+            raise ValueError(
+                "colsample_bynode is not supported for multiclass classification "
+                f"(detected {self._num_classes_for_training} classes); it would be "
+                "silently ignored. Use col_subsample for per-tree feature sampling, "
+                "or set colsample_bynode=1.0."
+            )
+
         # v0.10.1: multiclass GOSS (per-row score `s_i = sum_k |g_{i,k}|`,
         # LightGBM convention) and multiclass DART (per-class dropout
         # bookkeeping across the K-stumps-per-round pool) are now both

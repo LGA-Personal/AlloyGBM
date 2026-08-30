@@ -93,7 +93,8 @@ Current results
 - AlloyGBM is strongest on ``panel_time_series``
 - AlloyGBM is strong on ``dow_jones_financial``
 - AlloyGBM is competitive but not leading on ``dense_numeric``
-- AlloyGBM trails on ``california_housing`` and ``bike_sharing``
+- AlloyGBM leads XGBoost, LightGBM, and CatBoost on ``bike_sharing``
+- AlloyGBM trails on ``california_housing``
 - AlloyGBM is typically the fastest trainer on most scenario/profile rows
 
 **Classification:**
