@@ -33,10 +33,31 @@ def _check_name(check: object) -> str:
     return getattr(function, "__name__", repr(function))
 
 
+# Histogram-binned boosting derives bin boundaries from unweighted quantiles,
+# so a weighted fit is not bit-equivalent to repeating rows (which shifts the
+# cuts). scikit-learn xfails its own HistGradientBoosting* estimators for the
+# same reason in PER_ESTIMATOR_XFAIL_CHECKS; we mirror that policy here.
+_EXPECTED_FAILED_CHECKS = {
+    "check_sample_weight_equivalence_on_dense_data": (
+        "sample_weight is not equivalent to removing/repeating samples "
+        "(quantile bin boundaries are derived from unweighted data)."
+    ),
+    "check_sample_weight_equivalence_on_sparse_data": (
+        "sample_weight is not equivalent to removing/repeating samples "
+        "(quantile bin boundaries are derived from unweighted data)."
+    ),
+}
+
+
 def _run_estimator_checks(estimator: object) -> tuple[list[str], list[str]]:
     failures: list[str] = []
     skips: list[str] = []
-    for checked_estimator, check in estimator_checks_generator(estimator, legacy=True):
+    for checked_estimator, check in estimator_checks_generator(
+        estimator,
+        legacy=True,
+        expected_failed_checks=_EXPECTED_FAILED_CHECKS,
+        mark="skip",
+    ):
         try:
             check(checked_estimator)
         except Exception as exc:  # sklearn checks raise heterogeneous assertion types
@@ -165,8 +186,8 @@ sys.meta_path.insert(0, BlockSklearn())
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
 
-assert GBMRegressor().get_params()["n_estimators"] == 6
-assert GBMClassifier().get_params()["n_estimators"] == 6
+assert GBMRegressor().get_params()["n_estimators"] == 100
+assert GBMClassifier().get_params()["n_estimators"] == 100
 assert GBMRanker().get_params()["ranking_objective"] == "rank:ndcg"
 """
     # Import alloygbm the same way the parent process does (installed package),
@@ -496,7 +517,11 @@ def test_all_applicable_sklearn_checks_pass(estimator: object) -> None:
     failures, skips = _run_estimator_checks(estimator)
 
     assert failures == []
-    assert all("check_array_api_input" in skip and "SCIPY_ARRAY_API" in skip for skip in skips)
+    assert all(
+        ("check_array_api_input" in skip and "SCIPY_ARRAY_API" in skip)
+        or "check_sample_weight_equivalence" in skip
+        for skip in skips
+    )
 
 
 def test_public_ranker_keeps_mandatory_group_contract() -> None:
@@ -532,4 +557,8 @@ def test_group_aware_ranker_passes_applicable_generic_checks() -> None:
     )
 
     assert failures == []
-    assert all("check_array_api_input" in skip and "SCIPY_ARRAY_API" in skip for skip in skips)
+    assert all(
+        ("check_array_api_input" in skip and "SCIPY_ARRAY_API" in skip)
+        or "check_sample_weight_equivalence" in skip
+        for skip in skips
+    )

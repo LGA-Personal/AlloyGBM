@@ -17,7 +17,7 @@ Core parameters
   - additive update step size
 - ``max_depth: int = 6``
   - maximum tree depth
-- ``n_estimators: int = 6``
+- ``n_estimators: int = 100``
   - requested boosting rounds
 - ``row_subsample: float = 1.0``
   - per-round row sampling fraction; ignored when ``boosting_mode="goss"`` (GOSS uses gradient-based sampling instead).

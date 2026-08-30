@@ -223,10 +223,13 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         ordered by ``self.classes_``.
         """
         if self._is_multiclass:
-            return np.round(self._predict_proba_multiclass(X), decimals=7)
+            proba = self._predict_proba_multiclass(X)
+            # The native softmax runs in f32; renormalize in f64 so rows sum
+            # to exactly 1.0 without perturbing the class ranking.
+            return proba / proba.sum(axis=1, keepdims=True)
         # Binary path
         p1 = np.asarray(super().predict(X), dtype=np.float64)
-        return np.round(np.column_stack([1.0 - p1, p1]), decimals=7)
+        return np.column_stack([1.0 - p1, p1])
 
     def _predict_proba_multiclass(self, X: object) -> np.ndarray:
         """Multi-class prediction using native multi-class predictor."""
@@ -294,7 +297,11 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         ``[log(P(y=class_0)), ..., log(P(y=class_K-1))]``.
         """
         proba = self.predict_proba(X)
-        return np.log(np.clip(proba, 1e-15, None))
+        # Deliberately consistent with ``np.log(self.predict_proba(X))`` —
+        # including ``-inf`` where a probability underflows to exactly 0 —
+        # per the sklearn contract checked by ``check_classifiers_train``.
+        with np.errstate(divide="ignore"):
+            return np.log(proba)
 
     # -- score (accuracy, not R^2) ---------------------------------------------
 

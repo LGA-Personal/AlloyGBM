@@ -15,7 +15,7 @@ one-dimensional inputs are rejected before native training.
   - Step size for additive boosting updates.
 - `max_depth: int = 6`
   - Maximum tree depth.
-- `n_estimators: int = 6`
+- `n_estimators: int = 100`
   - Number of boosting rounds requested.
 - `row_subsample: float = 1.0`
   - Fraction of rows sampled per round.  Ignored when

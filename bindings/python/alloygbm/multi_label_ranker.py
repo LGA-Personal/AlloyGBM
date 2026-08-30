@@ -869,7 +869,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             group_arr,
             # Defaults below match GBMRegressor / GBMRanker's public
             # Python defaults (NOT the engine's TrainParams::default()).
-            int(kw.get("n_estimators", 6)),
+            int(kw.get("n_estimators", 100)),
             float(kw.get("learning_rate", 0.1)),
             int(kw.get("seed", 0)),
             int(kw.get("max_depth", 6)),
@@ -985,7 +985,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 raise RuntimeError(
                     "multi_label_mode='joint' produced an empty ensemble: "
                     "no valid split candidate was found in any of "
-                    f"n_estimators={kw.get('n_estimators', 6)} rounds. "
+                    f"n_estimators={kw.get('n_estimators', 100)} rounds. "
                     "Try lowering `min_data_in_leaf` (currently "
                     f"{int(kw.get('min_data_in_leaf', 1))}), increasing "
                     "the training row count, or using "
