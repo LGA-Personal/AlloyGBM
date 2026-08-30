@@ -3833,6 +3833,7 @@ fn dart_boosting_mode_produces_non_uniform_tree_weights() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         seed: 42,
         deterministic: true,
@@ -3877,6 +3878,7 @@ fn dart_boosting_mode_supports_warm_start() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -5826,6 +5828,7 @@ fn sampled_prediction_delta_multiclass() {
                     max_drop: 2,
                     normalize_type: alloygbm_core::DartNormalize::Tree,
                     sample_type: alloygbm_core::DartSampleType::Uniform,
+                    skip_drop: 0.0,
                 },
                 0.5,
             ),
@@ -5893,6 +5896,7 @@ fn sampled_prediction_delta_fallback() {
                 max_drop: 2,
                 normalize_type: alloygbm_core::DartNormalize::Tree,
                 sample_type: alloygbm_core::DartSampleType::Uniform,
+                skip_drop: 0.0,
             },
             ..TrainParams::default()
         },
@@ -5945,6 +5949,7 @@ fn round_row_selection_preserves_uniform_rows_and_partitions_domain() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         17,
         0.5,
@@ -7200,6 +7205,7 @@ fn dart_early_stopping_truncation_recomputes_tree_weights() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         seed: 42,
         deterministic: true,
@@ -7312,6 +7318,7 @@ fn dart_aggregate_forest_validation_matches_repeated_walk_baseline() {
             max_drop: 3,
             normalize_type: alloygbm_core::DartNormalize::Forest,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         seed: 17,
         deterministic: true,
@@ -8089,6 +8096,7 @@ fn multiclass_dart_expected_weights(
             &weights,
             seed,
             round,
+            0.0,
         );
         let factor = drops.len() as f32 / (drops.len() as f32 + 1.0);
         for &flat_tree_id in &drops {
@@ -8148,6 +8156,7 @@ fn assert_multiclass_dart_aggregate_regression(tree_growth: TreeGrowth) {
             max_drop: MAX_DROP,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8366,6 +8375,7 @@ fn multiclass_dart_early_stop_replays_retained_weights_and_summary_losses() {
             max_drop: MAX_DROP,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8721,6 +8731,7 @@ fn multiclass_dart_empty_morph_warmup_preserves_the_next_round_index() {
             max_drop: 2,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8776,6 +8787,7 @@ fn multiclass_dart_empty_morph_warmup_preserves_the_next_round_index() {
             &expected_weights,
             17,
             effective_round,
+            0.0,
         );
         let factor = drops.len() as f32 / (drops.len() as f32 + 1.0);
         for &flat_tree_id in &drops {
@@ -8824,6 +8836,7 @@ fn multiclass_dart_empty_morph_warmup_plateau_truncates_dense_logical_rounds() {
             max_drop: 2,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8874,6 +8887,7 @@ fn multiclass_dart_empty_morph_warmup_plateau_truncates_dense_logical_rounds() {
         &[1.0, 1.0],
         17,
         1,
+        0.0,
     );
     let expected_weight = 1.0 / (first_material_drops.len() as f32 + 1.0);
     for stumps in &summary.model.class_stumps {

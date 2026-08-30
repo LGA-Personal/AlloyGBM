@@ -303,7 +303,8 @@ fn fit_joint_inner(
             max_drop,
             normalize_type,
             sample_type,
-        } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+            skip_drop,
+        } => Some((drop_rate, max_drop, normalize_type, sample_type, skip_drop)),
         _ => None,
     };
     let mut dart_state = crate::DartState::default();
@@ -458,7 +459,7 @@ fn fit_joint_inner(
         // fits on residuals of the dropped-out ensemble (mirrors the
         // single-output DART flow at crates/engine/src/lib.rs:4895).
         let dropped_tree_ids: Vec<usize> =
-            if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+            if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) = dart_params {
                 let contribution = dart_contribution.as_mut().ok_or_else(|| {
                     "joint DART contribution buffer was not initialized".to_string()
                 })?;
@@ -476,6 +477,7 @@ fn fit_joint_inner(
                         &dart_state.tree_weights,
                         params.seed,
                         global_round,
+                        skip_drop,
                     );
                     for &tree_id in &drops {
                         let w_old = dart_state.tree_weights[tree_id];
@@ -735,7 +737,7 @@ fn fit_joint_inner(
         // down to `new_w = 1 / (K + 1)`, and re-add each dropped tree
         // at its rescaled weight. Mirrors the single-output DART
         // finalize block in crates/engine/src/lib.rs:5118.
-        if let Some((_, _, normalize_type, _)) = dart_params {
+        if let Some((_, _, normalize_type, _, _)) = dart_params {
             let k = dropped_tree_ids.len() as f32;
             let new_w = 1.0 / (k + 1.0);
             let drop_factor = match normalize_type {

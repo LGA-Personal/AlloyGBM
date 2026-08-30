@@ -124,6 +124,7 @@ class _GBMEstimatorCore(
         dart_max_drop: int = 5,
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
+        dart_skip_drop: float = 0.5,
         tweedie_variance_power: float = 1.5,
         poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
@@ -420,6 +421,12 @@ class _GBMEstimatorCore(
                     "dart_sample_type in {'uniform', 'weighted'}, "
                     f"got {dart_sample_type!r}"
                 )
+            skip_drop_value = float(dart_skip_drop)
+            if not math.isfinite(skip_drop_value) or not 0.0 <= skip_drop_value <= 1.0:
+                raise ValueError(
+                    "dart_skip_drop must be a finite value in [0.0, 1.0], "
+                    f"got {dart_skip_drop!r}"
+                )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -504,6 +511,7 @@ class _GBMEstimatorCore(
         self.dart_max_drop = int(dart_max_drop)
         self.dart_normalize_type = str(dart_normalize_type)
         self.dart_sample_type = str(dart_sample_type)
+        self.dart_skip_drop = float(dart_skip_drop)
         self.tweedie_variance_power = float(tweedie_variance_power)
         self.poisson_max_delta_step = float(poisson_max_delta_step)
         self.quantile_alpha = float(quantile_alpha)
@@ -586,6 +594,7 @@ class _GBMEstimatorCore(
         dart_max_drop: int = 5,
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
+        dart_skip_drop: float = 0.5,
         tweedie_variance_power: float = 1.5,
         poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
@@ -650,6 +659,7 @@ class _GBMEstimatorCore(
         self.dart_max_drop = dart_max_drop
         self.dart_normalize_type = dart_normalize_type
         self.dart_sample_type = dart_sample_type
+        self.dart_skip_drop = dart_skip_drop
         self.tweedie_variance_power = tweedie_variance_power
         self.poisson_max_delta_step = poisson_max_delta_step
         self.quantile_alpha = quantile_alpha
@@ -732,6 +742,7 @@ class _GBMEstimatorCore(
             f"dart_max_drop={self.dart_max_drop}, "
             f"dart_normalize_type='{self.dart_normalize_type}', "
             f"dart_sample_type='{self.dart_sample_type}', "
+            f"dart_skip_drop={self.dart_skip_drop}, "
             f"poisson_max_delta_step={self.poisson_max_delta_step}, "
             f"quantile_alpha={self.quantile_alpha}, "
             f"n_jobs={self.n_jobs}"
@@ -801,6 +812,7 @@ class _GBMEstimatorCore(
             "dart_max_drop": self.dart_max_drop,
             "dart_normalize_type": self.dart_normalize_type,
             "dart_sample_type": self.dart_sample_type,
+            "dart_skip_drop": self.dart_skip_drop,
             "tweedie_variance_power": self.tweedie_variance_power,
             "poisson_max_delta_step": self.poisson_max_delta_step,
             "quantile_alpha": self.quantile_alpha,
@@ -869,6 +881,7 @@ class _GBMEstimatorCore(
             "dart_max_drop",
             "dart_normalize_type",
             "dart_sample_type",
+            "dart_skip_drop",
             "tweedie_variance_power",
             "poisson_max_delta_step",
             "quantile_alpha",
@@ -1395,6 +1408,14 @@ class _GBMEstimatorCore(
                     f"got {s!r}"
                 )
             self.dart_sample_type = s
+        if "dart_skip_drop" in params:
+            value = float(params["dart_skip_drop"])
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    "dart_skip_drop must be a finite value in [0.0, 1.0], "
+                    f"got {params['dart_skip_drop']!r}"
+                )
+            self.dart_skip_drop = value
         if "tweedie_variance_power" in params:
             v = float(params["tweedie_variance_power"])
             self.tweedie_variance_power = v
@@ -2068,6 +2089,9 @@ class _GBMEstimatorCore(
                     dart_sample_type=(
                         self.dart_sample_type if self.boosting_mode == "dart" else None
                     ),
+                    dart_skip_drop=(
+                        self.dart_skip_drop if self.boosting_mode == "dart" else None
+                    ),
                     tweedie_variance_power=(
                         self.tweedie_variance_power
                         if self._objective_name() == "tweedie"
@@ -2227,6 +2251,9 @@ class _GBMEstimatorCore(
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
+                ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
@@ -2336,6 +2363,9 @@ class _GBMEstimatorCore(
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
                 ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power
@@ -2833,6 +2863,9 @@ class _GBMEstimatorCore(
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
+                ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
@@ -2913,6 +2946,9 @@ class _GBMEstimatorCore(
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
                 ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power

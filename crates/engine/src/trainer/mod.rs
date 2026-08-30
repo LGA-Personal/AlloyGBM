@@ -990,7 +990,8 @@ impl Trainer {
                 max_drop,
                 normalize_type,
                 sample_type,
-            } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+                skip_drop,
+            } => Some((drop_rate, max_drop, normalize_type, sample_type, skip_drop)),
             _ => None,
         };
         // v0.10.2: leaf-wise multiclass DART is now supported. The per-class
@@ -1304,7 +1305,7 @@ impl Trainer {
             // (PR review C1).
             let mut dart_predictions_backup: Option<Vec<Vec<f32>>> = None;
             let (dropped_tree_indices, material_dropped_classes): (Vec<usize>, Vec<usize>) =
-                if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) = dart_params {
                     let dart_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
                         EngineError::ContractViolation(
                             "multiclass DART contribution buffer was not initialized".to_string(),
@@ -1318,6 +1319,8 @@ impl Trainer {
                         &dart_state.tree_weights,
                         sampling_seed_base,
                         effective_round,
+
+                        skip_drop,
                     );
                     let material_classes =
                         multiclass_dart_material_classes(&drops, k, &dart_round_counts)?;
@@ -1581,7 +1584,7 @@ impl Trainer {
             // off or the round had no dropouts (in which case new
             // trees get `tree_weight = 1.0`).
             let dart_round_finalize: Option<(f32, f32, Vec<f32>)> =
-                if let Some((_, _, normalize_type, _)) = dart_params {
+                if let Some((_, _, normalize_type, _, _)) = dart_params {
                     let n_dropped = dropped_tree_indices.len() as f32;
                     let new_w = 1.0 / (n_dropped + 1.0);
                     let drop_factor = match normalize_type {
@@ -2003,7 +2006,7 @@ impl Trainer {
             // warm-start and phantom slots) through the selected logical
             // round, then replay only the new retained rounds from the
             // persisted warm-start weight prefix.
-            if let Some((_, _, normalize_type, _)) = dart_params {
+            if let Some((_, _, normalize_type, _, _)) = dart_params {
                 let truncate_at = round_index_offset + best_round;
                 for class_k in 0..k {
                     dart_round_start_offsets[class_k].truncate(truncate_at);
@@ -2223,7 +2226,8 @@ impl Trainer {
                 max_drop,
                 normalize_type,
                 sample_type,
-            } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+                skip_drop,
+            } => Some((drop_rate, max_drop, normalize_type, sample_type, skip_drop)),
             _ => None,
         };
         let requires_full_replay =
@@ -2582,7 +2586,7 @@ impl Trainer {
             let mut dart_predictions_backup: Option<Vec<f32>> = None;
             let mut dart_validation_backup: Option<Vec<f32>> = None;
             let dropped_tree_ids: Vec<usize> =
-                if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) = dart_params {
                     let train_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
                         EngineError::ContractViolation(
                             "DART contribution buffer was not initialized".to_string(),
@@ -2596,6 +2600,8 @@ impl Trainer {
                         &dart_state.tree_weights,
                         sampling_seed_base,
                         effective_round_index,
+
+                        skip_drop,
                     );
                     train_contribution.fill(0.0);
                     if let Some(contribution) = dart_validation_contribution.as_mut() {
@@ -2874,7 +2880,7 @@ impl Trainer {
             // on a DART round; `None` otherwise. The commit path
             // consumes this to update `dart_state`.
             let dart_round_finalize: Option<(f32, f32, Vec<f32>)> =
-                if let Some((_, _, normalize_type, _)) = dart_params {
+                if let Some((_, _, normalize_type, _, _)) = dart_params {
                     let k = dropped_tree_ids.len() as f32;
                     let new_w = 1.0 / (k + 1.0);
                     let drop_factor = match normalize_type {
@@ -3236,7 +3242,7 @@ impl Trainer {
                 dart_state.tree_weights = vec![1.0; truncate_at];
                 dart_state.dropped_per_round.truncate(truncate_at);
                 for (r, dropped) in kept_dropped.iter().enumerate() {
-                    if let Some((_, _, normalize_type, _)) = dart_params {
+                    if let Some((_, _, normalize_type, _, _)) = dart_params {
                         apply_normalization(
                             &mut dart_state.tree_weights,
                             dropped,

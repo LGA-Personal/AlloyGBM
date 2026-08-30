@@ -95,7 +95,7 @@ pub enum DartSampleType {
 ///   `other_rate` from the rest, and amplify the small-gradient rows
 ///   by `(1 - top_rate) / other_rate` to maintain unbiased gradient
 ///   sums.  See `crates/engine/src/sampling.rs`.
-/// * `Dart { drop_rate, max_drop, normalize_type, sample_type }`:
+/// * `Dart { drop_rate, max_drop, normalize_type, sample_type, skip_drop }`:
 ///   per-round tree dropout — drop K existing trees before computing
 ///   gradients, fit a new tree, then rescale per `normalize_type`.
 ///   Requires per-stump `tree_weight: f32` in the artifact (back-compat:
@@ -112,6 +112,13 @@ pub enum BoostingMode {
         max_drop: usize,
         normalize_type: DartNormalize,
         sample_type: DartSampleType,
+        /// Probability that a round performs no dropout at all. Rolled once
+        /// per round, independently of the per-tree dropout draws. LightGBM
+        /// calls this `skip_drop` and defaults it to 0.5: skipping dropout
+        /// on some rounds lets the ensemble consolidate, which both speeds
+        /// training and typically improves accuracy on clean data. `0.0`
+        /// reproduces always-drop behaviour.
+        skip_drop: f32,
     },
 }
 

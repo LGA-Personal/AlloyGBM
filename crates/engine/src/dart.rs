@@ -45,6 +45,19 @@ pub struct DartState {
 
 /// Hash a (seed, round, stump) triple to a deterministic float in
 /// `[0.0, 1.0)`. Used for uniform per-stump dropout decisions.
+/// Per-round roll deciding whether this round skips dropout entirely.
+///
+/// Uses a distinct mixing constant from [`dropout_score`] so the skip
+/// decision is independent of which trees would have been dropped.
+fn skip_drop_score(seed_base: u64, round_index: usize) -> f32 {
+    let mixed = mixed_hash(
+        seed_base
+            ^ (round_index as u64).wrapping_mul(0xA076_1D64_78BD_642F)
+            ^ 0x5BF0_3635_CA26_9E17,
+    );
+    ((mixed >> 40) as f32) / ((1u32 << 24) as f32)
+}
+
 fn dropout_score(seed_base: u64, round_index: usize, stump_idx: usize) -> f32 {
     let mixed = mixed_hash(
         seed_base
@@ -70,6 +83,7 @@ fn dropout_score(seed_base: u64, round_index: usize, stump_idx: usize) -> f32 {
 /// we deterministically pick one stump (the lowest-hash one) to
 /// guarantee the LightGBM "at least one drop per DART round"
 /// invariant.
+#[allow(clippy::too_many_arguments)]
 pub fn select_dropouts(
     n_existing: usize,
     drop_rate: f32,
@@ -78,8 +92,15 @@ pub fn select_dropouts(
     tree_weights: &[f32],
     seed_base: u64,
     round_index: usize,
+    skip_drop: f32,
 ) -> Vec<usize> {
     if n_existing == 0 || drop_rate <= 0.0 || max_drop == 0 {
+        return Vec::new();
+    }
+    // A skipped round drops nothing, so the new tree is fitted against the
+    // full ensemble and enters at weight 1.0 (the normalization below
+    // collapses to that when `dropped` is empty).
+    if skip_drop > 0.0 && skip_drop_score(seed_base, round_index) < skip_drop {
         return Vec::new();
     }
 
@@ -183,14 +204,77 @@ mod tests {
 
     #[test]
     fn select_dropouts_returns_empty_when_no_existing() {
-        let got = select_dropouts(0, 0.5, 10, DartSampleType::Uniform, &[], 42, 0);
+        let got = select_dropouts(0, 0.5, 10, DartSampleType::Uniform, &[], 42, 0, 0.0);
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn skip_drop_suppresses_dropout_on_a_fraction_of_rounds() {
+        let weights = vec![1.0; 100];
+        let rounds = 400;
+
+        let always: usize = (0..rounds)
+            .filter(|&r| {
+                !select_dropouts(100, 0.5, 10, DartSampleType::Uniform, &weights, 7, r, 0.0)
+                    .is_empty()
+            })
+            .count();
+        assert_eq!(always, rounds, "skip_drop=0 must never suppress a round");
+
+        let never: usize = (0..rounds)
+            .filter(|&r| {
+                !select_dropouts(100, 0.5, 10, DartSampleType::Uniform, &weights, 7, r, 1.0)
+                    .is_empty()
+            })
+            .count();
+        assert_eq!(never, 0, "skip_drop=1 must suppress every round");
+
+        let half: usize = (0..rounds)
+            .filter(|&r| {
+                !select_dropouts(100, 0.5, 10, DartSampleType::Uniform, &weights, 7, r, 0.5)
+                    .is_empty()
+            })
+            .count();
+        // Binomial(400, 0.5) sits far inside these bounds; this pins the rate
+        // without making the test sensitive to the exact hash.
+        assert!(
+            (140..=260).contains(&half),
+            "skip_drop=0.5 dropped on {half}/{rounds} rounds, expected roughly half"
+        );
+    }
+
+    #[test]
+    fn skip_drop_decision_is_independent_of_which_trees_would_drop() {
+        // The skip roll uses its own mixing constant, so two seeds that skip
+        // the same rounds must still be able to drop different trees.
+        let weights = vec![1.0; 64];
+        let skipped_a: Vec<bool> = (0..64)
+            .map(|r| {
+                select_dropouts(64, 0.5, 32, DartSampleType::Uniform, &weights, 11, r, 0.5)
+                    .is_empty()
+            })
+            .collect();
+        let dropped_without_skip: Vec<usize> = (0..64)
+            .map(|r| {
+                select_dropouts(64, 0.5, 32, DartSampleType::Uniform, &weights, 11, r, 0.0).len()
+            })
+            .collect();
+        // Rounds that are skipped still had a non-trivial dropout set to skip.
+        let skipped_rounds_with_work = skipped_a
+            .iter()
+            .zip(&dropped_without_skip)
+            .filter(|(skipped, dropped)| **skipped && **dropped > 0)
+            .count();
+        assert!(
+            skipped_rounds_with_work > 0,
+            "skip decision should be independent of the per-tree draws"
+        );
     }
 
     #[test]
     fn select_dropouts_returns_empty_when_drop_rate_zero() {
         let weights = vec![1.0; 100];
-        let got = select_dropouts(100, 0.0, 10, DartSampleType::Uniform, &weights, 42, 0);
+        let got = select_dropouts(100, 0.0, 10, DartSampleType::Uniform, &weights, 42, 0, 0.0);
         assert!(got.is_empty());
     }
 
@@ -198,14 +282,14 @@ mod tests {
     fn select_dropouts_capped_by_max_drop() {
         // drop_rate=1.0 marks every stump; max_drop=3 truncates.
         let weights = vec![1.0; 100];
-        let got = select_dropouts(100, 1.0, 3, DartSampleType::Uniform, &weights, 42, 0);
+        let got = select_dropouts(100, 1.0, 3, DartSampleType::Uniform, &weights, 42, 0, 0.0);
         assert_eq!(got.len(), 3);
     }
 
     #[test]
     fn select_dropouts_returns_sorted_indices() {
         let weights = vec![1.0; 50];
-        let got = select_dropouts(50, 0.5, 50, DartSampleType::Uniform, &weights, 42, 0);
+        let got = select_dropouts(50, 0.5, 50, DartSampleType::Uniform, &weights, 42, 0, 0.0);
         let mut sorted = got.clone();
         sorted.sort_unstable();
         assert_eq!(got, sorted);
@@ -218,7 +302,7 @@ mod tests {
         // kick in for every seed.
         let weights = vec![1.0; 100];
         for seed in 0u64..20 {
-            let got = select_dropouts(100, 0.0001, 50, DartSampleType::Uniform, &weights, seed, 0);
+            let got = select_dropouts(100, 0.0001, 50, DartSampleType::Uniform, &weights, seed, 0, 0.0);
             assert!(!got.is_empty(), "seed {seed} produced zero drops");
         }
     }
@@ -226,8 +310,8 @@ mod tests {
     #[test]
     fn select_dropouts_is_deterministic_given_seed_and_round() {
         let weights = vec![1.0; 50];
-        let a = select_dropouts(50, 0.3, 50, DartSampleType::Uniform, &weights, 123, 7);
-        let b = select_dropouts(50, 0.3, 50, DartSampleType::Uniform, &weights, 123, 7);
+        let a = select_dropouts(50, 0.3, 50, DartSampleType::Uniform, &weights, 123, 7, 0.0);
+        let b = select_dropouts(50, 0.3, 50, DartSampleType::Uniform, &weights, 123, 7, 0.0);
         assert_eq!(a, b, "same (seed, round) must produce same dropouts");
         assert_eq!(
             a,
@@ -243,8 +327,8 @@ mod tests {
         // expect different sets across rounds (probability of identical
         // output is astronomically low for drop_rate=0.5 on 50 stumps).
         let weights = vec![1.0; 50];
-        let r0 = select_dropouts(50, 0.5, 50, DartSampleType::Uniform, &weights, 42, 0);
-        let r1 = select_dropouts(50, 0.5, 50, DartSampleType::Uniform, &weights, 42, 1);
+        let r0 = select_dropouts(50, 0.5, 50, DartSampleType::Uniform, &weights, 42, 0, 0.0);
+        let r1 = select_dropouts(50, 0.5, 50, DartSampleType::Uniform, &weights, 42, 1, 0.0);
         assert_ne!(r0, r1, "different rounds must produce different dropouts");
     }
 

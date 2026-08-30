@@ -394,6 +394,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "dart_max_drop": None,
                         "dart_normalize_type": None,
                         "dart_sample_type": None,
+                        "dart_skip_drop": None,
                         "tweedie_variance_power": None,
                         "poisson_max_delta_step": None,
                         "quantile_alpha": None,
