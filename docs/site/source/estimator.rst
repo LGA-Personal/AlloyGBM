@@ -551,8 +551,14 @@ MorphBoost (Adaptive Split Criterion)
 GBMRegressor (and the classifier / ranker subclasses) support an opt-in
 MorphBoost training mode. See :doc:`morphboost` for the full guide.
 
-- ``training_mode: str = "auto"`` -- one of ``"auto"`` (default), ``"manual"``,
-  or ``"morph"``.
+- ``training_mode: str = "auto"`` -- split-criterion selector: ``"auto"``
+  (default), ``"manual"``, or ``"morph"``. ``"morph"`` enables the MorphBoost
+  adaptive criterion described below. ``"auto"`` delegates the choice to
+  AlloyGBM and currently resolves to the standard criterion, making it
+  behaviourally identical to ``"manual"`` today; the distinction is that
+  ``"auto"`` may become adaptive in a future release, whereas ``"manual"``
+  is a commitment to the standard criterion. Pin ``"manual"`` if you need
+  the criterion to stay fixed across upgrades.
 - ``morph_rate: float = 0.1`` -- per-iteration leaf shrinkage rate.
 - ``evolution_pressure: float = 0.2`` -- EMA-driven gain shaping strength.
 - ``morph_warmup_iters: int = 5`` -- rounds before the morph blend engages.

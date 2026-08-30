@@ -294,6 +294,10 @@ class _GBMEstimatorCore(
         _validate_quantile_alpha(quantile_alpha)
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
+        # "auto" delegates the split-criterion choice to AlloyGBM and today
+        # resolves to the standard criterion (i.e. same behaviour as
+        # "manual"); it may become adaptive in a future release. "manual" is
+        # the commitment to the standard criterion across upgrades.
         if training_mode not in ("auto", "manual", "morph"):
             raise ValueError(
                 f"training_mode must be 'auto', 'manual', or 'morph', got {training_mode!r}"

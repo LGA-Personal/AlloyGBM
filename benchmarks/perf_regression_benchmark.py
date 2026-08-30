@@ -53,6 +53,11 @@ def quick_scenarios() -> list[Scenario]:
     return [
         Scenario("reg-medium", "regression", 3000, 12, 40, 5, 1),
         Scenario("cls-medium", "binary", 3000, 12, 40, 5, 2),
+        # A wide, 50k-row scenario so the fit(2N)/fit(N) scaling check
+        # exercises the regime where histogram construction (rather than
+        # per-round fixed costs) dominates. Small datasets can hide an
+        # algorithmic regression behind constant overheads.
+        Scenario("reg-large-wide", "regression", 50_000, 40, 25, 6, 4),
     ]
 
 
@@ -61,6 +66,7 @@ def full_scenarios() -> list[Scenario]:
         Scenario("reg-medium", "regression", 12000, 16, 120, 6, 1),
         Scenario("reg-linear", "regression", 12000, 16, 120, 6, 3, leaf_model="linear"),
         Scenario("cls-medium", "binary", 12000, 16, 120, 6, 2),
+        Scenario("reg-large-wide", "regression", 125_000, 50, 40, 6, 4),
     ]
 
 
