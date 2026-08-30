@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+import warnings
 from numbers import Integral
 
 import numpy as np
@@ -2488,6 +2489,42 @@ class _GBMEstimatorCore(
             "skipped_feature_count": int(diagnostics.skipped_feature_count),
             "observed_conflict_count": int(diagnostics.observed_conflict_count),
         }
+        self._warn_if_feature_bundling_inert()
+
+    def _warn_if_feature_bundling_inert(self) -> None:
+        """Warn when bundling was asked for but nothing could be bundled.
+
+        Bundle discovery treats *bin 0* as a feature's "empty" value and
+        skips any column that is more than a quarter non-zero. Only
+        ``continuous_binning_strategy="linear"`` reliably maps a raw 0.0 to
+        bin 0; under the default ``"quantile"`` strategy a one-hot column's
+        zeros can land in a higher bin, so every candidate is skipped and
+        the request silently does nothing.
+        """
+        diagnostics = getattr(self, "feature_bundling_diagnostics_", None)
+        if not diagnostics or diagnostics.get("active"):
+            return
+        if getattr(self, "feature_bundling", "off") == "off":
+            return
+        message = (
+            "feature_bundling='exact' produced no bundles, so training ran "
+            f"unbundled ({diagnostics.get('skipped_feature_count', 0)} of "
+            f"{diagnostics.get('original_feature_count', 0)} features were "
+            "skipped as bundle candidates)."
+        )
+        if diagnostics.get("observed_conflict_count"):
+            message += (
+                " Some candidate features were not mutually exclusive on "
+                "every row."
+            )
+        elif self.continuous_binning_strategy != "linear":
+            message += (
+                " Bundle discovery requires each sparse feature's dominant "
+                "value to occupy bin 0, which "
+                f"continuous_binning_strategy='{self.continuous_binning_strategy}' "
+                "does not guarantee; try continuous_binning_strategy='linear'."
+            )
+        warnings.warn(message, UserWarning, stacklevel=3)
 
     def _publish_fitted_schema(self, X: object, feature_count: int) -> None:
         self.n_features_in_ = int(feature_count)

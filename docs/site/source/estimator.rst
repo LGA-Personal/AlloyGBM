@@ -222,12 +222,34 @@ per feature, and persisted models retain the native cuts and methods.
 Exact feature bundling
 ----------------------
 
-``feature_bundling="exact"`` can reduce histogram work for dense matrices that
-contain contiguous one-hot or otherwise mutually exclusive sparse numeric
-columns. Bundling is training-only: trees, feature names, importances, SHAP
-arrays, and persisted artifacts continue to use original feature indices.
+``feature_bundling="exact"`` groups mutually exclusive sparse numeric columns
+(contiguous one-hot blocks and the like) into shared storage columns.
+Bundling is training-only: trees, feature names, importances, SHAP arrays, and
+persisted artifacts continue to use original feature indices, and a bundled
+fit produces a **byte-identical artifact** to the same fit with bundling off.
 ``feature_bundling_diagnostics_`` reports activation, original/effective
 feature counts, bundle counts, skipped features, and observed conflicts.
+
+.. important::
+
+   Bundle discovery treats **bin 0** as a feature's "empty" value. Only
+   ``continuous_binning_strategy="linear"`` reliably maps a raw ``0.0`` to
+   bin 0; under the default ``"quantile"`` strategy a sparse column's zeros
+   may land in a higher bin, so every candidate is skipped and training runs
+   unbundled. AlloyGBM emits a ``UserWarning`` naming this cause whenever
+   ``feature_bundling="exact"`` yields no bundles, and
+   ``feature_bundling_diagnostics_["active"]`` stays ``False``.
+
+.. note::
+
+   Bundling currently reduces *storage* and histogram memory traffic, but it
+   does not yet reduce split-search work: per-original-feature histograms are
+   still materialized and scanned, so wall-clock fit time is typically
+   unchanged. Realising EFB's usual speedup requires a bundle-aware split
+   scanner, which would also give up the byte-identical-artifact guarantee
+   above (bundle-level accumulation changes float summation order). Treat
+   this parameter as a storage/compatibility feature rather than a speed
+   knob for now.
 
 The first implementation skips categorical, monotone-constrained,
 interaction-constrained, missing-valued, greater-than-quarter-occupied, and

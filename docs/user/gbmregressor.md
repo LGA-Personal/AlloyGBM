@@ -245,13 +245,27 @@ methods.
 
 ### Exact feature bundling
 
-`feature_bundling="exact"` can reduce histogram work for dense matrices that
-contain contiguous one-hot or otherwise mutually exclusive sparse numeric
-columns. Bundling is training-only: trees, feature names, importances, SHAP
-arrays, and persisted artifacts continue to use the original feature indices.
-`feature_bundling_diagnostics_` reports whether bundling activated and gives
-the original/effective feature counts, bundle counts, skipped features, and
-observed conflicts.
+`feature_bundling="exact"` groups mutually exclusive sparse numeric columns
+(contiguous one-hot blocks and the like) into shared storage columns.
+Bundling is training-only: trees, feature names, importances, SHAP arrays, and
+persisted artifacts continue to use the original feature indices, and a
+bundled fit produces a **byte-identical artifact** to the same fit with
+bundling off. `feature_bundling_diagnostics_` reports whether bundling
+activated and gives the original/effective feature counts, bundle counts,
+skipped features, and observed conflicts.
+
+**Requires `continuous_binning_strategy="linear"` in practice.** Bundle
+discovery treats *bin 0* as a feature's "empty" value, and only linear
+binning reliably maps a raw `0.0` to bin 0. Under the default `"quantile"`
+strategy a sparse column's zeros can land in a higher bin, so every candidate
+is skipped and training runs unbundled — AlloyGBM emits a `UserWarning`
+naming this cause rather than failing silently.
+
+**Not currently a speed knob.** Bundling reduces storage and histogram memory
+traffic, but per-original-feature histograms are still materialized and
+scanned, so fit time is typically unchanged. The usual EFB speedup needs a
+bundle-aware split scanner, which would also forfeit the byte-identical
+artifact guarantee above.
 
 The first implementation is intentionally conservative. It skips categorical,
 monotone-constrained, interaction-constrained, missing-valued,
