@@ -51,6 +51,12 @@ Explicitly *not* covered:
   On California housing (200 rounds): 1.21s/RMSE 0.6241 -> 0.77s/RMSE 0.4815,
   beating LightGBM DART's 1.18s/RMSE 0.5238. `dart_skip_drop=0.0` reproduces
   the previous behaviour.
+- **`lambdarank_normalize` now defaults to `True`** (was `False`), matching
+  LightGBM's `lambdarank_norm`. Per-query lambda normalization keeps queries
+  with very different document counts contributing comparably. Measured
+  NDCG@10: `california_ranking` 0.6547 -> 0.7674 (moving AlloyGBM from last to
+  second, ahead of LightGBM and CatBoost); uniform 50-document groups 0.9649
+  -> 0.9697. Pass `False` for the unnormalized objective.
 - **`GBMClassifier.predict_proba` no longer rounds to 7 decimals.** The
   rounding manufactured exact-zero probabilities without renormalizing;
   multiclass rows are now renormalized in float64 instead.
@@ -84,6 +90,34 @@ Explicitly *not* covered:
   everywhere, with brute force retained only as a test-time parity oracle.
   Rows are also explained in parallel. Measured on a 50-tree depth-6
   12-feature model over 200 rows: 18.2s -> 0.015s (91 ms/row -> 0.07 ms/row).
+
+### Benchmarks
+
+- **Comparative benchmark harness fairness fixes.** The harness pinned
+  LightGBM, XGBoost, and CatBoost to a single thread while leaving AlloyGBM
+  unconstrained, so it used every core -- inflating every published speed
+  comparison by roughly AlloyGBM's parallel speedup. `--threads N` now applies
+  one budget to all four libraries through their own knobs, with the
+  OpenMP/BLAS environment pinned to match. Two LightGBM-specific corrections
+  were also needed for hyperparameter equality to be real: `subsample` is
+  silently ignored without `subsample_freq >= 1` (so LightGBM had been
+  training on 100% of rows against the others' 80%), and its `num_leaves`
+  default of 31 capped trees below the depth-wise peers' `2 ** max_depth`.
+  Runs now record the thread budget, host, and library versions in their JSON
+  output under `params.fairness` and `params.environment`.
+- **New large-scale comparison** (`benchmarks/scale_comparison.py`) covering
+  200k- and 1M-row datasets at multiple thread budgets. The curated suite is
+  run single-threaded because at its sizes (142-40,000 rows) forcing all cores
+  measures thread-spawn overhead rather than throughput -- LightGBM and
+  XGBoost are *slower* multi-threaded below ~40,000 rows on the reference
+  host.
+- **Published v1.0.0 results** in `docs/benchmarks/v1.0.0_comparison.md`.
+  AlloyGBM wins 5 of 15 curated scenarios and is top-two on 11; accuracy is
+  effectively tied with all three peers at 200k-1M rows. Fit speed is
+  reported plainly as the weak axis. The previous claim that
+  `panel_time_series` was AlloyGBM's strongest scenario came from a run with
+  LightGBM's bagging disabled and its capacity halved, and has been corrected
+  rather than dropped.
 
 ### Testing (v1.0 readiness review)
 

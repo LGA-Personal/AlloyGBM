@@ -88,24 +88,40 @@ comparison is not tied to a single parameter shape.
 Current results
 ---------------
 
+Measured for v1.0.0 with an equal thread budget and matched hyperparameters
+for every library. Across the 15 curated scenarios AlloyGBM wins 5 and places
+top-two on 11.
+
 **Regression:**
 
-- AlloyGBM is strongest on ``panel_time_series``
-- AlloyGBM is strong on ``dow_jones_financial``
-- AlloyGBM is competitive but not leading on ``dense_numeric``
-- AlloyGBM leads XGBoost, LightGBM, and CatBoost on ``bike_sharing``
-- AlloyGBM trails on ``california_housing``
-- AlloyGBM is typically the fastest trainer on most scenario/profile rows
+- Strongest on ``histogram_stress`` by a wide margin (0.1803 RMSE against
+  0.3600-0.3649 for all three peers)
+- Leads on ``bike_sharing`` and ``dow_jones_financial``
+- Second on ``abalone_regression`` and ``dense_numeric``
+- Trails on ``california_housing``; last of four on ``panel_time_series``
 
 **Classification:**
 
-- AlloyGBM is competitive with established libraries on accuracy, log-loss, and
-  AUC across ``breast_cancer`` and ``synthetic_classification``
+- Second on ``synthetic_classification``, third on ``adult_income`` -- all four
+  libraries within 0.8 percentage points
+- Trails on the 455-row ``breast_cancer`` set
+- Multiclass: second on ``digits_multiclass`` and ``synthetic_multiclass``,
+  tied first on ``wine_multiclass``
 
 **Ranking:**
 
-- AlloyGBM competes on ``synthetic_ranking`` and ``california_ranking`` using
-  native LambdaMART, evaluated via NDCG@5, NDCG@10, and full NDCG
+- Leads ``synthetic_ranking`` (NDCG@10 1.0000); second on
+  ``california_ranking`` (0.7674), ahead of CatBoost and LightGBM
+
+**Fit speed:**
+
+- AlloyGBM's weak axis. LightGBM and XGBoost fit roughly 3-4x faster per core
+  on the curated suite, where AlloyGBM's fixed per-round overhead dominates;
+  the gap narrows to ~1.3x at 200k rows and 1.5-1.8x at 1M
+- Parallel scaling is the larger structural gap: 1.6-1.8x on 10 cores against
+  LightGBM's 2.5-2.8x and CatBoost's 4.0-4.2x
+- Prediction is competitive, and markedly faster than LightGBM
+  single-threaded
 
 **MorphBoost variants:**
 

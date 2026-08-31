@@ -75,6 +75,25 @@ Correctness fixes
   ``continuous_binning_strategy="linear"`` guarantees; a ``UserWarning`` now
   names the cause instead of quietly training unbundled.
 
+Benchmarks
+~~~~~~~~~~
+
+The comparative benchmark harness had been pinning LightGBM, XGBoost, and
+CatBoost to a single thread while leaving AlloyGBM unconstrained, so every
+published speed comparison was inflated by roughly AlloyGBM's parallel
+speedup. One thread budget is now applied to all four libraries, LightGBM's
+silently-disabled bagging (``subsample_freq``) and halved tree capacity
+(``num_leaves``) are corrected, and every run records its thread budget, host,
+and library versions.
+
+Measured v1.0.0 results are published in ``docs/benchmarks/v1.0.0_comparison.md``:
+AlloyGBM wins 5 of 15 curated scenarios and places top-two on 11, with accuracy
+effectively tied against all three peers at 200k-1M rows. Fit speed is the weak
+axis and is reported as such -- LightGBM and XGBoost fit roughly 3-4x faster per
+core on the small curated scenarios, narrowing to 1.5-1.8x at 1M rows, and
+AlloyGBM's parallel scaling (1.6-1.8x on 10 cores) trails LightGBM (2.5-2.8x)
+and CatBoost (4.0-4.2x).
+
 The full list, including the pre-1.0 development series that ships in this
 release, is in ``CHANGELOG.md``.
 

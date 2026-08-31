@@ -442,22 +442,28 @@ artifact_bytes = model.artifact_bytes
 
 ## Benchmark Snapshot
 
-The benchmark suite compares AlloyGBM against XGBoost, LightGBM, and CatBoost across regression, classification, and ranking tasks.
+Measured for v1.0.0 against XGBoost 3.2, LightGBM 4.6, and CatBoost 1.2 with
+an equal thread budget and matched hyperparameters for every library. Full
+tables, methodology, and the fairness controls are in
+[docs/benchmarks/v1.0.0_comparison.md](docs/benchmarks/v1.0.0_comparison.md).
 
-**Regression:**
+**Accuracy** — across 15 curated scenarios AlloyGBM wins 5 and is top-two on 11:
 
-- AlloyGBM is strongest on `panel_time_series`
-- AlloyGBM is strong on `dow_jones_financial`
-- AlloyGBM leads all three peer libraries on `bike_sharing`
-- AlloyGBM is competitive on `dense_numeric`, trails on `california_housing`
+- Strongest on `histogram_stress` (0.180 RMSE vs 0.360–0.365 for all three peers)
+- Leads on `bike_sharing`, `dow_jones_financial`, and both ranking scenarios
+- Trails on `panel_time_series`, `california_housing`, `breast_cancer`, `adult_income`
+- At 200k–1M rows accuracy is effectively tied with all three peers
 
-**Classification:**
+**Speed** — this is AlloyGBM's weak axis, and we report it plainly:
 
-- AlloyGBM is competitive with established libraries on `breast_cancer` and `synthetic_classification`
-
-**Ranking:**
-
-- AlloyGBM competes on `synthetic_ranking` using its native LambdaMART implementation
+- Fixed per-round overhead dominates on small data: LightGBM and XGBoost fit
+  ~3–4x faster per core on the curated suite (median 5.6k rows). That shrinks
+  to ~1.3x at 200k rows and 1.5–1.8x at 1M — the per-row work is competitive,
+  the constant is not.
+- Parallel scaling is the larger gap: AlloyGBM reaches 1.6–1.8x on 10 cores
+  where LightGBM reaches 2.5–2.8x and CatBoost 4.0–4.2x. This is the headline
+  post-1.0 performance theme.
+- Prediction is competitive, and markedly faster than LightGBM single-threaded.
 
 Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/README.md).
 

@@ -7,6 +7,9 @@ import argparse
 import inspect
 import json
 import subprocess
+import importlib
+import os
+import platform
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -722,6 +725,7 @@ def _model_factories(
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
+    threads: int = 1,
 ) -> dict:
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
@@ -748,6 +752,9 @@ def _model_factories(
         alloy_params["continuous_binning_strategy"] = alloy_continuous_binning_strategy
     if "continuous_binning_max_bins" in alloy_signature.parameters:
         alloy_params["continuous_binning_max_bins"] = alloy_continuous_binning_max_bins
+    # Fairness: same thread budget as every peer library (see _build_alloy_params).
+    if "n_jobs" in alloy_signature.parameters:
+        alloy_params["n_jobs"] = threads
 
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
@@ -764,9 +771,14 @@ def _model_factories(
             max_depth=max_depth,
             n_estimators=rounds,
             subsample=0.8,
+            # LightGBM ignores `subsample` unless bagging_freq >= 1.
+            subsample_freq=1,
+            # Match the depth-wise peers' capacity; LightGBM's
+            # num_leaves default of 31 would cap trees below 2**max_depth.
+            num_leaves=2 ** max_depth,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             verbose=-1,
         ),
         "xgboost": lambda: XGBRegressor(
@@ -777,7 +789,7 @@ def _model_factories(
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             tree_method="hist",
             verbosity=0,
         ),
@@ -791,7 +803,7 @@ def _model_factories(
             random_seed=seed,
             verbose=False,
             allow_writing_files=False,
-            thread_count=1,
+            thread_count=threads,
         )
     return factories
 
@@ -804,6 +816,7 @@ def _build_alloy_params(
     rounds: int,
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
+    threads: int = 1,
 ) -> dict[str, object]:
     sig = inspect.signature(cls.__init__)
     params: dict[str, object] = {}
@@ -827,6 +840,11 @@ def _build_alloy_params(
         params["continuous_binning_strategy"] = alloy_continuous_binning_strategy
     if "continuous_binning_max_bins" in sig.parameters:
         params["continuous_binning_max_bins"] = alloy_continuous_binning_max_bins
+    # Fairness: every library gets the same thread budget. Before this, peers
+    # were pinned to a single thread while AlloyGBM silently used every core,
+    # which inflated its measured fit speed by roughly its parallel speedup.
+    if "n_jobs" in sig.parameters:
+        params["n_jobs"] = threads
     return params
 
 
@@ -840,6 +858,7 @@ def _classifier_factories(
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
+    threads: int = 1,
 ) -> dict:
     from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
@@ -847,6 +866,7 @@ def _classifier_factories(
     alloy_params = _build_alloy_params(
         gbm_classifier_cls, seed, learning_rate, max_depth, rounds,
         alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
+        threads,
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
@@ -863,9 +883,14 @@ def _classifier_factories(
             max_depth=max_depth,
             n_estimators=rounds,
             subsample=0.8,
+            # LightGBM ignores `subsample` unless bagging_freq >= 1.
+            subsample_freq=1,
+            # Match the depth-wise peers' capacity; LightGBM's
+            # num_leaves default of 31 would cap trees below 2**max_depth.
+            num_leaves=2 ** max_depth,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             verbose=-1,
         ),
         "xgboost": lambda: XGBClassifier(
@@ -877,7 +902,7 @@ def _classifier_factories(
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             tree_method="hist",
             verbosity=0,
         ),
@@ -891,7 +916,7 @@ def _classifier_factories(
             random_seed=seed,
             verbose=False,
             allow_writing_files=False,
-            thread_count=1,
+            thread_count=threads,
         )
     return factories
 
@@ -907,6 +932,7 @@ def _multiclass_classifier_factories(
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
+    threads: int = 1,
 ) -> dict:
     from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
@@ -914,6 +940,7 @@ def _multiclass_classifier_factories(
     alloy_params = _build_alloy_params(
         gbm_classifier_cls, seed, learning_rate, max_depth, rounds,
         alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
+        threads,
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
@@ -931,9 +958,14 @@ def _multiclass_classifier_factories(
             max_depth=max_depth,
             n_estimators=rounds,
             subsample=0.8,
+            # LightGBM ignores `subsample` unless bagging_freq >= 1.
+            subsample_freq=1,
+            # Match the depth-wise peers' capacity; LightGBM's
+            # num_leaves default of 31 would cap trees below 2**max_depth.
+            num_leaves=2 ** max_depth,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             verbose=-1,
         ),
         "xgboost": lambda: XGBClassifier(
@@ -946,7 +978,7 @@ def _multiclass_classifier_factories(
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             tree_method="hist",
             verbosity=0,
         ),
@@ -960,7 +992,7 @@ def _multiclass_classifier_factories(
             random_seed=seed,
             verbose=False,
             allow_writing_files=False,
-            thread_count=1,
+            thread_count=threads,
         )
     return factories
 
@@ -975,10 +1007,12 @@ def _ranker_factories(
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
+    threads: int = 1,
 ) -> dict:
     alloy_params = _build_alloy_params(
         gbm_ranker_cls, seed, learning_rate, max_depth, rounds,
         alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
+        threads,
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
@@ -995,9 +1029,14 @@ def _ranker_factories(
             max_depth=max_depth,
             n_estimators=rounds,
             subsample=0.8,
+            # LightGBM ignores `subsample` unless bagging_freq >= 1.
+            subsample_freq=1,
+            # Match the depth-wise peers' capacity; LightGBM's num_leaves
+            # default of 31 would cap trees below 2**max_depth.
+            num_leaves=2 ** max_depth,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             verbose=-1,
         ),
         "xgboost": lambda: _XGBRankerAdapter(
@@ -1008,7 +1047,7 @@ def _ranker_factories(
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=seed,
-            n_jobs=1,
+            n_jobs=threads,
             tree_method="hist",
             verbosity=0,
         ),
@@ -1021,7 +1060,7 @@ def _ranker_factories(
             random_seed=seed,
             verbose=False,
             allow_writing_files=False,
-            thread_count=1,
+            thread_count=threads,
         )
     return factories
 
@@ -1469,6 +1508,48 @@ def _write_outputs(
     }
 
 
+def _capture_environment(threads: int) -> dict[str, object]:
+    """Record everything needed to judge whether two runs are comparable.
+
+    Benchmark numbers are only meaningful alongside the machine and library
+    versions that produced them, and the thread budget most of all: the same
+    code can look 2x faster purely by being allowed more cores.
+    """
+    def _version(module_name: str) -> str:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            return "unavailable"
+        return str(getattr(module, "__version__", "unknown"))
+
+    return {
+        "threads_per_library": threads,
+        "logical_cpus": os.cpu_count() or 1,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor() or platform.machine(),
+        "python": platform.python_version(),
+        "versions": {
+            "alloygbm": _version("alloygbm"),
+            "lightgbm": _version("lightgbm"),
+            "xgboost": _version("xgboost"),
+            "catboost": _version("catboost"),
+            "numpy": _version("numpy"),
+            "sklearn": _version("sklearn"),
+        },
+        "thread_env": {
+            var: os.environ.get(var, "")
+            for var in (
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS",
+            )
+        },
+    }
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1495,6 +1576,17 @@ def main(argv: list[str]) -> int:
         type=int,
         default=256,
         help="max quantized bins for alloy continuous binning modes that use cut points",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help=(
+            "thread budget applied identically to every library "
+            "(AlloyGBM n_jobs, LightGBM/XGBoost n_jobs, CatBoost thread_count). "
+            "Default 1 makes the comparison single-threaded and therefore the "
+            "most reproducible across machines; pass 0 to use all logical CPUs."
+        ),
     )
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--force-prepare", action="store_true")
@@ -1560,6 +1652,27 @@ def main(argv: list[str]) -> int:
         return 2
 
     repo_root = Path(__file__).resolve().parents[1]
+
+    # Fairness: one thread budget, applied identically to every library. `0`
+    # means "all logical CPUs". Pinning the BLAS/OpenMP env vars as well stops
+    # a library's own runtime from quietly grabbing more threads than it was
+    # asked for, which would make the timings incomparable.
+    resolved_threads = os.cpu_count() or 1 if args.threads == 0 else max(1, args.threads)
+    for _var in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ[_var] = str(resolved_threads)
+    environment = _capture_environment(resolved_threads)
+    print(
+        "thread budget: "
+        f"{resolved_threads} (identical for alloygbm/lightgbm/xgboost/catboost); "
+        f"host has {environment['logical_cpus']} logical CPUs"
+    )
+
     try:
         gbm_regressor_cls, alloy_runtime = _load_alloygbm_runtime()
     except RuntimeError as exc:
@@ -1632,6 +1745,7 @@ def main(argv: list[str]) -> int:
                 alloy_continuous_binning_strategy=args.alloy_continuous_binning_strategy,
                 alloy_continuous_binning_max_bins=args.alloy_continuous_binning_max_bins,
                 linear_lambda_l2=args.linear_lambda_l2,
+                threads=resolved_threads,
             )
 
             for scenario in args.scenarios:
@@ -1777,6 +1891,30 @@ def main(argv: list[str]) -> int:
         "models_filter": args.models,
         "alloygbm_runtime": alloy_runtime,
         "catboost_runtime": catboost_runtime,
+        # Fairness record: the thread budget every library was held to, plus
+        # the host and library versions. Results are only comparable against
+        # another run with the same values here.
+        "threads_per_library": resolved_threads,
+        "environment": environment,
+        "fairness": {
+            "thread_budget_applied_to": [
+                "alloygbm (n_jobs)",
+                "lightgbm (n_jobs)",
+                "xgboost (n_jobs)",
+                "catboost (thread_count)",
+            ],
+            "row_subsample": 0.8,
+            "col_subsample": 0.8,
+            "lightgbm_subsample_freq": 1,
+            "lightgbm_num_leaves": "2 ** max_depth",
+            "notes": (
+                "All libraries share learning_rate, max_depth, n_estimators, "
+                "row/column subsampling, and seed. LightGBM additionally needs "
+                "subsample_freq>=1 for bagging to apply at all, and "
+                "num_leaves=2**max_depth so its leaf-wise growth reaches the "
+                "same capacity as the depth-wise peers."
+            ),
+        },
     }
     paths = _write_outputs(args.output_dir, run_id, records, params)
     print(f"wrote comparison csv: {paths['csv']}")

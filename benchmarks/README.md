@@ -77,6 +77,34 @@ The two `*_linear` arms apply `lambda_l2=0.01` by default
 (tunable via `--alloy-linear-lambda-l2`), as recommended for weight stability
 under the closed-form ridge solve.
 
+### Fairness and thread budget
+
+`--threads N` applies one compute budget to **every** library through its own
+knob (AlloyGBM/LightGBM/XGBoost `n_jobs`, CatBoost `thread_count`), and pins
+`OMP_NUM_THREADS` and the BLAS thread variables to match so no runtime quietly
+takes more. `--threads 0` uses all logical CPUs. Every run records the budget,
+host, and library versions in its JSON output under `params.environment`, and
+the matched-hyperparameter settings under `params.fairness`.
+
+Two LightGBM-specific corrections are applied automatically, without which the
+"identical hyperparameters" claim would be false: `subsample_freq=1` (LightGBM
+ignores `subsample` otherwise) and `num_leaves = 2 ** max_depth` (its default
+of 31 caps trees below the depth-wise peers).
+
+**Run the curated suite single-threaded.** At its dataset sizes (142-40,000
+rows) forcing all cores measures thread-spawn overhead, not throughput:
+LightGBM and XGBoost are *slower* multi-threaded than single-threaded below
+roughly 40,000 rows. For the realistic multi-threaded picture use
+`benchmarks/scale_comparison.py`, which runs 200k- and 1M-row datasets across
+thread budgets.
+
+```bash
+python3 benchmarks/run_model_comparison.py --threads 1                    # curated suite
+python3 benchmarks/scale_comparison.py --rows 200000 1000000 --threads 1 10
+```
+
+Published v1.0.0 results: [`docs/benchmarks/v1.0.0_comparison.md`](../docs/benchmarks/v1.0.0_comparison.md).
+
 Use `--models` to filter which arms run. Example: just MorphBoost vs peers:
 
 ```bash

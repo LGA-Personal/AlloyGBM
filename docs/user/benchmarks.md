@@ -5,7 +5,57 @@ say.
 
 ## Methodology
 
-The comparative benchmark runner lives in `benchmarks/run_model_comparison.py`.
+The comparative benchmark runner lives in `benchmarks/run_model_comparison.py`,
+with a large-scale, thread-sweeping companion at
+`benchmarks/scale_comparison.py`.
+
+### Fairness controls
+
+Benchmark numbers are only meaningful if every library is given the same work
+and the same resources. The harness enforces this explicitly, and each run
+records the settings it used in its JSON output under `params.fairness` and
+`params.environment`.
+
+**Equal compute budget.** `--threads N` is applied to every library through its
+own knob — AlloyGBM/LightGBM/XGBoost `n_jobs`, CatBoost `thread_count` — and the
+OpenMP/BLAS environment variables (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+`MKL_NUM_THREADS`, `NUMEXPR_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`) are pinned
+to the same value so no library's runtime quietly takes more. `--threads 0`
+means all logical CPUs.
+
+> Before v1.0.0 this was wrong in AlloyGBM's favour: the peer libraries were
+> hard-coded to a single thread while AlloyGBM was left unconstrained and used
+> every core. Any speed comparison published from a pre-1.0 run is inflated by
+> roughly AlloyGBM's parallel speedup and should not be trusted.
+
+**Equal hyperparameters.** All libraries share `n_estimators`, `learning_rate`,
+`max_depth`, the seed, and row/column subsampling (0.8/0.8). Two
+library-specific corrections are needed for that equality to be real:
+
+- LightGBM silently ignores `subsample` unless `subsample_freq >= 1`. Without
+  the fix it trained on 100% of rows while the others used 80%.
+- LightGBM grows leaf-wise and caps trees at `num_leaves=31` by default, so a
+  shared `max_depth=6` did not give it the same capacity as the depth-wise
+  peers. The harness sets `num_leaves = 2 ** max_depth`.
+
+**Equal data.** Every library receives the same arrays from the same
+train/test split; data preparation and metric computation sit outside the
+timed region.
+
+### Choosing a thread budget
+
+The curated scenario suite is run **single-threaded**. That is deliberate: at
+these dataset sizes (142 to 40,000 rows) forcing all 10 cores measures
+thread-spawn overhead rather than throughput. On the reference host LightGBM
+and XGBoost are *slower* multi-threaded than single-threaded below roughly
+40,000 rows — LightGBM by up to 20x on the smallest scenarios. Reporting a
+multi-threaded win at that scale would flatter AlloyGBM for a reason that has
+nothing to do with its algorithms.
+
+Single-threaded results are therefore the honest per-core comparison, and are
+also the most reproducible across machines. The realistic multi-threaded case
+is covered separately by `benchmarks/scale_comparison.py` on 200k- and
+1M-row datasets, where parallelism genuinely pays for every library.
 
 The suite compares AlloyGBM against:
 
@@ -107,27 +157,46 @@ each library behaves under different learning-rate / depth / round budgets.
 
 ## Current Results
 
+Full v1.0.0 tables, including the large-scale multi-threaded runs, are in
+[docs/benchmarks/v1.0.0_comparison.md](../benchmarks/v1.0.0_comparison.md).
+Across the 15 curated scenarios AlloyGBM wins 5 and places top-two on 11.
+
 ### Regression
 
-- AlloyGBM is strongest on `panel_time_series`.
-- AlloyGBM is strong on `dow_jones_financial`, especially under the deeper
-  low-learning-rate profile.
-- AlloyGBM is competitive but not leading on `dense_numeric`.
-- AlloyGBM now leads XGBoost, LightGBM, and CatBoost on `bike_sharing`
-  (v1.0.0 re-run, seed 7: AlloyGBM 68.72 RMSE against XGBoost 70.95,
-  LightGBM 72.53, CatBoost 75.80).
-- AlloyGBM currently trails on `california_housing`.
-- AlloyGBM is typically the fastest trainer on most scenario/profile rows.
+- AlloyGBM is strongest on `histogram_stress` by a wide margin (0.1803 RMSE
+  against 0.3600-0.3649 for all three peers).
+- AlloyGBM leads on `bike_sharing` (68.72 RMSE vs LightGBM 70.00,
+  XGBoost 70.95, CatBoost 75.80) and `dow_jones_financial` (3.3944 vs
+  CatBoost 3.4517, XGBoost 3.5226, LightGBM 3.5559).
+- AlloyGBM is second on `abalone_regression` and `dense_numeric`.
+- AlloyGBM trails on `california_housing` (0.4933 vs LightGBM 0.4670) and is
+  last of four on `panel_time_series` (32.51 vs CatBoost 31.17).
+
+> Earlier releases claimed `panel_time_series` as AlloyGBM's strongest
+> scenario. That claim came from a run in which LightGBM's bagging was
+> silently disabled and its trees were capped at half the peers' capacity;
+> once both were corrected the ordering changed. It is recorded here rather
+> than quietly dropped.
 
 ### Classification
 
-- AlloyGBM is competitive with established libraries on accuracy, log-loss, and
-  AUC metrics across `breast_cancer` and `synthetic_classification`.
+- AlloyGBM is second on `synthetic_classification` (0.9842 vs CatBoost 0.9858)
+  and third on `adult_income` (0.8676 vs LightGBM 0.8697) — all four libraries
+  within 0.8 percentage points.
+- AlloyGBM trails on the small `breast_cancer` set (0.9474 vs LightGBM 0.9737;
+  455 training rows, so single-digit prediction flips move the metric).
+- Multiclass: second on `digits_multiclass` and `synthetic_multiclass`, tied
+  first on `wine_multiclass`.
 
 ### Ranking
 
-- AlloyGBM competes on `synthetic_ranking` using its native LambdaMART
-  implementation, evaluated via NDCG@5, NDCG@10, and full NDCG.
+- AlloyGBM leads `synthetic_ranking` (NDCG@10 1.0000) and is second on
+  `california_ranking` (0.7674), ahead of CatBoost (0.7461) and LightGBM
+  (0.7430), behind XGBoost (0.7727).
+- The `lambdarank_normalize=True` default introduced in v1.0.0 is what moved
+  `california_ranking` from 0.6547 to 0.7674. On that dataset (median 120,
+  max 3,307 documents per query) raising `lambdarank_truncation_level` above
+  the default 30 gains a further ~0.04 NDCG@10 at ~1.5x the fit time.
 
 ### MorphBoost Variants
 

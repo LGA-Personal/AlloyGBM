@@ -320,14 +320,31 @@ deployment matrix users actually have.
 Public-facing benchmark claims live in `README.md` and `docs/user/benchmarks.md`.
 They must stay honest about both strengths and weak spots — never claim
 parity or dominance unless the comparative results actually support it. The
-current public claim (re-verified for v1.0.0):
+current public claim (measured for v1.0.0; full tables in
+`docs/benchmarks/v1.0.0_comparison.md`):
 
-- **Regression:** strongest on `panel_time_series`; strong on
-  `dow_jones_financial`; leads all peers on `bike_sharing`; competitive on
-  `dense_numeric`; trails on `california_housing`.
-- **Classification:** competitive with established libraries on standard
-  datasets (`breast_cancer`, `synthetic_classification`).
-- **Ranking:** competes via native LambdaMART on synthetic ranking scenarios.
+- **Accuracy:** wins 5 of 15 curated scenarios, top-two on 11. Strongest on
+  `histogram_stress`; leads `bike_sharing`, `dow_jones_financial`, and both
+  ranking scenarios; trails on `panel_time_series`, `california_housing`,
+  `breast_cancer`, `adult_income`. Effectively tied with all peers at
+  200k-1M rows.
+- **Fit speed:** the weak axis, and stated as such. LightGBM/XGBoost are
+  ~3-4x faster per core on the curated suite (fixed per-round overhead
+  dominates at those sizes), narrowing to ~1.3x at 200k rows and 1.5-1.8x at
+  1M. Parallel scaling reaches 1.6-1.8x on 10 cores against LightGBM's
+  2.5-2.8x and CatBoost's 4.0-4.2x.
+- **Prediction speed:** competitive; markedly faster than LightGBM
+  single-threaded.
+
+**Fairness is part of the claim.** A benchmark number is only publishable
+alongside an equal thread budget for every library, matched hyperparameters
+(including `subsample_freq=1` and `num_leaves=2**max_depth` for LightGBM,
+without which its bagging is silently disabled and its trees are capped at
+half the peers' capacity), and a recorded environment. The harness enforces
+and records all of this; see `params.fairness` in the JSON output. Do not
+publish a comparison produced without it -- the pre-1.0 harness pinned peers
+to one thread while AlloyGBM used every core, and every speed claim from that
+era was inflated.
 
 Do not broaden these claims unless a new benchmark run materially changes
 the picture. If the picture changes, update both the README and the

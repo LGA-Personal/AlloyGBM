@@ -25,7 +25,11 @@ from typing import Any
 
 import numpy as np
 
-from .ranker import DEFAULT_LAMBDARANK_TRUNCATION_LEVEL, GBMRanker
+from .ranker import (
+    DEFAULT_LAMBDARANK_NORMALIZE,
+    DEFAULT_LAMBDARANK_TRUNCATION_LEVEL,
+    GBMRanker,
+)
 from ._regressor._core import _validate_n_jobs
 from ._regressor._quantization import _QuantizationMixin
 from ._regressor._shap import _ShapMixin
@@ -856,7 +860,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             )
         )
         joint_lambdarank_normalize = GBMRanker._validate_lambdarank_normalize(
-            kw.get("lambdarank_normalize", False)
+            kw.get("lambdarank_normalize", DEFAULT_LAMBDARANK_NORMALIZE)
         )
         (
             artifact,

@@ -108,10 +108,13 @@ def test_joint_mode_lambdarank_truncation_level_changes_ndcg_fit():
 def test_joint_mode_lambdarank_normalize_changes_ndcg_fit():
     X, y, group = _toy_ranking(n_queries=10, items_per_query=6, n_labels=2, seed=31)
 
+    # `lambdarank_normalize` defaults to True since v1.0.0, so the
+    # unnormalized arm opts out explicitly.
     unnormalized = MultiLabelGBMRanker(
         n_estimators=5,
         multi_label_mode="joint",
         ranking_objective="rank:ndcg",
+        lambdarank_normalize=False,
         seed=31,
     )
     normalized = MultiLabelGBMRanker(

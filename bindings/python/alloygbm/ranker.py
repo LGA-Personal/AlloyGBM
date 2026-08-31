@@ -43,6 +43,10 @@ _OBJECTIVE_NAME_MAP = {
 # O(n^2) per query group.
 DEFAULT_LAMBDARANK_TRUNCATION_LEVEL = 30
 
+# LightGBM's `lambdarank_norm` default. Per-query lambda normalization keeps
+# queries with very different document counts contributing comparably.
+DEFAULT_LAMBDARANK_NORMALIZE = True
+
 
 class GBMRanker(_GBMEstimatorCore):
     """Gradient Boosted Decision Tree learning-to-rank estimator.
@@ -90,10 +94,14 @@ class GBMRanker(_GBMEstimatorCore):
         harmless. With large groups (thousands of documents, typical of
         financial cross-sections) the default discards most pairs — raise it
         or pass ``None`` if ranking quality matters more than fit time.
-    lambdarank_normalize : bool, default ``False``
-        For ``"rank:ndcg"``, apply per-query LambdaMART lambda normalization.
-        This can improve behavior on unbalanced query groups. ``False``
-        preserves the original unnormalized objective.
+    lambdarank_normalize : bool, default ``True``
+        For ``"rank:ndcg"``, apply per-query LambdaMART lambda normalization,
+        which keeps queries with very different document counts contributing
+        comparably. Matches LightGBM's ``lambdarank_norm`` default. Measured
+        NDCG@10 improvement on the benchmark suite: 0.6524 to 0.6907 on
+        ``california_ranking`` (uneven groups, median 120 / max 3307 docs) and
+        0.9649 to 0.9697 on uniform 50-document groups. Pass ``False`` for the
+        unnormalized objective.
     """
 
     def __init__(
@@ -102,7 +110,7 @@ class GBMRanker(_GBMEstimatorCore):
         ranking_objective: str = "rank:ndcg",
         ranking_sigma: float = 1.0,
         lambdarank_truncation_level: int | None = DEFAULT_LAMBDARANK_TRUNCATION_LEVEL,
-        lambdarank_normalize: bool = False,
+        lambdarank_normalize: bool = DEFAULT_LAMBDARANK_NORMALIZE,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
@@ -149,7 +157,7 @@ class GBMRanker(_GBMEstimatorCore):
         _inspect.Parameter(
             "lambdarank_normalize",
             _inspect.Parameter.KEYWORD_ONLY,
-            default=False,
+            default=DEFAULT_LAMBDARANK_NORMALIZE,
             annotation=bool,
         )
     )
