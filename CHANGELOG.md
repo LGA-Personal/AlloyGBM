@@ -65,6 +65,18 @@ Explicitly *not* covered:
 
 ### Fixed (v1.0 readiness review)
 
+- **Thread count could change the trained model.** Partition gradient
+  statistics were reduced in chunks whose width was derived from
+  `rayon::current_num_threads()`, so the summation order -- and therefore node
+  statistics and leaf values -- varied with `n_jobs`. Fits from roughly 100k
+  rows upward produced genuinely different artifacts at different thread
+  counts, contradicting the determinism guarantee published above. The chunk
+  width is now fixed and independent of the thread count; the fix is
+  performance-neutral. It survived until now because the existing
+  thread-invariance tests use ~1,000 rows, where the drift stays below the last
+  mantissa bit of every leaf value -- regression tests at 100k rows (Python)
+  and on adversarially-scaled gradients (Rust) now cover it.
+
 - **Piecewise-linear leaves could diverge with `lambda_l2=0`.** A
   near-singular `XᵀHX` passed the positive-definiteness and diagonal-ratio
   guards (both inspect only the diagonal), so Cholesky returned weights

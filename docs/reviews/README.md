@@ -40,4 +40,5 @@ link it both ways.
 |---|---|---|---|
 | [Core review](2026-07-02-v0.12.10-core.md) — whole-workspace design/efficiency/accuracy | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-core-resolutions.md) |
 | [Special-modes review](2026-07-02-v0.12.10-special-modes.md) — MorphBoost, DRO, PL trees, neutralization, objectives, DART/GOSS (incl. 2 correctness bugs) | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-special-modes-resolutions.md) |
+| [Parallel scaling investigation](2026-09-01-parallel-scaling-investigation.md) — Amdahl profiling, feature-count-bound histogram parallelism, one determinism bug fixed | v1.0.0-prep | Claude Fable 5 | Bottleneck identified; optimization deferred |
 | [v1.0 readiness review](2026-08-29-v1.0-prep.md) — verification of PRs #71–#141 + remaining defects (PL λ=0 divergence, SHAP brute-force default, inert EFB) | v0.12.10+ (`c1ad430`) | Claude Fable 5 | [Complete](2026-08-29-v1.0-prep-resolutions.md) |

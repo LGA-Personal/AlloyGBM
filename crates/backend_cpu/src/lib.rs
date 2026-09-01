@@ -40,6 +40,12 @@ use split_scan::with_split_scan_scratch;
 
 pub use alloygbm_core::simd;
 
+/// Rows per chunk when reducing partition gradient statistics.
+///
+/// Fixed, never derived from the thread count, so the reduction order -- and
+/// therefore the floating-point result -- is identical at any `n_jobs`.
+pub(crate) const PARTITION_STATS_CHUNK_ROWS: usize = 4_096;
+
 thread_local! {
     /// Per-thread reusable histogram arena to avoid repeated allocation.
     static THREAD_ARENA: RefCell<HistogramArena> = RefCell::new(HistogramArena::new(0, 0, false));
@@ -1784,7 +1790,12 @@ impl CpuBackend {
         split: &SplitCandidate,
         lookup: SplitRowLookup,
     ) -> (NodeStats, NodeStats) {
-        let chunk_size = (rows.len() / rayon::current_num_threads().max(1)).max(4096);
+        // Chunk width must depend only on the row count. Deriving it from
+        // `current_num_threads()` made the per-chunk gradient sums fold in a
+        // different order at each `n_jobs`, so node statistics -- and therefore
+        // leaf values -- drifted between thread counts, silently breaking the
+        // byte-identical-across-threads guarantee from roughly 100k rows up.
+        let chunk_size = PARTITION_STATS_CHUNK_ROWS;
         let chunk_stats: Vec<ChunkStats> = rows
             .par_chunks(chunk_size)
             .map(|chunk| {

@@ -508,7 +508,7 @@ fn legacy_parallel_partition_with_stats(
 ) -> (PartitionResult, NodeStats, NodeStats) {
     type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32, f32, f32);
 
-    let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
+    let chunk_size = crate::PARTITION_STATS_CHUNK_ROWS;
     let chunk_results: Vec<ChunkResult> = node
         .row_indices
         .par_chunks(chunk_size)
@@ -1586,19 +1586,36 @@ fn owned_partition_matches_parallel_chunk_statistic_order() {
     let node = NodeSlice::new(0, (0..ROWS as u32).collect()).expect("node");
     let split = split_candidate(0, 0, false, false, None);
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .expect("test pool")
-        .install(|| {
-            assert_eq!(rayon::current_num_threads(), 4);
-            let expected = legacy_parallel_partition_with_stats(&matrix, &gradients, &node, &split);
-            let actual = backend
-                .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
-                .expect("owned partition");
+    // The gradients above span 1e20 and 1.0 with alternating signs, so any
+    // change in reduction order shows up immediately in the summed node
+    // statistics. Partitioning must therefore produce bit-identical stats at
+    // every thread count -- AlloyGBM's byte-identical-across-`n_jobs`
+    // guarantee at its most sensitive point.
+    let mut results = Vec::new();
+    for threads in [1, 2, 4, 8] {
+        let node = node.clone();
+        let stats = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test pool")
+            .install(|| {
+                backend
+                    .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+                    .expect("owned partition")
+            });
+        results.push((threads, stats));
+    }
+    let (_, reference) = &results[0];
+    for (threads, actual) in &results[1..] {
+        assert_eq!(
+            actual, reference,
+            "partition statistics changed at {threads} threads"
+        );
+    }
 
-            assert_eq!(actual, expected);
-        });
+    // And it must still match a straightforward fixed-chunk reduction.
+    let expected = legacy_parallel_partition_with_stats(&matrix, &gradients, &node, &split);
+    assert_eq!(&results[0].1, &expected);
 }
 
 #[test]
