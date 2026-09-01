@@ -132,9 +132,28 @@ impl CpuBackend {
         }
     }
 
+    /// Accumulate one row's gradient into a histogram bin.
+    #[inline(always)]
+    fn accumulate_bin<const INCLUDE_GRAD_SQ: bool>(
+        arena: &mut HistogramArena,
+        target: usize,
+        gradient: GradientPair,
+    ) {
+        arena.grad_sums[target] += gradient.grad;
+        arena.hess_sums[target] += gradient.hess;
+        if INCLUDE_GRAD_SQ {
+            arena.grad_sq_sums.as_mut().expect("DRO arena")[target] +=
+                gradient.grad * gradient.grad;
+        }
+        arena.counts[target] += 1;
+    }
+
+    /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
+    /// [`gather_node_gradients`]. Reading by position keeps this loop's
+    /// gradient access sequential; only the bin lookup still gathers.
     fn build_tile_histograms_per_feature<const INCLUDE_GRAD_SQ: bool>(
         binned_matrix: &BinnedMatrix,
-        gradients: &[GradientPair],
+        node_gradients: &[GradientPair],
         node: &NodeSlice,
         start_feature: usize,
         end_feature: usize,
@@ -148,33 +167,24 @@ impl CpuBackend {
             if use_col_major {
                 // Column-major: sequential bin reads — cache-friendly
                 let col_base = feature_index * row_count;
-                for &row_index in &node.row_indices {
-                    let row_index = row_index as usize;
-                    let bin_index = binned_matrix.col_bin(col_base + row_index) as usize;
-                    let gradient = gradients[row_index];
-                    let target = base + bin_index;
-                    arena.grad_sums[target] += gradient.grad;
-                    arena.hess_sums[target] += gradient.hess;
-                    if INCLUDE_GRAD_SQ {
-                        arena.grad_sq_sums.as_mut().expect("DRO arena")[target] +=
-                            gradient.grad * gradient.grad;
-                    }
-                    arena.counts[target] += 1;
+                for (position, &row_index) in node.row_indices.iter().enumerate() {
+                    let bin_index = binned_matrix.col_bin(col_base + row_index as usize) as usize;
+                    Self::accumulate_bin::<INCLUDE_GRAD_SQ>(
+                        arena,
+                        base + bin_index,
+                        node_gradients[position],
+                    );
                 }
             } else {
-                for &row_index in &node.row_indices {
-                    let row_index = row_index as usize;
-                    let cell_index = row_index * binned_matrix.feature_count + feature_index;
+                for (position, &row_index) in node.row_indices.iter().enumerate() {
+                    let cell_index =
+                        row_index as usize * binned_matrix.feature_count + feature_index;
                     let bin_index = binned_matrix.row_bin(cell_index) as usize;
-                    let gradient = gradients[row_index];
-                    let target = base + bin_index;
-                    arena.grad_sums[target] += gradient.grad;
-                    arena.hess_sums[target] += gradient.hess;
-                    if INCLUDE_GRAD_SQ {
-                        arena.grad_sq_sums.as_mut().expect("DRO arena")[target] +=
-                            gradient.grad * gradient.grad;
-                    }
-                    arena.counts[target] += 1;
+                    Self::accumulate_bin::<INCLUDE_GRAD_SQ>(
+                        arena,
+                        base + bin_index,
+                        node_gradients[position],
+                    );
                 }
             }
         }
@@ -251,7 +261,7 @@ impl CpuBackend {
 
     fn build_feature_histograms_for_tile(
         binned_matrix: &BinnedMatrix,
-        gradients: &[GradientPair],
+        node_gradients: &[GradientPair],
         node: &NodeSlice,
         tile: &FeatureTile,
         bin_count: usize,
@@ -260,7 +270,7 @@ impl CpuBackend {
         if binned_matrix.feature_bundle_map().is_some() {
             return Self::build_feature_histograms_for_bundled_tile(
                 binned_matrix,
-                gradients,
+                node_gradients,
                 node,
                 tile,
                 bin_count,
@@ -293,7 +303,7 @@ impl CpuBackend {
             match (use_per_feature, include_grad_sq) {
                 (true, false) => Self::build_tile_histograms_per_feature::<false>(
                     binned_matrix,
-                    gradients,
+                    node_gradients,
                     node,
                     start_feature,
                     end_feature,
@@ -301,7 +311,7 @@ impl CpuBackend {
                 ),
                 (true, true) => Self::build_tile_histograms_per_feature::<true>(
                     binned_matrix,
-                    gradients,
+                    node_gradients,
                     node,
                     start_feature,
                     end_feature,
@@ -309,7 +319,7 @@ impl CpuBackend {
                 ),
                 (false, false) => Self::build_tile_histograms_row_first_unrolled::<false>(
                     binned_matrix,
-                    gradients,
+                    node_gradients,
                     node,
                     start_feature,
                     end_feature,
@@ -317,7 +327,7 @@ impl CpuBackend {
                 ),
                 (false, true) => Self::build_tile_histograms_row_first_unrolled::<true>(
                     binned_matrix,
-                    gradients,
+                    node_gradients,
                     node,
                     start_feature,
                     end_feature,
@@ -330,9 +340,11 @@ impl CpuBackend {
         })
     }
 
+    /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
+    /// [`gather_node_gradients`].
     pub(crate) fn build_feature_histograms_for_bundled_tile(
         binned_matrix: &BinnedMatrix,
-        gradients: &[GradientPair],
+        node_gradients: &[GradientPair],
         node: &NodeSlice,
         tile: &FeatureTile,
         bin_count: usize,
@@ -368,10 +380,10 @@ impl CpuBackend {
             let mut arena = cell.borrow_mut();
             arena.resize_for_tile(end_feature - start_feature, bin_count, include_grad_sq);
             for (storage_feature, assignments) in storage_groups {
-                for &row_index in &node.row_indices {
+                for (position, &row_index) in node.row_indices.iter().enumerate() {
                     let row_index = row_index as usize;
                     let storage_bin = binned_matrix.storage_col_bin(storage_feature, row_index);
-                    let gradient = gradients[row_index];
+                    let gradient = node_gradients[position];
                     for &(local_feature, assignment) in &assignments {
                         let bin = assignment.decode(
                             storage_bin,
@@ -393,6 +405,30 @@ impl CpuBackend {
                 .to_bundle(node.node_id, start_feature)
                 .map_err(EngineError::from)
         })
+    }
+
+    /// Gather a node's gradients into the order of its row list.
+    ///
+    /// The histogram kernels need one gradient per (feature, row). Reading
+    /// them straight out of the full `gradients` array repeats the same
+    /// scattered gather once per feature -- 40 sparse passes over the gradient
+    /// array for a 40-feature fit. It gets worse with depth: a node deep in
+    /// the tree holds rows spread thinly across the whole range, so most of
+    /// each 64-byte cache line fetched is discarded, and every feature pays
+    /// that cost again.
+    ///
+    /// Gathering once into a compact buffer turns those F sparse passes into
+    /// one sparse pass plus F sequential ones. This is the same trick as
+    /// LightGBM's ordered gradients.
+    ///
+    /// Accumulation order is untouched -- position `i` still corresponds to
+    /// `row_indices[i]`, and bins are visited in the same sequence -- so the
+    /// histograms are bit-identical to reading through the row index.
+    fn gather_node_gradients(gradients: &[GradientPair], row_indices: &[u32]) -> Vec<GradientPair> {
+        row_indices
+            .iter()
+            .map(|&row_index| gradients[row_index as usize])
+            .collect()
     }
 
     pub(crate) fn build_histograms_internal(
@@ -418,13 +454,17 @@ impl CpuBackend {
         node.validate_bounds(binned_matrix.row_count)?;
 
         let bin_count = binned_matrix.max_bin as usize + 1;
+        // Gathered once per node and shared by every tile, so the cost is paid
+        // once instead of once per feature.
+        let node_gradients = Self::gather_node_gradients(gradients, &node.row_indices);
+        let node_gradients = node_gradients.as_slice();
         let mut per_tile_histograms = if parallel_tiles {
             feature_tiles
                 .par_iter()
                 .map(|tile| {
                     Self::build_feature_histograms_for_tile(
                         binned_matrix,
-                        gradients,
+                        node_gradients,
                         node,
                         tile,
                         bin_count,
@@ -438,7 +478,7 @@ impl CpuBackend {
                 .map(|tile| {
                     Self::build_feature_histograms_for_tile(
                         binned_matrix,
-                        gradients,
+                        node_gradients,
                         node,
                         tile,
                         bin_count,
@@ -459,9 +499,11 @@ impl CpuBackend {
         Ok(histograms)
     }
 
+    /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
+    /// [`gather_node_gradients`].
     fn build_tile_histograms_row_first_unrolled<const INCLUDE_GRAD_SQ: bool>(
         binned_matrix: &BinnedMatrix,
-        gradients: &[GradientPair],
+        node_gradients: &[GradientPair],
         node: &NodeSlice,
         start_feature: usize,
         end_feature: usize,
@@ -472,6 +514,7 @@ impl CpuBackend {
 
         // Process rows in 8-wide chunks to improve instruction-level parallelism.
         let mut row_chunks = node.row_indices.chunks_exact(8);
+        let mut position = 0usize;
         for row_chunk in &mut row_chunks {
             let row0 = row_chunk[0] as usize;
             let row1 = row_chunk[1] as usize;
@@ -482,14 +525,14 @@ impl CpuBackend {
             let row6 = row_chunk[6] as usize;
             let row7 = row_chunk[7] as usize;
 
-            let gradient0 = gradients[row0];
-            let gradient1 = gradients[row1];
-            let gradient2 = gradients[row2];
-            let gradient3 = gradients[row3];
-            let gradient4 = gradients[row4];
-            let gradient5 = gradients[row5];
-            let gradient6 = gradients[row6];
-            let gradient7 = gradients[row7];
+            let gradient0 = node_gradients[position];
+            let gradient1 = node_gradients[position + 1];
+            let gradient2 = node_gradients[position + 2];
+            let gradient3 = node_gradients[position + 3];
+            let gradient4 = node_gradients[position + 4];
+            let gradient5 = node_gradients[position + 5];
+            let gradient6 = node_gradients[position + 6];
+            let gradient7 = node_gradients[position + 7];
 
             let row_base0 = row0 * feature_count + start_feature;
             let row_base1 = row1 * feature_count + start_feature;
@@ -576,12 +619,13 @@ impl CpuBackend {
                 }
                 arena.counts[idx7] += 1;
             }
+            position += 8;
         }
 
-        for &row_index in row_chunks.remainder() {
+        for (offset, &row_index) in row_chunks.remainder().iter().enumerate() {
             let row_index = row_index as usize;
             let row_base = row_index * feature_count + start_feature;
-            let gradient = gradients[row_index];
+            let gradient = node_gradients[position + offset];
             for local_feature_index in 0..tile_feature_count {
                 let bin_index = binned_matrix.row_bin(row_base + local_feature_index) as usize;
                 let flat_index = local_feature_index * arena.bin_count + bin_index;

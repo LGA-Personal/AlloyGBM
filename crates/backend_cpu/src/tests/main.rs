@@ -3807,3 +3807,83 @@ fn dro_categorical_production_dispatch_retains_scalar_fallback() {
     assert!(production.is_categorical);
     assert_eq!(scalar.categorical_bitset, production.categorical_bitset);
 }
+
+#[test]
+fn histogram_kernels_index_gathered_gradients_by_position() {
+    // The histogram kernels take gradients already gathered into the node's
+    // row order, so they index by position in `row_indices` rather than by
+    // row. The fixture uses a scattered row list: with a contiguous `0..n`
+    // node -- which every other kernel test here uses -- position and row
+    // index coincide and a kernel that confused them would still pass.
+    let row_count = 16usize;
+    let feature_count = 3usize;
+    let max_bin = 3u16;
+    let bins = (0..row_count * feature_count)
+        .map(|cell| ((cell * 7 + cell / 3) % (max_bin as usize + 1)) as u8)
+        .collect::<Vec<_>>();
+    let matrix =
+        BinnedMatrix::new(row_count, feature_count, max_bin, bins).expect("binned matrix is valid");
+    let gradients = (0..row_count)
+        .map(|row| {
+            GradientPair::new(row as f32 * 1.5 - 4.0, 1.0 + row as f32 * 0.25)
+                .expect("gradient pair is finite")
+        })
+        .collect::<Vec<_>>();
+    let node = NodeSlice::new(0, vec![1, 4, 7, 11, 13]).expect("node indices are valid");
+    assert!(
+        node.row_indices
+            .iter()
+            .enumerate()
+            .any(|(position, &row)| position as u32 != row),
+        "fixture must use rows whose positions differ from their indices"
+    );
+
+    let bin_count = max_bin as usize + 1;
+    let node_gradients = CpuBackend::gather_node_gradients(&gradients, &node.row_indices);
+
+    let mut gathered_arena = HistogramArena::new(feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true>(
+        &matrix,
+        &node_gradients,
+        &node,
+        0,
+        feature_count,
+        &mut gathered_arena,
+    );
+    let gathered = gathered_arena.to_bundle(0, 0).expect("gathered bundle");
+
+    // Reference: the row-indexed oracle kernel, which looks up `gradients[row]`
+    // directly and so is independent of the gather.
+    let mut reference_arena = HistogramArena::new(feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_row_first(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        feature_count,
+        &mut reference_arena,
+    );
+    let reference = reference_arena.to_bundle(0, 0).expect("reference bundle");
+    assert_eq!(
+        gathered, reference,
+        "gathering gradients into node order must not change the histogram"
+    );
+
+    // Confirm the fixture is sharp enough to detect the mix-up it guards
+    // against: feeding the row-indexed array to a position-indexing kernel
+    // must produce a different histogram.
+    let mut mismatched_arena = HistogramArena::new(feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true>(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        feature_count,
+        &mut mismatched_arena,
+    );
+    let mismatched = mismatched_arena.to_bundle(0, 0).expect("mismatched bundle");
+    assert_ne!(
+        mismatched, reference,
+        "fixture cannot distinguish position indexing from row indexing"
+    );
+}
