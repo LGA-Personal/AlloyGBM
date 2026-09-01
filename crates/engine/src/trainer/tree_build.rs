@@ -899,11 +899,28 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
         }
 
         let parallelize_nodes = should_parallelize_level(&active_nodes, feature_tiles);
-        let histogram_execution = if parallelize_nodes {
-            HistogramExecution::Sequential
-        } else {
-            HistogramExecution::Parallel
-        };
+        // Node-level and tile-level parallelism used to be strictly
+        // either/or, which starved the shallow levels: level-wise growth has
+        // 2 nodes at depth 1, 4 at depth 2, 8 at depth 3, so on a 10-core box
+        // those levels ran 2-, 4-, and 8-wide while tile parallelism sat
+        // switched off -- and each level touches roughly the whole row set, so
+        // they are not cheap levels to under-fill.
+        //
+        // Nest the two only when the node loop cannot fill the pool on its
+        // own. Once there are at least as many nodes as threads the outer
+        // loop already saturates, and adding an inner fork/join there just
+        // buys contention (the same effect that made nested split-finding a
+        // regression). Below that point the inner tile work is a histogram
+        // pass over many rows -- substantial enough to be worth stealing.
+        //
+        // Neither choice affects the trained model: tiles accumulate disjoint
+        // features, so per-feature bin sums are identical either way.
+        let histogram_execution =
+            if parallelize_nodes && active_nodes.len() >= rayon::current_num_threads() {
+                HistogramExecution::Sequential
+            } else {
+                HistogramExecution::Parallel
+            };
         let context = LevelProposalContext {
             backend,
             binned_matrix,
