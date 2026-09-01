@@ -2700,20 +2700,25 @@ impl Trainer {
             let RoundRowSelection {
                 selected: root_row_indices,
                 excluded: excluded_row_indices,
-            } = select_row_indices_for_round(
-                self.params.boosting_mode,
-                active_dataset.row_count(),
-                controls.row_subsample,
-                sampling_seed_base,
-                effective_round_index as u64,
-                &mut gradient_buffer,
-            );
-            let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
-                binned_matrix.feature_count,
-                controls.col_subsample,
-                sampling_seed_base,
-                effective_round_index as u64,
-            )?;
+            } = profile.time(ProfileStage::RowSampling, || {
+                select_row_indices_for_round(
+                    self.params.boosting_mode,
+                    active_dataset.row_count(),
+                    controls.row_subsample,
+                    sampling_seed_base,
+                    effective_round_index as u64,
+                    &mut gradient_buffer,
+                )
+            });
+            let (feature_tiles, sampled_feature_count) =
+                profile.time(ProfileStage::FeatureTiles, || {
+                    sampled_feature_tiles(
+                        binned_matrix.feature_count,
+                        controls.col_subsample,
+                        sampling_seed_base,
+                        effective_round_index as u64,
+                    )
+                })?;
             let sampled_row_count = root_row_indices.len();
             let gradients = &gradient_buffer;
             validate_gradient_pair_length(gradients, active_dataset.row_count())?;

@@ -65,6 +65,12 @@ impl Stage {
 pub(crate) struct RoundProfile {
     totals: [Duration; 8],
     rounds: usize,
+    /// Wall clock for the whole round loop, started at the first round.
+    ///
+    /// Without this the report can only show the sum of the timed stages,
+    /// which silently hides whatever the loop does outside them -- and that
+    /// residual is exactly where an unnoticed serial cost would sit.
+    started: Option<Instant>,
 }
 
 impl RoundProfile {
@@ -85,6 +91,7 @@ impl RoundProfile {
 
     pub(crate) fn note_round(&mut self) {
         if enabled() {
+            self.started.get_or_insert_with(Instant::now);
             self.rounds += 1;
         }
     }
@@ -95,16 +102,19 @@ impl RoundProfile {
             return;
         }
         let total: Duration = self.totals.iter().sum();
-        let total_secs = total.as_secs_f64().max(f64::MIN_POSITIVE);
-        let mut stages: Vec<(Stage, Duration)> = Stage::ALL
+        let wall = self.started.map_or(total, |started| started.elapsed());
+        let total_secs = wall.as_secs_f64().max(f64::MIN_POSITIVE);
+        // `None` labels the residual: loop wall minus everything timed.
+        let mut stages: Vec<(Option<Stage>, Duration)> = Stage::ALL
             .iter()
-            .map(|stage| (*stage, self.totals[*stage as usize]))
+            .map(|stage| (Some(*stage), self.totals[*stage as usize]))
             .filter(|(_, elapsed)| !elapsed.is_zero())
             .collect();
+        stages.push((None, wall.saturating_sub(total)));
         stages.sort_by(|a, b| b.1.cmp(&a.1));
 
         eprintln!(
-            "\n[alloygbm profile] rows={rows} features={features} rounds={} threads={} measured={:.3}s",
+            "\n[alloygbm profile] rows={rows} features={features} rounds={} threads={} loop_wall={:.3}s",
             self.rounds,
             rayon::current_num_threads(),
             total_secs,
@@ -113,7 +123,7 @@ impl RoundProfile {
             let secs = elapsed.as_secs_f64();
             eprintln!(
                 "  {:<18} {:8.3}s  {:5.1}%  {:8.3} ms/round",
-                stage.label(),
+                stage.map_or("other (untimed)", Stage::label),
                 secs,
                 100.0 * secs / total_secs,
                 1000.0 * secs / self.rounds as f64,
