@@ -151,9 +151,20 @@ It is now 2.5%.
 ## Remaining
 
 Single-thread throughput on row-heavy, feature-light shapes (500k x 40:
-AlloyGBM 4.08 s vs LightGBM 2.93 s). Histogram construction is ~70% of it. The
-untried structural change is a fully interleaved arena — finding 7 keeps the
-SoA arena and folds a scratch into it, so the fold and the SoA layout both
-remain; making `HistogramArena` array-of-structs throughout would remove the
-fold and turn `to_bundle` from a transpose into a copy. It touches ~99 call
-sites across four modules, so it wants its own change with its own A/B.
+AlloyGBM 4.08 s vs LightGBM 2.93 s). Histogram construction is ~70% of it.
+
+The obvious next step — making `HistogramArena` array-of-structs throughout,
+rather than folding an interleaved scratch into an SoA arena as finding 7 does
+— was investigated and **should not be pursued as stated**. `HistogramBundle`
+stores SoA, and the split scanners read it as SoA slices (`grad_sums() ->
+&[f32]`), which is what lets `dro_scan` and `morph_scan` vectorize. An AoS
+arena would therefore still transpose at `to_bundle`; it would relocate that
+cost rather than remove it, while working against the scanners' layout. The
+scratch in finding 7 already captures the accumulation-side cache benefit, and
+the transpose is O(bins) against an O(rows) accumulation.
+
+Closing the remaining gap means finding a cheaper inner loop rather than a
+different arena layout. Note also that the comparison above is default-vs-
+default: AlloyGBM's auto policy subsamples rows at 0.8 while LightGBM does not,
+so AlloyGBM is doing ~20% less histogram work for that result — the per-update
+gap is wider than the wall-clock gap suggests.
