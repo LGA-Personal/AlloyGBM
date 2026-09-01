@@ -456,3 +456,44 @@ def test_large_fit_is_exact_across_thread_counts():
             f"artifact from n_jobs={n_jobs} differs from the single-threaded fit; "
             "thread count must never change the trained model"
         )
+
+
+def test_subsampled_fit_is_exact_across_thread_counts():
+    """Row subsampling must not make the fit thread-dependent.
+
+    With ``row_subsample < 1.0`` the tree builders apply each round only to the
+    sampled rows, and the complement is replayed afterwards to complete the
+    candidate predictions. That replay runs in parallel once the complement is
+    large enough (>= 32,768 rows), so this fixture is sized to cross the
+    threshold -- 300k rows at 0.7 leaves ~90k rows on the parallel path, while
+    the smaller fixtures elsewhere in this file stay on the serial one and
+    would not exercise it.
+
+    The replay is a pure scatter (each row writes only its own slot), so it is
+    expected to be bit-identical however it is divided; this pins that.
+    """
+    rng = np.random.default_rng(20260901)
+    rows = 300_000
+    X = rng.normal(size=(rows, 24)).astype(np.float32)
+    # Heavy-tailed as above, so reordering would surface rather than absorb.
+    scale = np.where(np.arange(rows) % 997 == 0, 1.0e6, 1.0).astype(np.float32)
+    y = (X[:, :4].sum(axis=1) * scale).astype(np.float32)
+
+    artifacts = {}
+    for n_jobs in (1, 2, 4, 8):
+        model = GBMRegressor(
+            n_estimators=8,
+            max_depth=6,
+            row_subsample=0.7,
+            seed=20260901,
+            deterministic=True,
+            n_jobs=n_jobs,
+        ).fit(X, y)
+        artifacts[n_jobs] = bytes(model.artifact_bytes)
+
+    reference = artifacts[1]
+    for n_jobs, artifact in artifacts.items():
+        assert artifact == reference, (
+            f"subsampled artifact from n_jobs={n_jobs} differs from the "
+            "single-threaded fit; complement replay must stay order-independent"
+        )
