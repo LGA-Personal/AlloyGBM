@@ -53,12 +53,14 @@ mod traits;
 pub use traits::{BackendOps, HistogramExecution, ObjectiveOps, PerRoundMetricCallback};
 
 mod objectives;
+mod profiling;
 pub use objectives::{
     BinaryCrossEntropyObjective, GammaObjective, LambdaMARTObjective, MultiClassSoftmaxObjective,
     PairwiseRankingObjective, PoissonObjective, QuantileObjective, QueryRMSEObjective,
     SquaredErrorObjective, TweedieObjective, XeNDCGObjective, YetiRankObjective,
     compute_group_boundaries,
 };
+pub use profiling::{TreeStage, time_tree_stage};
 mod multiclass_model;
 pub use multiclass_model::{MultiClassIterationRunSummary, MultiClassTrainedModel};
 

@@ -38,6 +38,7 @@ pub(crate) use validate::{
 // The Trainer impl uses many crate-level types and pub(crate) helpers; rather than
 // enumerate ~50 imports here, we use a glob import. Tightening this is left to a
 // future task.
+use crate::profiling::{RoundProfile, Stage as ProfileStage};
 use crate::*;
 use multiclass_build::{
     MulticlassTreeBuildOutcome, collect_ordered_class_results, should_parallelize_multiclass_trees,
@@ -2570,7 +2571,11 @@ impl Trainer {
             ms.ema_stats.copy_from_slice(snapshot);
         }
 
+        // Opt-in stage timing (ALLOYGBM_PROFILE=1); free when disabled.
+        let mut profile = RoundProfile::new();
+
         for round_index in 0..effective_round_cap {
+            profile.note_round();
             // Offset round_index for sampling seeds and tree IDs when warm-starting
             let effective_round_index = round_index + round_index_offset;
 
@@ -2669,12 +2674,14 @@ impl Trainer {
             // GOSS can score rows by `|gradient|`.  Standard / DART
             // boosting modes ignore the gradient input and fall back
             // to uniform subsampling.
-            objective.compute_gradients_into(
-                &predictions,
-                &active_dataset.targets,
-                active_dataset.sample_weights.as_deref(),
-                &mut gradient_buffer,
-            )?;
+            profile.time(ProfileStage::Gradients, || {
+                objective.compute_gradients_into(
+                    &predictions,
+                    &active_dataset.targets,
+                    active_dataset.sample_weights.as_deref(),
+                    &mut gradient_buffer,
+                )
+            })?;
             // Capture the pre-projection L2 norm so neutralization
             // effectiveness can be reported alongside the post-projection
             // gradient stats below.  Only allocated when a per-round
@@ -2733,7 +2740,9 @@ impl Trainer {
             }
 
             if requires_full_replay {
-                candidate_predictions.copy_from_slice(&predictions);
+                profile.time(ProfileStage::PredictionCopy, || {
+                    candidate_predictions.copy_from_slice(&predictions);
+                });
             }
 
             let morph_tree_ctx: Option<MorphTreeContext<'_>> =
@@ -2753,45 +2762,47 @@ impl Trainer {
                     seed: self.params.seed,
                 });
             let (mut candidate_round_stumps, round_rejection_reason) =
-                if self.params.tree_growth == TreeGrowth::Leaf {
-                    build_tree_leaf_wise(
-                        backend,
-                        binned_matrix,
-                        gradients,
-                        root_row_indices,
-                        effective_round_index,
-                        &feature_tiles,
-                        round_split_options,
-                        &self.params,
-                        &controls,
-                        &mut candidate_predictions,
-                        &self.params.feature_weights,
-                        &execution.categorical_features,
-                        morph_tree_ctx,
-                        raw_fv,
-                        active_dataset.factor_exposures.as_ref(),
-                        colsample_bynode,
-                    )?
-                } else {
-                    build_tree_level_wise(
-                        backend,
-                        binned_matrix,
-                        gradients,
-                        root_row_indices,
-                        effective_round_index,
-                        &feature_tiles,
-                        round_split_options,
-                        &self.params,
-                        &controls,
-                        &mut candidate_predictions,
-                        &self.params.feature_weights,
-                        &execution.categorical_features,
-                        morph_tree_ctx,
-                        raw_fv,
-                        active_dataset.factor_exposures.as_ref(),
-                        colsample_bynode,
-                    )?
-                };
+                profile.time(ProfileStage::TreeBuild, || -> EngineResult<_> {
+                    Ok(if self.params.tree_growth == TreeGrowth::Leaf {
+                        build_tree_leaf_wise(
+                            backend,
+                            binned_matrix,
+                            gradients,
+                            root_row_indices,
+                            effective_round_index,
+                            &feature_tiles,
+                            round_split_options,
+                            &self.params,
+                            &controls,
+                            &mut candidate_predictions,
+                            &self.params.feature_weights,
+                            &execution.categorical_features,
+                            morph_tree_ctx,
+                            raw_fv,
+                            active_dataset.factor_exposures.as_ref(),
+                            colsample_bynode,
+                        )?
+                    } else {
+                        build_tree_level_wise(
+                            backend,
+                            binned_matrix,
+                            gradients,
+                            root_row_indices,
+                            effective_round_index,
+                            &feature_tiles,
+                            round_split_options,
+                            &self.params,
+                            &controls,
+                            &mut candidate_predictions,
+                            &self.params.feature_weights,
+                            &execution.categorical_features,
+                            morph_tree_ctx,
+                            raw_fv,
+                            active_dataset.factor_exposures.as_ref(),
+                            colsample_bynode,
+                        )?
+                    })
+                })?;
 
             let in_warmup_phase = morph_state
                 .as_ref()
@@ -2859,14 +2870,16 @@ impl Trainer {
             } else {
                 // Tree builders have already applied this round to selected
                 // rows. Replay just the complement to complete the candidate.
-                apply_weighted_round_to_rows(
-                    &mut candidate_predictions,
-                    binned_matrix,
-                    &candidate_round_stumps,
-                    raw_features_opt,
-                    &excluded_row_indices,
-                    1.0,
-                )?;
+                profile.time(ProfileStage::PredictionUpdate, || {
+                    apply_weighted_round_to_rows(
+                        &mut candidate_predictions,
+                        binned_matrix,
+                        &candidate_round_stumps,
+                        raw_features_opt,
+                        &excluded_row_indices,
+                        1.0,
+                    )
+                })?;
             }
 
             // DART: rebuild `candidate_predictions` to reflect the
@@ -2919,11 +2932,13 @@ impl Trainer {
                     None
                 };
 
-            let candidate_loss = objective.loss(
-                &candidate_predictions,
-                &active_dataset.targets,
-                active_dataset.sample_weights.as_deref(),
-            )?;
+            let candidate_loss = profile.time(ProfileStage::Loss, || {
+                objective.loss(
+                    &candidate_predictions,
+                    &active_dataset.targets,
+                    active_dataset.sample_weights.as_deref(),
+                )
+            })?;
             let loss_improvement = current_loss - candidate_loss;
             // Ranking objectives (LambdaMART, pairwise, XeNDCG, YetiRank,
             // QueryRMSE) have bounded, NDCG-weighted losses whose round-to-
@@ -3384,6 +3399,7 @@ impl Trainer {
             neutralization_metadata: None,
         };
         let final_loss = current_loss;
+        profile.report(active_dataset.row_count(), binned_matrix.feature_count);
 
         Ok(IterationRunSummary {
             model,

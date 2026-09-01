@@ -1623,8 +1623,6 @@ impl CpuBackend {
         best_candidate
     }
 
-    pub(crate) const PARALLEL_SPLIT_FEATURE_THRESHOLD: usize = 16;
-
     pub(crate) fn best_split_with_options_internal(
         histograms: &HistogramBundle,
         options: SplitSelectionOptions,
@@ -1647,21 +1645,21 @@ impl CpuBackend {
             }
         };
 
-        if histograms.feature_count() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
-            (0..histograms.feature_count())
-                .into_par_iter()
-                .filter_map(|index| find_best(histograms.feature(index).expect("bounded feature")))
-                .reduce_with(|a, b| {
-                    if gain_materially_exceeds(
-                        apply_feature_weight(&b, feature_weights),
-                        apply_feature_weight(&a, feature_weights),
-                    ) {
-                        b
-                    } else {
-                        a
-                    }
-                })
-        } else {
+        // Deliberately sequential across features.
+        //
+        // Split finding scans `features x bins` already-built histogram bins --
+        // microseconds of work for a typical node -- and it runs *inside*
+        // node-level parallelism, so a Rayon fork/join here nests inside
+        // another one. Profiling a 500k x 40 fit showed the summed worker time
+        // for this stage ballooning from 0.29s single-threaded to 1.61s on ten
+        // threads: 5.5x more CPU burned for the same work, purely in fork/join
+        // and work-stealing contention. Removing the nesting was faster on
+        // every shape measured, including 320-feature fits where feature-level
+        // parallelism looked most likely to pay.
+        //
+        // Parallelism for this phase comes from the level's node-level
+        // `par_iter` and, for histogram construction, from feature tiles.
+        {
             histograms.features().filter_map(find_best).reduce(|a, b| {
                 if gain_materially_exceeds(
                     apply_feature_weight(&b, feature_weights),

@@ -8,7 +8,6 @@ use alloygbm_engine::{
     HistogramExecution, LinearContext, MorphContext, PreparedLinearSplit, SplitSelectionOptions,
     SplitShortlist,
 };
-use rayon::prelude::*;
 
 use crate::CpuBackend;
 use crate::factor_split::validate_factor_split_context;
@@ -83,14 +82,16 @@ impl BackendOps for CpuBackend {
                 node.row_indices.len(),
                 selected_feature_count,
             );
-        Self::build_histograms_internal(
-            binned_matrix,
-            gradients,
-            node,
-            feature_tiles,
-            parallel_tiles,
-            include_grad_sq,
-        )
+        alloygbm_engine::time_tree_stage(alloygbm_engine::TreeStage::Histogram, || {
+            Self::build_histograms_internal(
+                binned_matrix,
+                gradients,
+                node,
+                feature_tiles,
+                parallel_tiles,
+                include_grad_sq,
+            )
+        })
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
@@ -145,15 +146,11 @@ impl BackendOps for CpuBackend {
             }
         };
 
+        // Sequential across features: see the note in
+        // `best_split_with_options_internal`. Nesting a Rayon fork/join inside
+        // node-level parallelism costs far more than this bin scan saves.
         let per_feature: Vec<Option<SplitCandidate>> =
-            if histograms.feature_count() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
-                (0..histograms.feature_count())
-                    .into_par_iter()
-                    .map(|index| find_best(histograms.feature(index).expect("bounded feature")))
-                    .collect()
-            } else {
-                histograms.features().map(find_best).collect()
-            };
+            histograms.features().map(find_best).collect();
 
         let best_overall = per_feature
             .iter()
@@ -207,12 +204,17 @@ impl BackendOps for CpuBackend {
         if let Some(ctx) = factor_context {
             validate_factor_split_context(ctx)?;
         }
-        Ok(Self::best_split_with_options_internal(
-            histograms,
-            options,
-            feature_weights,
-            categorical_features,
-            factor_context,
+        Ok(alloygbm_engine::time_tree_stage(
+            alloygbm_engine::TreeStage::SplitFind,
+            || {
+                Self::best_split_with_options_internal(
+                    histograms,
+                    options,
+                    feature_weights,
+                    categorical_features,
+                    factor_context,
+                )
+            },
         ))
     }
 
@@ -277,32 +279,18 @@ impl BackendOps for CpuBackend {
             }
         };
 
-        let result = if histograms.feature_count() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
-            (0..histograms.feature_count())
-                .into_par_iter()
-                .filter_map(|index| find_best(histograms.feature(index).expect("bounded feature")))
-                .reduce_with(|a, b| {
-                    if gain_materially_exceeds(
-                        apply_feature_weight(&b, feature_weights),
-                        apply_feature_weight(&a, feature_weights),
-                    ) {
-                        b
-                    } else {
-                        a
-                    }
-                })
-        } else {
-            histograms.features().filter_map(find_best).reduce(|a, b| {
-                if gain_materially_exceeds(
-                    apply_feature_weight(&b, feature_weights),
-                    apply_feature_weight(&a, feature_weights),
-                ) {
-                    b
-                } else {
-                    a
-                }
-            })
-        };
+        // Sequential across features: see the note in
+        // `best_split_with_options_internal`.
+        let result = histograms.features().filter_map(find_best).reduce(|a, b| {
+            if gain_materially_exceeds(
+                apply_feature_weight(&b, feature_weights),
+                apply_feature_weight(&a, feature_weights),
+            ) {
+                b
+            } else {
+                a
+            }
+        });
 
         Ok(result)
     }
@@ -393,13 +381,15 @@ impl BackendOps for CpuBackend {
         const PARALLEL_PARTITION_THRESHOLD: usize = 50_000;
 
         if node.row_indices.len() >= PARALLEL_PARTITION_THRESHOLD {
-            return Self::apply_split_owned_with_stats_parallel(
-                binned_matrix,
-                gradients,
-                node,
-                split,
-                lookup,
-            );
+            return alloygbm_engine::time_tree_stage(alloygbm_engine::TreeStage::Partition, || {
+                Self::apply_split_owned_with_stats_parallel(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    split,
+                    lookup,
+                )
+            });
         }
 
         let mut left_stats = NodeStatsAccumulator::default();
@@ -502,39 +492,22 @@ impl BackendOps for CpuBackend {
             pl::best_split_linear_for_feature(linear_fh, node_id, options, ctx)
         };
 
-        let result = if linear_histograms.feature_histograms.len()
-            >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD
-        {
-            linear_histograms
-                .feature_histograms
-                .par_iter()
-                .filter_map(find_best)
-                .reduce_with(|a, b| {
-                    if gain_materially_exceeds(
-                        apply_feature_weight(&b, feature_weights),
-                        apply_feature_weight(&a, feature_weights),
-                    ) {
-                        b
-                    } else {
-                        a
-                    }
-                })
-        } else {
-            linear_histograms
-                .feature_histograms
-                .iter()
-                .filter_map(find_best)
-                .reduce(|a, b| {
-                    if gain_materially_exceeds(
-                        apply_feature_weight(&b, feature_weights),
-                        apply_feature_weight(&a, feature_weights),
-                    ) {
-                        b
-                    } else {
-                        a
-                    }
-                })
-        };
+        // Sequential across features: see the note in
+        // `best_split_with_options_internal`.
+        let result = linear_histograms
+            .feature_histograms
+            .iter()
+            .filter_map(find_best)
+            .reduce(|a, b| {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&b, feature_weights),
+                    apply_feature_weight(&a, feature_weights),
+                ) {
+                    b
+                } else {
+                    a
+                }
+            });
 
         Ok(result)
     }

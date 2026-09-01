@@ -291,7 +291,7 @@ fn shortlist_standard_respects_k_weighting_and_production_winner() {
 #[test]
 fn shortlist_standard_handles_zero_exhaustive_ties_and_parallel_features() {
     let backend = CpuBackend;
-    for feature_count in [4, CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD] {
+    for feature_count in [4, 32] {
         let histograms = shortlist_standard_fixture(feature_count);
         let options = SplitSelectionOptions {
             missing_bin_index: 2,
@@ -2815,7 +2815,6 @@ fn split_scan_nested_rayon_multi_worker_selection_matches_sequential_scalar_orac
         .collect();
     let histograms = HistogramBundle::from_feature_histograms(7, features, true)
         .expect("parallel split fixture");
-    assert!(histograms.feature_count() >= CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD);
     let options = make_options(0.05, 0.1, 0.0, 0.0, 8);
     let expected = histograms
         .features()
