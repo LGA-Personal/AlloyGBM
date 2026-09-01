@@ -6425,9 +6425,13 @@ fn auto_tile_size_targets_features_per_thread() {
 
 #[test]
 fn auto_tile_size_falls_back_for_low_feature_count() {
-    // 10 features, 16 threads → return feature_count itself (10), capped at MAX
+    // 10 features, 16 threads → ceil(10/32) = 1, raised to the 4-feature floor
+    // so the work still splits across ~3 tiles instead of collapsing to one.
     let tile = compute_optimal_tile_size(10, 16);
-    assert_eq!(tile, 10);
+    assert_eq!(tile, 4);
+    // At or below the floor there is nothing to split: one tile, all features.
+    assert_eq!(compute_optimal_tile_size(4, 16), 4);
+    assert_eq!(compute_optimal_tile_size(3, 16), 3);
 }
 
 #[test]

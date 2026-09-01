@@ -1450,7 +1450,7 @@ impl Trainer {
                         gradients,
                         class_original_gradient_norms[class_k],
                         sampled_row_count,
-                        feature_tiles.len(),
+                        sampled_feature_count,
                     );
                 let morph_tree_ctx: Option<MorphTreeContext<'_>> =
                     morph_state.as_ref().map(|ms| MorphTreeContext {
@@ -2730,7 +2730,7 @@ impl Trainer {
                 gradients,
                 original_gradient_norm,
                 sampled_row_count,
-                feature_tiles.len(),
+                sampled_feature_count,
             );
 
             // Update EMA stats from this round's gradients before tree-building so

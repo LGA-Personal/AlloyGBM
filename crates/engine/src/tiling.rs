@@ -16,17 +16,31 @@ use crate::sampling::sampled_indices;
 /// tiles for rayon to parallelize across cores.
 pub(crate) const MAX_TILE_FEATURE_WIDTH: usize = 64;
 
+/// Smallest tile width when splitting features for parallelism.
+///
+/// This used to be 16, which silently capped histogram parallelism at
+/// `ceil(feature_count / 16)` workers: a 40-feature fit produced three tiles
+/// and could never use more than three cores however large `n_jobs` was.
+/// Measured speedup tracked the tile count almost exactly. Narrower tiles also
+/// mean *smaller* per-tile arenas, so cache residency improves rather than
+/// degrades; 4 was the best of {1, 2, 4, 8, 16} across 40-, 320-, and
+/// 16-feature workloads.
+const MIN_TILE_FEATURE_WIDTH: usize = 4;
+
 /// Compute a tile size that keeps each thread busy with enough work but
 /// produces enough tiles to amortize parallelism overhead. Aim for roughly
-/// 2 tiles per thread so straggling threads can steal work. Falls back to
-/// `MAX_TILE_FEATURE_WIDTH` for low-feature workloads.
+/// 2 tiles per thread so straggling threads can steal work.
+///
+/// Tile boundaries never affect the trained model: each tile accumulates its
+/// own features' histograms independently, and the per-feature bin sums are
+/// identical however the features are grouped.
 pub(crate) fn compute_optimal_tile_size(feature_count: usize, n_threads: usize) -> usize {
-    if n_threads <= 1 || feature_count <= 16 {
+    if n_threads <= 1 || feature_count <= MIN_TILE_FEATURE_WIDTH {
         return feature_count.clamp(1, MAX_TILE_FEATURE_WIDTH);
     }
     let target_tiles = n_threads.saturating_mul(2);
     let raw_tile = feature_count.div_ceil(target_tiles);
-    raw_tile.clamp(16, MAX_TILE_FEATURE_WIDTH)
+    raw_tile.clamp(MIN_TILE_FEATURE_WIDTH, MAX_TILE_FEATURE_WIDTH)
 }
 
 pub(crate) fn feature_tiles_from_sorted_indices(
