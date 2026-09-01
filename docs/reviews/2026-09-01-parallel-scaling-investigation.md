@@ -2,7 +2,7 @@
 
 | Date | Reviewer | Version | Commit | Status |
 |---|---|---|---|---|
-| 2026-09-01 | Claude Fable 5 | v1.0.0-prep | `089d524` | Bottleneck identified; one bug fixed, optimization deferred |
+| 2026-09-01 | Claude Fable 5 | v1.0.0-prep | `089d524` | [Addressed](2026-09-01-parallel-scaling-investigation-resolutions.md) |
 
 Goal: close AlloyGBM's parallel-scaling gap against LightGBM, XGBoost, and
 CatBoost by adopting their techniques. Peer C++ sources are not available
