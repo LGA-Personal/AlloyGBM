@@ -27,8 +27,8 @@ mod split_helpers;
 mod split_scan;
 
 use arena::{
-    BIN_HEAVY_THRESHOLD, HistogramArena, HistogramKernelPath, PARALLEL_TILE_WORKLOAD_THRESHOLD,
-    SMALL_TILE_WORKLOAD_THRESHOLD, TINY_NODE_ROW_THRESHOLD,
+    BIN_HEAVY_THRESHOLD, BinAccumulator, HistogramArena, HistogramKernelPath,
+    PARALLEL_TILE_WORKLOAD_THRESHOLD, SMALL_TILE_WORKLOAD_THRESHOLD, TINY_NODE_ROW_THRESHOLD,
 };
 use factor_split::{FactorSplitScratch, with_factor_split_scratch};
 use split_helpers::{
@@ -165,15 +165,40 @@ impl CpuBackend {
             let base = (feature_index - start_feature) * arena.bin_count;
 
             if use_col_major {
-                // Column-major: sequential bin reads — cache-friendly
+                // Column-major: sequential bin reads — cache-friendly.
+                //
+                // Rows are accumulated into the arena's interleaved scratch
+                // rather than straight into its grad / hess / count arrays:
+                // writing those directly touches three separate cache lines
+                // per row, where the scratch touches one. The fold back into
+                // the arena below is O(bins), not O(rows), so it is cheap
+                // beside the row loop it replaces.
+                //
+                // Bit-identical to accumulating in place: the arena's slice
+                // for this feature is zero on entry and written exactly once,
+                // and rows are summed in the same order either way.
                 let col_base = feature_index * row_count;
+                arena.scratch.fill(BinAccumulator::default());
                 for (position, &row_index) in node.row_indices.iter().enumerate() {
                     let bin_index = binned_matrix.col_bin(col_base + row_index as usize) as usize;
-                    Self::accumulate_bin::<INCLUDE_GRAD_SQ>(
-                        arena,
-                        base + bin_index,
-                        node_gradients[position],
-                    );
+                    let gradient = node_gradients[position];
+                    let slot = &mut arena.scratch[bin_index];
+                    slot.grad += gradient.grad;
+                    slot.hess += gradient.hess;
+                    if INCLUDE_GRAD_SQ {
+                        slot.grad_sq += gradient.grad * gradient.grad;
+                    }
+                    slot.count += 1;
+                }
+                for bin_index in 0..arena.bin_count {
+                    let slot = arena.scratch[bin_index];
+                    let target = base + bin_index;
+                    arena.grad_sums[target] += slot.grad;
+                    arena.hess_sums[target] += slot.hess;
+                    if INCLUDE_GRAD_SQ {
+                        arena.grad_sq_sums.as_mut().expect("DRO arena")[target] += slot.grad_sq;
+                    }
+                    arena.counts[target] += slot.count;
                 }
             } else {
                 for (position, &row_index) in node.row_indices.iter().enumerate() {
