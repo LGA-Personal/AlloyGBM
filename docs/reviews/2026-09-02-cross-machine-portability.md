@@ -115,12 +115,36 @@ realistic sizes.
 
 **Timing-based strategy selection is incompatible with our determinism
 guarantee.** Row-blocked and column-wise accumulation sum floats in different
-orders, so they produce different models. LightGBM can pick by stopwatch
-because it does not promise thread-count-independent results — its own
-`deterministic` parameter is documented as requiring `force_col_wise` or
-`force_row_wise`, i.e. as requiring the auto-choice to be turned *off*. If we
-chose by measurement, two runs on the same machine could disagree, which is a
-far worse property than the one we would be buying.
+orders, so they produce different models. If we chose between them by
+stopwatch, two runs on the same machine could disagree — a far worse property
+than the one we would be buying.
+
+Measured, rather than assumed. Fitting each library at `n_jobs` 1, 4 and 8 on
+400k x 30 with a heavy-tailed target (a few values 10^6 larger, so any change
+in accumulation order surfaces instead of being absorbed), and taking the
+maximum absolute prediction difference against the single-threaded fit:
+
+| Library | n_jobs=4 vs 1 | n_jobs=8 vs 1 |
+|---|---:|---:|
+| AlloyGBM | **0** | **0** |
+| XGBoost (`hist`) | **0** | **0** |
+| LightGBM (auto) | 1.91e-11 | 1.91e-11 |
+| LightGBM (`force_row_wise`) | 1.91e-11 | 1.91e-11 |
+| LightGBM (`force_col_wise`) | 1.91e-11 | 1.91e-11 |
+
+So LightGBM's results *do* drift with thread count, in every mode — but by
+~1e-11 on predictions of order 1e6, which is around 1e-17 relative and of no
+practical consequence. Its float64 histograms keep the drift far below
+anything a user would notice. Only on a benign target does it vanish entirely,
+which is why the earlier check at 6-decimal RMSE showed nothing.
+
+**The important correction is XGBoost's column.** It is bit-exact across thread
+counts *and* it is the fastest library in most cells of the deep scaling sweep.
+That is the refutation of the framing carried over from the earlier
+investigation, which treated the determinism guarantee as the thing
+foreclosing competitive scaling. XGBoost demonstrates that exactness and speed
+are not in tension. Our gap is not the price of determinism; it is a
+throughput gap we have not yet closed.
 
 There is a version that fits us, and it is stronger than LightGBM's:
 
@@ -128,9 +152,9 @@ There is a version that fits us, and it is stronger than LightGBM's:
   never from the thread count;
 - use the same blocking for serial and parallel execution.
 
-Then results are identical across `n_jobs` *and* across machines — a guarantee
-LightGBM does not offer — while parallelism stops depending on feature count.
-The cost is that the reduction always runs, including single-threaded.
+Then results are identical across `n_jobs` *and* across machines while
+parallelism stops depending on feature count. The cost is that the reduction
+always runs, including single-threaded.
 
 This changes every model artifact once, because summation order changes. That
 is acceptable before 1.0.0 and expensive after it, so it is a decision to take
@@ -169,4 +193,12 @@ machine, where spawning 128 threads may be cheaper than on a large NUMA host.
    feature count, it is cheaper than the reverted prototype suggested, and the
    one-time artifact change is much easier to justify now than later.
 3. Do not adopt timing-based strategy selection. It is the best idea in
-   LightGBM and the one least compatible with what AlloyGBM promises.
+   LightGBM and the one least compatible with what AlloyGBM promises: the
+   choice itself would vary run to run, so two fits on one machine could
+   disagree. Note this is a stricter bar than LightGBM meets — its own results
+   drift with thread count, if only by ~1e-17 relative.
+4. Treat single-thread throughput, not scaling, as the priority. The deep
+   scaling sweep puts AlloyGBM last in all nine configurations at one thread,
+   while our speedup from 1 to 10 threads is the best or second-best in seven
+   of them. Scaling work has reached diminishing returns; the per-core inner
+   loop has not.
