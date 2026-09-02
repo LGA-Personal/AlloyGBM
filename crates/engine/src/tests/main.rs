@@ -6424,11 +6424,45 @@ fn auto_tile_size_targets_features_per_thread() {
 }
 
 #[test]
+fn auto_tile_size_never_caps_tiles_below_thread_count() {
+    // Guards against tuning-machine bias: these thread counts cannot be
+    // exercised on the 10-core host this was developed on, but a fixed minimum
+    // tile width silently caps parallelism at `feature_count / width`, which
+    // only shows up on a machine with more cores than that.
+    for &n_threads in &[4usize, 10, 32, 64, 128, 256] {
+        for &feature_count in &[16usize, 40, 100, 320, 2_000] {
+            let tile = compute_optimal_tile_size(feature_count, n_threads);
+            assert!(tile >= 1, "tile width must be positive");
+            assert!(tile <= MAX_TILE_FEATURE_WIDTH);
+            let tiles = feature_count.div_ceil(tile);
+            // Either every thread can get a tile, or there are not enough
+            // features to go round even one feature per tile.
+            assert!(
+                tiles >= n_threads.min(feature_count),
+                "threads={n_threads} features={feature_count}: {tiles} tiles \
+                 starves the pool (tile width {tile})"
+            );
+        }
+    }
+}
+
+#[test]
+fn auto_tile_size_keeps_preferred_width_when_it_fills_the_pool() {
+    // The floor should only yield where it would starve the pool -- otherwise
+    // the wider, more cache-friendly tile is kept.
+    assert_eq!(compute_optimal_tile_size(40, 10), 4); // 10 tiles for 10 threads
+    assert_eq!(compute_optimal_tile_size(320, 10), 16); // 20 tiles, floor unused
+    // 40 features on a 64-core host: the floor would allow only 10 tiles, so it
+    // gives way and the tile narrows to one feature.
+    assert_eq!(compute_optimal_tile_size(40, 64), 1);
+}
+
+#[test]
 fn auto_tile_size_falls_back_for_low_feature_count() {
-    // 10 features, 16 threads → ceil(10/32) = 1, raised to the 4-feature floor
-    // so the work still splits across ~3 tiles instead of collapsing to one.
+    // 10 features on 16 threads: the 4-feature floor would allow only 3 tiles,
+    // leaving 13 threads idle, so it yields and each feature gets its own tile.
     let tile = compute_optimal_tile_size(10, 16);
-    assert_eq!(tile, 4);
+    assert_eq!(tile, 1);
     // At or below the floor there is nothing to split: one tile, all features.
     assert_eq!(compute_optimal_tile_size(4, 16), 4);
     assert_eq!(compute_optimal_tile_size(3, 16), 3);

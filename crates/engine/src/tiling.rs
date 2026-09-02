@@ -40,7 +40,22 @@ pub(crate) fn compute_optimal_tile_size(feature_count: usize, n_threads: usize) 
     }
     let target_tiles = n_threads.saturating_mul(2);
     let raw_tile = feature_count.div_ceil(target_tiles);
-    raw_tile.clamp(MIN_TILE_FEATURE_WIDTH, MAX_TILE_FEATURE_WIDTH)
+    let preferred = raw_tile.clamp(MIN_TILE_FEATURE_WIDTH, MAX_TILE_FEATURE_WIDTH);
+
+    // The minimum width is a cache preference, not a correctness rule, so it
+    // yields when honouring it would leave threads with no tile at all.
+    //
+    // Without this the floor re-creates the very ceiling it replaced, just
+    // further out: it caps the tile count at `feature_count / 4`, so a
+    // 40-feature fit can never exceed 10 tiles however many cores the host
+    // has. That is invisible when tuning on a 10-core machine and severe on a
+    // 64-core one -- exactly the kind of constant that makes a library fast on
+    // its author's laptop and mediocre everywhere else.
+    if feature_count.div_ceil(preferred) >= n_threads {
+        preferred
+    } else {
+        raw_tile.clamp(1, MAX_TILE_FEATURE_WIDTH)
+    }
 }
 
 pub(crate) fn feature_tiles_from_sorted_indices(
