@@ -1433,5 +1433,61 @@ def test_colsample_bynode_below_one_changes_and_stays_finite():
     assert np.all(np.isfinite(b))
 
 
+def test_node_with_exactly_two_leaves_worth_of_rows_still_splits():
+    """A node holding exactly 2 * min_data_in_leaf rows must still split.
+
+    Split-finding is skipped for nodes that cannot yield two valid children,
+    which is a strict `rows < 2 * min_data_in_leaf` test. This pins the
+    boundary: at exactly twice the minimum a split into two minimum-sized
+    leaves is legal, and refusing it would silently under-grow every tree --
+    a change that costs accuracy while looking like a speedup.
+    """
+    min_rows = 25
+    rows = 2 * min_rows
+    # Two cleanly separated groups of exactly `min_rows` each, so the only
+    # useful split puts one group on each side and both children land exactly
+    # on the threshold.
+    X = np.array([[0.0]] * min_rows + [[1.0]] * min_rows, dtype=np.float64)
+    y = np.array([-1.0] * min_rows + [1.0] * min_rows, dtype=np.float64)
+
+    model = GBMRegressor(
+        n_estimators=1,
+        max_depth=4,
+        learning_rate=1.0,
+        min_data_in_leaf=min_rows,
+        training_policy="manual",
+        seed=0,
+    ).fit(X, y)
+
+    predictions = np.asarray(model.predict(X))
+    assert predictions[0] != predictions[-1], (
+        "the root holds exactly 2 * min_rows_per_leaf rows, so it must split; "
+        "identical predictions mean the tree was left as a single leaf"
+    )
+    assert predictions[0] < predictions[-1]
+
+
+def test_node_below_two_leaves_worth_of_rows_stays_a_leaf():
+    """One row short of the boundary, no legal split exists."""
+    min_rows = 25
+    X = np.array([[0.0]] * min_rows + [[1.0]] * (min_rows - 1), dtype=np.float64)
+    y = np.array([-1.0] * min_rows + [1.0] * (min_rows - 1), dtype=np.float64)
+
+    model = GBMRegressor(
+        n_estimators=1,
+        max_depth=4,
+        learning_rate=1.0,
+        min_data_in_leaf=min_rows,
+        training_policy="manual",
+        seed=0,
+    ).fit(X, y)
+
+    predictions = np.asarray(model.predict(X))
+    assert np.allclose(predictions, predictions[0]), (
+        "no split can leave both children at or above min_data_in_leaf, so "
+        "every row must receive the same prediction"
+    )
+
+
 if __name__ == "__main__":
     unittest.main()
