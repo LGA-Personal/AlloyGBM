@@ -15,6 +15,7 @@ from benchmarks.competitiveness.run import (
     _subprocess_measurement,
     load_manifest,
     run_benchmark,
+    run_subprocess_benchmark,
     validate_options,
 )
 from benchmarks.competitiveness.schema import load_records
@@ -405,6 +406,44 @@ def test_profile_allows_honest_early_termination_but_rejects_impossible_rounds()
     assert record.profile is not None and record.profile.rounds == 1
     with pytest.raises(ValueError, match="fewer than completed"):
         _record_from_measurement(_measurement_payload(profile=_profile_payload(rounds=1), rounds_completed=2), "run", 0, 7, 1, None)
+
+
+def test_real_joint_alloy_smoke_emits_one_structured_profile(tmp_path: Path) -> None:
+    manifest = tmp_path / "joint.yaml"
+    manifest.write_text(
+        """schema: alloygbm-competitiveness/v1
+seed: 7
+warmup_repetitions: 0
+timed_repetitions: 1
+scenarios:
+  - name: joint_multi_output
+    task: multi_output_regression
+    rows: 40
+    features: 4
+    outputs: 2
+    rounds: 2
+    depth: 2
+    metric: rmse
+    input_representation: dense
+"""
+    )
+    run_dir = run_subprocess_benchmark(
+        manifest,
+        tmp_path / "out",
+        libraries=["alloygbm"],
+        repetitions=1,
+        warmups=0,
+        smoke=True,
+        profile_alloy=True,
+    )
+    records = load_records(run_dir / "raw.jsonl")
+    assert len(records) == 1
+    assert records[0].profile is not None
+    assert set(records[0].profile.stage_ns) == {
+        "gradients", "row_sampling", "feature_tiles", "prediction_copy",
+        "tree_build", "prediction_update", "loss", "validation",
+    }
+    assert set(records[0].profile.tree_stage_ns) == {"histogram_build", "split_find", "partition"}
 
 
 @pytest.mark.parametrize("changes, message", [

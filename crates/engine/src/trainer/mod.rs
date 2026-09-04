@@ -2571,7 +2571,8 @@ impl Trainer {
             ms.ema_stats.copy_from_slice(snapshot);
         }
 
-        // Opt-in stage timing (ALLOYGBM_PROFILE=1); free when disabled.
+        // Opt-in stage timing (ALLOYGBM_PROFILE=human|json; 1 aliases human);
+        // free when disabled.
         let mut profile = RoundProfile::new();
 
         for round_index in 0..effective_round_cap {
