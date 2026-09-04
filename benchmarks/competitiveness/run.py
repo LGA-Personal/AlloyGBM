@@ -83,13 +83,23 @@ def validate_options(
 def _metric(case: DatasetCase, predictions: np.ndarray) -> float:
     truth = np.asarray(case.y_test)
     prediction = np.asarray(predictions)
+    if prediction.shape != truth.shape:
+        raise ValueError(
+            f"prediction shape {prediction.shape} does not match target shape {truth.shape}"
+        )
+    if not np.all(np.isfinite(prediction)):
+        raise ValueError("predictions must be finite")
+    def finite_metric(value: float) -> float:
+        if not np.isfinite(value):
+            raise ValueError("metric result must be finite")
+        return float(value)
     if case.metric_name == "rmse":
-        return float(np.sqrt(np.mean((truth - prediction) ** 2)))
+        return finite_metric(float(np.sqrt(np.mean((truth - prediction) ** 2))))
     if case.metric_name == "mae":
-        return float(np.mean(np.abs(truth - prediction)))
+        return finite_metric(float(np.mean(np.abs(truth - prediction))))
     if case.metric_name == "log_loss":
         probability = np.clip(prediction.astype(float), 1e-15, 1 - 1e-15)
-        return float(-np.mean(truth * np.log(probability) + (1 - truth) * np.log(1 - probability)))
+        return finite_metric(float(-np.mean(truth * np.log(probability) + (1 - truth) * np.log(1 - probability))))
     if case.metric_name == "ndcg_at_10":
         if case.group_test is None:
             raise ValueError("ranking metrics require test groups")
@@ -108,8 +118,19 @@ def _metric(case: DatasetCase, predictions: np.ndarray) -> float:
             idcg = float(np.sum((2.0 ** ideal - 1.0) / discounts[: len(ideal)]))
             scores.append(dcg / idcg if idcg else 0.0)
             start = end
-        return float(np.mean(scores)) if scores else 0.0
+        result = float(np.mean(scores)) if scores else 0.0
+        return finite_metric(result)
     raise ValueError(f"unsupported metric: {case.metric_name}")
+
+
+def _validate_predictions(case: DatasetCase, predictions: np.ndarray) -> np.ndarray:
+    value = np.asarray(predictions)
+    target = np.asarray(case.y_test)
+    if value.shape != target.shape:
+        raise ValueError(f"prediction shape {value.shape} does not match target shape {target.shape}")
+    if not np.all(np.isfinite(value)):
+        raise ValueError("predictions must be finite")
+    return value
 
 
 def _machine() -> dict[str, str]:
@@ -138,7 +159,7 @@ def _record(case: DatasetCase, result: AdapterResult, run_id: str, repetition: i
         preprocessing_seconds=result.preprocessing_seconds,
         fit_seconds=result.fit_seconds, predict_seconds=result.predict_seconds,
         peak_rss_bytes=result.peak_rss_bytes, metric_name=case.metric_name,
-        metric_value=_metric(case, result.predictions),
+        metric_value=_metric(case, _validate_predictions(case, result.predictions)),
         rounds_completed=result.rounds_completed, machine=_machine(), profile=None,
     )
     validate_record(record)
@@ -196,13 +217,17 @@ def run_benchmark(
     return run_path
 
 
-def _worker_result(manifest: str, scenario: str, library: str, seed: int, threads: int) -> None:
+def _worker_result(manifest: str, scenario: str, library: str, seed: int, threads: int, measurement: bool = False) -> None:
     # This function runs in an isolated process, after thread variables were set.
     config = load_manifest(manifest)
     specs = [item for item in config["scenarios"] if isinstance(item, Mapping) and item["name"] == scenario]  # type: ignore[index]
     case = build_dataset_cases(specs, seed)[0]
     result = load_adapters([library])[library].fit_predict(case, seed, threads)
-    print(json.dumps({"predictions": np.asarray(result.predictions).tolist(), "preprocessing_seconds": result.preprocessing_seconds, "fit_seconds": result.fit_seconds, "predict_seconds": result.predict_seconds, "peak_rss_bytes": result.peak_rss_bytes, "library": result.library, "library_version": result.library_version, "effective_params": dict(result.effective_params), "input_representation": result.input_representation, "rounds_completed": result.rounds_completed}))
+    predictions = _validate_predictions(case, result.predictions)
+    value = {"dataset_sha256": case.dataset_sha256, "scenario": case.name, "task": case.task, "metric_name": case.metric_name, "metric_value": _metric(case, predictions), "preprocessing_seconds": result.preprocessing_seconds, "fit_seconds": result.fit_seconds, "predict_seconds": result.predict_seconds, "peak_rss_bytes": result.peak_rss_bytes, "library": result.library, "library_version": result.library_version, "effective_params": dict(result.effective_params), "input_representation": result.input_representation, "rounds_completed": result.rounds_completed}
+    if not measurement:
+        value["predictions"] = predictions.tolist()
+    print(json.dumps(value))
 
 
 def _subprocess_adapter(manifest: str | Path, case: DatasetCase, library: str, seed: int, threads: int) -> AdapterResult:
@@ -220,6 +245,75 @@ def _subprocess_adapter(manifest: str | Path, case: DatasetCase, library: str, s
     return AdapterResult(np.asarray(value["predictions"]), value["preprocessing_seconds"], value["fit_seconds"], value["predict_seconds"], value["peak_rss_bytes"], value["library"], value["library_version"], value["effective_params"], value["input_representation"], value["rounds_completed"])
 
 
+def _subprocess_measurement(manifest: str | Path, scenario: str, library: str, seed: int, threads: int) -> dict[str, object]:
+    env = os.environ.copy()
+    for variable in THREAD_ENVIRONMENT:
+        env[variable] = str(threads)
+    command = [sys.executable, "-m", "benchmarks.competitiveness.run", "--worker", "--measurement", "--manifest", str(manifest), "--scenario", scenario, "--library", library, "--seed", str(seed), "--threads", str(threads)]
+    completed = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
+    if completed.returncode:
+        raise RuntimeError(f"{library} worker failed: {completed.stderr.strip() or completed.stdout.strip()}")
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{library} worker returned invalid JSON: {completed.stdout!r}") from exc
+    if "predictions" in value:
+        raise RuntimeError("worker measurement payload must not contain predictions")
+    return value
+
+
+def _record_from_measurement(value: Mapping[str, object], run_id: str, repetition: int, seed: int, threads: int, git_sha: str | None) -> BenchmarkRecordV1:
+    record = BenchmarkRecordV1(
+        schema=SCHEMA_VERSION, run_id=run_id, repetition=repetition,
+        dataset_sha256=str(value["dataset_sha256"]), scenario=str(value["scenario"]),
+        task=str(value["task"]), library=str(value["library"]),
+        library_version=str(value["library_version"]), git_sha=git_sha,
+        seed=seed, threads=threads, effective_params=dict(value["effective_params"]),
+        input_representation=str(value["input_representation"]),
+        preprocessing_seconds=float(value["preprocessing_seconds"]),
+        fit_seconds=float(value["fit_seconds"]), predict_seconds=float(value["predict_seconds"]),
+        peak_rss_bytes=int(value["peak_rss_bytes"]), metric_name=str(value["metric_name"]),
+        metric_value=float(value["metric_value"]), rounds_completed=int(value["rounds_completed"]),
+        machine=_machine(), profile=None,
+    )
+    validate_record(record)
+    return record
+
+
+def run_subprocess_benchmark(
+    manifest: str | Path, output_dir: str | Path, *, scenario: str | None = None,
+    libraries: Sequence[str] | None = None, threads: int = 1,
+    repetitions: int | None = None, warmups: int | None = None, smoke: bool = False,
+) -> Path:
+    """Run the real CLI path without retaining feature matrices in the parent."""
+    config = load_manifest(manifest)
+    specs = [item for item in config["scenarios"] if isinstance(item, Mapping)]  # type: ignore[index]
+    names = [str(item["name"]) for item in specs]
+    selected_names = [scenario] if scenario else names
+    selected_libraries = list(libraries or DEFAULT_LIBRARIES)
+    validate_options(selected_names, selected_libraries, threads=threads, repetitions=repetitions, warmups=warmups, smoke=smoke, known_scenarios=names)
+    if any(name not in names for name in selected_names):
+        raise ValueError(f"unknown scenario(s): {sorted(set(selected_names) - set(names))}")
+    timed = int(repetitions if repetitions is not None else config.get("timed_repetitions", 0))
+    warmup_count = int(warmups if warmups is not None else config.get("warmup_repetitions", 0))
+    validate_options(selected_names, selected_libraries, threads=threads, repetitions=timed, warmups=warmup_count, smoke=smoke, known_scenarios=names)
+    seed = int(config.get("seed", 0))
+    run_id = str(uuid.uuid4())
+    run_path = Path(output_dir) / run_id
+    run_path.mkdir(parents=True, exist_ok=False)
+    git_sha = _git_sha()
+    with (run_path / "raw.jsonl").open("w", encoding="utf-8") as output:
+        for name in selected_names:
+            for library in selected_libraries:
+                for _ in range(warmup_count):
+                    _subprocess_measurement(manifest, name, library, seed, threads)
+                for repetition in range(timed):
+                    value = _subprocess_measurement(manifest, name, library, seed, threads)
+                    output.write(_record_from_measurement(value, run_id, repetition, seed, threads, git_sha).to_json() + "\n")
+    load_records(run_path / "raw.jsonl")
+    return run_path
+
+
 def _cli(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
@@ -231,25 +325,18 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--warmups", type=int)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--measurement", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--library", help=argparse.SUPPRESS)
     parser.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
-        _worker_result(args.manifest, args.scenario, args.library, args.seed, args.threads)
+        _worker_result(args.manifest, args.scenario, args.library, args.seed, args.threads, args.measurement)
         return 0
     config = load_manifest(args.manifest)
     names = [str(item["name"]) for item in config["scenarios"] if isinstance(item, Mapping)]  # type: ignore[index]
     selected = [args.scenario] if args.scenario else names
     validate_options(selected, args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke, known_scenarios=names)
-    # Real comparator runs use one fresh process per repetition.  The injected
-    # core above remains direct and cheap for unit tests.
-    class ProcessAdapter:
-        def __init__(self, name: str) -> None:
-            self.name = name
-        def fit_predict(self, case: DatasetCase, seed: int, threads: int) -> AdapterResult:
-            return _subprocess_adapter(args.manifest, case, self.name, seed, threads)
-    adapter_map = {name: ProcessAdapter(name) for name in args.libraries}
-    run_path = run_benchmark(args.manifest, args.output_dir, scenario=args.scenario, libraries=args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke, adapters=adapter_map, capture_git_sha=True)
+    run_path = run_subprocess_benchmark(args.manifest, args.output_dir, scenario=args.scenario, libraries=args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke)
     print(run_path)
     return 0
 

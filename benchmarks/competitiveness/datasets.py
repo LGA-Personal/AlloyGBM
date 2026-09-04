@@ -187,6 +187,12 @@ def build_dataset_cases(scenarios: Sequence[Mapping[str, object]], seed: int) ->
         X_test = X[test_idx]
         y_train = y[train_idx]
         y_test = y[test_idx]
+        if task == "binary_classification":
+            if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+                raise ValueError(
+                    "binary fixture requires both classes in both train and test splits; "
+                    f"got train={np.unique(y_train).tolist()} test={np.unique(y_test).tolist()}"
+                )
         case = DatasetCase(
             name=name, task=task, X_train=X_train, y_train=y_train,
             X_test=X_test, y_test=y_test, train_indices=train_idx,

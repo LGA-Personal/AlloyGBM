@@ -28,6 +28,7 @@ METRIC_DIRECTIONS: dict[str, Literal["minimize", "maximize"]] = {
     "roc_auc": "maximize",
     "ndcg_at_10": "maximize",
 }
+INPUT_REPRESENTATIONS = frozenset({"dense", "native_categorical", "csr", "csc", "dense_fallback"})
 
 # Keep these in lockstep with Stage::label and report_tree_stages in
 # crates/engine/src/profiling.rs.  Profile maps may omit stages that have no
@@ -415,6 +416,8 @@ def validate_record(record: BenchmarkRecordV1) -> None:
         raise ValueError("effective_params must be a mapping")
     _validate_finite_values(record.effective_params, "effective_params")
     _nonempty_string(record.input_representation, "input_representation")
+    if record.input_representation not in INPUT_REPRESENTATIONS:
+        raise ValueError(f"input_representation must be one of {sorted(INPUT_REPRESENTATIONS)}")
     for field in ("preprocessing_seconds", "fit_seconds", "predict_seconds"):
         value = _finite(getattr(record, field), field)
         if value <= 0:
@@ -458,6 +461,8 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
         "input_representation",
     ):
         _nonempty_string(getattr(summary, field), field)
+    if summary.input_representation not in INPUT_REPRESENTATIONS:
+        raise ValueError(f"input_representation must be one of {sorted(INPUT_REPRESENTATIONS)}")
     if (
         not isinstance(summary.dataset_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", summary.dataset_sha256) is None

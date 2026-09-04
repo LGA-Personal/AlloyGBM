@@ -1,6 +1,7 @@
 """Contracts and manifests for reproducible AlloyGBM competitiveness runs."""
 
 from .schema import (
+    INPUT_REPRESENTATIONS,
     METRIC_DIRECTIONS,
     PROFILE_STAGE_LABELS,
     SCHEMA_VERSION,
@@ -16,6 +17,7 @@ from .schema import (
 
 __all__ = [
     "METRIC_DIRECTIONS",
+    "INPUT_REPRESENTATIONS",
     "PROFILE_STAGE_LABELS",
     "SCHEMA_VERSION",
     "TREE_STAGE_LABELS",

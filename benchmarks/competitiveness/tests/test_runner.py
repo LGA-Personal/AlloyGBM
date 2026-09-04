@@ -7,9 +7,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from benchmarks.competitiveness.adapters import AdapterResult
+from benchmarks.competitiveness.adapters import AdapterResult, _prepare_input
+from benchmarks.competitiveness.schema import INPUT_REPRESENTATIONS, validate_record
 from benchmarks.competitiveness.datasets import build_dataset_cases, fingerprint_case
 from benchmarks.competitiveness.run import (
+    _subprocess_measurement,
     load_manifest,
     run_benchmark,
     validate_options,
@@ -162,3 +164,122 @@ def test_modules_do_not_import_optional_competitors() -> None:
     assert "xgboost" not in sys.modules
     assert "catboost" not in sys.modules
 
+
+@pytest.mark.parametrize("library", ["lightgbm", "xgboost"])
+def test_prepared_categorical_columns_keep_native_dtype_and_training_levels(library: str) -> None:
+    spec = {"name": "native_categorical", "task": "binary_classification", "rows": 20,
+            "numeric_features": 20, "categorical_cardinalities": [3, 4], "rounds": 2,
+            "depth": 2, "metric": "log_loss", "input_representation": "native_categorical"}
+    case = build_dataset_cases([spec], seed=7)[0]
+    train, test, representation, params, _, fit_kwargs = _prepare_input(case, library)
+    assert representation == "native_categorical"
+    assert str(train.iloc[:, 20].dtype) == "category"
+    assert str(test.iloc[:, 20].dtype) == "category"
+    assert fit_kwargs == {}
+
+
+def test_alloy_categorical_values_are_preprocessing_payload() -> None:
+    spec = {"name": "native_categorical", "task": "binary_classification", "rows": 20,
+            "numeric_features": 20, "categorical_cardinalities": [3, 4], "rounds": 2,
+            "depth": 2, "metric": "log_loss", "input_representation": "native_categorical"}
+    case = build_dataset_cases([spec], seed=7)[0]
+    _, _, _, _, preprocessing_seconds, fit_kwargs = _prepare_input(case, "alloygbm")
+    assert preprocessing_seconds > 0
+    assert len(fit_kwargs["categorical_feature_values_list"]) == 2
+
+
+def test_catboost_keeps_csr_input_without_dense_fallback() -> None:
+    spec = {"name": "csr_sparse", "task": "regression", "rows": 20,
+            "features": 30, "density": 0.1, "rounds": 2, "depth": 2,
+            "metric": "rmse", "input_representation": "csr"}
+    case = build_dataset_cases([spec], seed=7)[0]
+    train, test, representation, params, _, _ = _prepare_input(case, "catboost")
+    import scipy.sparse as sp
+    assert sp.isspmatrix_csr(train) and sp.isspmatrix_csr(test)
+    assert representation == "csr"
+    assert params["sparse_fallback"] == "none"
+
+
+def test_schema_rejects_unknown_input_representation() -> None:
+    assert INPUT_REPRESENTATIONS == frozenset({"dense", "native_categorical", "csr", "csc", "dense_fallback"})
+    with pytest.raises(ValueError, match="input_representation"):
+        validate_record(__import__("dataclasses").replace(_record_fixture(), input_representation="unknown"))
+
+
+def _record_fixture():
+    from benchmarks.competitiveness.tests.test_schema import record
+    return record()
+
+
+def test_record_rejects_shape_mismatch_and_nonfinite_predictions(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    tiny_manifest(manifest)
+
+    class BadAdapter:
+        def fit_predict(self, case, seed, threads):
+            return AdapterResult(np.zeros(1), 0.01, 0.01, 0.01, 123, "bad", "1", {}, "dense", 2)
+
+    with pytest.raises(ValueError, match="shape"):
+        run_benchmark(manifest, tmp_path / "out", libraries=["bad"], adapters={"bad": BadAdapter()})
+
+    class NonfiniteAdapter(BadAdapter):
+        def fit_predict(self, case, seed, threads):
+            return AdapterResult(np.full(case.y_test.shape, np.nan), 0.01, 0.01, 0.01, 123, "bad", "1", {}, "dense", 2)
+    with pytest.raises(ValueError, match="finite"):
+        run_benchmark(manifest, tmp_path / "out-finite", libraries=["bad"], adapters={"bad": NonfiniteAdapter()})
+
+
+def test_binary_fixture_requires_both_classes_in_each_split() -> None:
+    spec = {"name": "binary", "task": "binary_classification", "rows": 2,
+            "features": 4, "rounds": 2, "depth": 2, "metric": "log_loss",
+            "input_representation": "dense"}
+    with pytest.raises(ValueError, match="both classes"):
+        build_dataset_cases([spec], seed=7)
+
+
+def test_native_multioutput_adapters_use_supported_vector_objectives() -> None:
+    import inspect
+    from benchmarks.competitiveness import adapters
+    assert 'multi_strategy="multi_output_tree"' in inspect.getsource(adapters._fit_xgboost)
+    assert 'loss_function="MultiRMSE"' in inspect.getsource(adapters._fit_catboost)
+
+
+def test_missing_optional_dependency_is_library_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    from benchmarks.competitiveness import adapters
+    real_import = adapters.importlib.import_module
+    def fail(name):
+        if name == "not-installed-lib":
+            raise ImportError("missing")
+        return real_import(name)
+    monkeypatch.setattr(adapters.importlib, "import_module", fail)
+    with pytest.raises(RuntimeError, match="lightgbm optional dependency unavailable"):
+        adapters._import_optional("not-installed-lib", "lightgbm")
+
+
+def test_worker_environment_contains_all_thread_controls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import subprocess
+    captured = {}
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"dataset_sha256": "a" * 64, "scenario": "dense_regression", "task": "regression", "metric_name": "rmse", "metric_value": 1.0, "preprocessing_seconds": 0.01, "fit_seconds": 0.01, "predict_seconds": 0.01, "peak_rss_bytes": 123, "library": "lightgbm", "library_version": "1", "effective_params": {}, "input_representation": "dense", "rounds_completed": 1})
+        stderr = ""
+    def fake_run(command, **kwargs):
+        captured.update(kwargs["env"])
+        return Completed()
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    from benchmarks.competitiveness.run import _subprocess_adapter
+    spec = {"name": "dense_regression", "task": "regression", "rows": 20, "features": 4, "rounds": 2, "depth": 2, "metric": "rmse", "input_representation": "dense"}
+    case = build_dataset_cases([spec], 7)[0]
+    _subprocess_measurement("manifest.yaml", "dense_regression", "lightgbm", 7, 3)
+    assert all(captured[name] == "3" for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "RAYON_NUM_THREADS"))
+
+
+def test_subprocess_orchestration_does_not_build_parent_fixtures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    tiny_manifest(manifest)
+    import benchmarks.competitiveness.run as runner
+    monkeypatch.setattr(runner, "build_dataset_cases", lambda *args, **kwargs: pytest.fail("parent must not materialize fixtures"))
+    payload = {"dataset_sha256": "a" * 64, "scenario": "dense_regression", "task": "regression", "metric_name": "rmse", "metric_value": 1.0, "preprocessing_seconds": 0.01, "fit_seconds": 0.02, "predict_seconds": 0.01, "peak_rss_bytes": 123, "library": "alloygbm", "library_version": "1", "effective_params": {"topology": "levelwise", "objective": "squared_error"}, "input_representation": "dense", "rounds_completed": 2}
+    monkeypatch.setattr(runner, "_subprocess_measurement", lambda *args, **kwargs: payload)
+    path = runner.run_subprocess_benchmark(manifest, tmp_path / "out", libraries=["alloygbm"], repetitions=1, warmups=0, smoke=True)
+    assert len(load_records(path / "raw.jsonl")) == 1
