@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -10,14 +11,15 @@ from pathlib import Path
 from typing import Mapping
 
 import yaml
+import pytest
 
 from benchmarks.competitiveness.schema import (
     BenchmarkSummaryV1,
     METRIC_DIRECTIONS,
-    RunMetadataV1,
     SCHEMA_VERSION,
+    harness_tree_sha256,
     load_records,
-    load_run_metadata,
+    load_run_bundle,
 )
 from benchmarks.competitiveness.datasets import build_dataset_cases
 from benchmarks.competitiveness.run import load_manifest
@@ -28,10 +30,35 @@ ROOT = Path(__file__).parents[3]
 BASELINES = ROOT / "benchmarks" / "competitiveness" / "baselines"
 
 
+def _historical_harness_digest(sha: str) -> str:
+    """Independently hash top-level harness sources from a git revision."""
+
+    paths = subprocess.check_output(
+        ["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", sha, "--", "benchmarks/competitiveness"],
+        text=True,
+    ).splitlines()
+    names = sorted(
+        path.removeprefix("benchmarks/competitiveness/")
+        for path in paths
+        if Path(path).parent == Path("benchmarks/competitiveness") and path.endswith(".py")
+    )
+    digest = hashlib.sha256()
+    for name in names:
+        content = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", f"{sha}:benchmarks/competitiveness/{name}"],
+        )
+        name_bytes = name.encode("utf-8")
+        digest.update(len(name_bytes).to_bytes(8, "big"))
+        digest.update(name_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
     raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
     summary_path = BASELINES / "adfa2c8-pr-smoke.summary.json"
-    records = load_records(raw_path)
+    metadata, records = load_run_bundle(raw_path)
     manifest = load_manifest(ROOT / "benchmarks" / "competitiveness" / "manifests" / "pr_smoke.yaml")
     specs = [item for item in manifest["scenarios"] if isinstance(item, Mapping)]
     cases = {case.name: case for case in build_dataset_cases(specs, int(manifest["seed"]))}
@@ -114,10 +141,10 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
         expected_payload, allow_nan=False, sort_keys=True, indent=2
     ) + "\n"
 
-    metadata = load_run_metadata(BASELINES / "adfa2c8-pr-smoke.run-metadata.json")
     assert metadata.run_id == records[0].run_id
     assert metadata.measured_git_sha == "adfa2c8e593cea68b124e7975f3b4fd9f862a148"
     assert metadata.harness_git_sha == "7082301fcd79bac3e1f05e696c376588158eaee3"
+    assert metadata.harness_tree_sha256 == _historical_harness_digest(metadata.harness_git_sha)
     assert metadata.manifest_identifier == "benchmarks/competitiveness/manifests/pr_smoke.yaml"
     assert metadata.harness_source_path == "benchmarks/competitiveness"
     assert metadata.manifest_path == metadata.manifest_identifier
@@ -154,13 +181,13 @@ def test_published_crosscheck_artifacts_bind_to_exact_five_row_capture() -> None
     raw_path = BASELINES / "adfa2c8-published-v1-crosscheck.jsonl"
     summary_path = BASELINES / "adfa2c8-published-v1-crosscheck.summary.json"
     metadata_path = BASELINES / "adfa2c8-published-v1-crosscheck.run-metadata.json"
-    records = load_records(raw_path)
-    metadata = load_run_metadata(metadata_path)
+    metadata, records = load_run_bundle(raw_path, metadata_path)
     assert len(records) == 5
     assert {record.library for record in records} == {"alloygbm"}
     assert {record.git_sha for record in records} == {"adfa2c8e593cea68b124e7975f3b4fd9f862a148"}
     assert metadata.run_id == records[0].run_id
     assert metadata.harness_git_sha == "88f754c9f3f2d17d8e929842923d6a3760ebbc09"
+    assert metadata.harness_tree_sha256 == _historical_harness_digest(metadata.harness_git_sha)
     assert metadata.manifest_identifier.endswith("published_v1_crosscheck.yaml")
     assert metadata.manifest_path == metadata.manifest_identifier
     assert metadata.harness_source_path == "benchmarks/competitiveness"
@@ -174,6 +201,36 @@ def test_published_crosscheck_artifacts_bind_to_exact_five_row_capture() -> None
     assert summary.raw_repetition_ids == (0, 1, 2, 3, 4)
     assert summary.raw_line_numbers == (1, 2, 3, 4, 5)
     assert [record.metric_value for record in records] == [0.16377460956573486] * 5
+
+
+def test_harness_tree_digest_detects_source_drift_without_git_sha_drift(tmp_path: Path) -> None:
+    source_root = tmp_path / "competitiveness"
+    source_root.mkdir()
+    source_paths = list((ROOT / "benchmarks" / "competitiveness").glob("*.py"))
+    for source_path in source_paths:
+        shutil.copyfile(source_path, source_root / source_path.name)
+    before_sha = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    before_digest = harness_tree_sha256(source_root)
+    drifted = source_root / "run.py"
+    drifted.write_bytes(drifted.read_bytes() + b"\n# local harness drift\n")
+    after_digest = harness_tree_sha256(source_root)
+    after_sha = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    assert after_digest != before_digest
+    assert after_sha == before_sha
+
+
+def test_run_bundle_loader_fails_closed_on_metadata_raw_drift(tmp_path: Path) -> None:
+    raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
+    metadata_path = BASELINES / "adfa2c8-pr-smoke.run-metadata.json"
+    copied_raw = tmp_path / raw_path.name
+    copied_metadata = tmp_path / metadata_path.name
+    shutil.copyfile(raw_path, copied_raw)
+    shutil.copyfile(metadata_path, copied_metadata)
+    metadata, records = load_run_bundle(copied_raw, copied_metadata)
+    assert metadata.raw_record_count == len(records) == 120
+    copied_raw.write_text(copied_raw.read_text() + "\n")
+    with pytest.raises(ValueError, match="raw checksum"):
+        load_run_bundle(copied_raw, copied_metadata)
 
 
 def test_alloy_only_smoke_command_emits_six_records_without_peers(tmp_path: Path) -> None:
@@ -213,6 +270,11 @@ def test_alloy_only_smoke_command_emits_six_records_without_peers(tmp_path: Path
     assert {record.library for record in records} == {"alloygbm"}
     assert {record.repetition for record in records} == {0}
     assert len({record.scenario for record in records}) == 6
+    metadata, bound_records = load_run_bundle(paths[0])
+    assert bound_records == records
+    assert metadata.harness_tree_sha256 == harness_tree_sha256(
+        ROOT / "benchmarks" / "competitiveness"
+    )
 
 
 def test_ci_workflow_has_event_scoped_smoke_and_observational_comparator() -> None:
@@ -228,6 +290,7 @@ def test_ci_workflow_has_event_scoped_smoke_and_observational_comparator() -> No
     assert "schedule" in comparator["if"]
     assert "actions/upload-artifact@v7" in workflow_text
     assert "actions/upload-artifact@v4" not in workflow_text
+    assert "load_run_bundle" in workflow_text
     assert "--smoke --libraries alloygbm --threads 1 --repetitions 1 --warmups 0" in workflow_text
     assert "--repetitions 3 --warmups 1" in workflow_text
     assert "evaluate_claim" not in workflow_text

@@ -8,6 +8,7 @@ the observations used for that calculation.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -29,6 +30,30 @@ METRIC_DIRECTIONS: dict[str, Literal["minimize", "maximize"]] = {
     "ndcg_at_10": "maximize",
 }
 INPUT_REPRESENTATIONS = frozenset({"dense", "native_categorical", "csr", "csc", "dense_fallback"})
+
+
+def harness_tree_sha256(root: str | Path) -> str:
+    """Hash the loaded top-level benchmark harness source deterministically.
+
+    Only ``*.py`` files directly under ``root`` participate. Each canonical
+    relative filename and its exact bytes are length-delimited in filename
+    order, so edits to tracked or untracked harness source cannot hide behind
+    an unchanged git commit.
+    """
+
+    source_root = Path(root)
+    paths = sorted(
+        path for path in source_root.glob("*.py") if path.is_file()
+    )
+    digest = hashlib.sha256()
+    for path in paths:
+        relative_name = path.relative_to(source_root).as_posix().encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(relative_name).to_bytes(8, "big"))
+        digest.update(relative_name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 # Keep these in lockstep with Stage::label and report_tree_stages in
 # crates/engine/src/profiling.rs. Structured v1 profiles always include every
@@ -302,6 +327,7 @@ class RunMetadataV1:
     measured_git_sha: str | None
     git_sha_semantics: str
     harness_git_sha: str | None
+    harness_tree_sha256: str
     harness_source_path: str
     manifest_sha256: str
     manifest_identifier: str
@@ -330,6 +356,7 @@ class RunMetadataV1:
             "measured_git_sha": self.measured_git_sha,
             "git_sha_semantics": self.git_sha_semantics,
             "harness_git_sha": self.harness_git_sha,
+            "harness_tree_sha256": self.harness_tree_sha256,
             "harness_source_path": self.harness_source_path,
             "manifest_sha256": self.manifest_sha256,
             "manifest_identifier": self.manifest_identifier,
@@ -365,6 +392,7 @@ class RunMetadataV1:
             measured_git_sha=value.get("measured_git_sha"),  # type: ignore[arg-type]
             git_sha_semantics=value["git_sha_semantics"],  # type: ignore[arg-type]
             harness_git_sha=value.get("harness_git_sha"),  # type: ignore[arg-type]
+            harness_tree_sha256=value["harness_tree_sha256"],  # type: ignore[arg-type]
             harness_source_path=value["harness_source_path"],  # type: ignore[arg-type]
             manifest_sha256=value["manifest_sha256"],  # type: ignore[arg-type]
             manifest_identifier=value["manifest_identifier"],  # type: ignore[arg-type]
@@ -680,12 +708,12 @@ def validate_run_metadata(metadata: RunMetadataV1) -> None:
     if metadata.schema != SCHEMA_VERSION:
         raise ValueError(f"unsupported schema: {metadata.schema!r}")
     for field in (
-        "run_id", "git_sha_semantics", "harness_source_path", "manifest_sha256",
+        "run_id", "git_sha_semantics", "harness_tree_sha256", "harness_source_path", "manifest_sha256",
         "manifest_identifier", "manifest_path", "raw_sha256", "created_at_utc",
         "working_directory",
     ):
         _nonempty_string(getattr(metadata, field), field)
-    for field in ("manifest_sha256", "raw_sha256"):
+    for field in ("manifest_sha256", "harness_tree_sha256", "raw_sha256"):
         if re.fullmatch(r"[0-9a-f]{64}", getattr(metadata, field)) is None:
             raise ValueError(f"{field} must be exactly 64 lowercase hexadecimal characters")
     for field in ("measured_git_sha", "harness_git_sha"):
@@ -811,3 +839,42 @@ def load_run_metadata(path: str | Path) -> RunMetadataV1:
     metadata = RunMetadataV1.from_json(Path(path).read_text())
     validate_run_metadata(metadata)
     return metadata
+
+
+def load_run_bundle(
+    raw_path: str | Path, metadata_path: str | Path | None = None
+) -> tuple[RunMetadataV1, list[BenchmarkRecordV1]]:
+    """Load a raw run and fail closed unless its metadata sidecar binds it.
+
+    The default sidecar location is adjacent to ``raw_path``. The run UUID,
+    record count, and exact raw-file SHA-256 are checked before returning.
+    """
+
+    raw_file = Path(raw_path)
+    if metadata_path is not None:
+        metadata_file = Path(metadata_path)
+    else:
+        candidates = (
+            raw_file.with_name("run-metadata.json"),
+            raw_file.with_suffix(".run-metadata.json"),
+        )
+        existing = [candidate for candidate in candidates if candidate.exists()]
+        if len(existing) != 1:
+            raise ValueError(
+                "expected exactly one adjacent run metadata sidecar, found "
+                f"{len(existing)}"
+            )
+        metadata_file = existing[0]
+    metadata = load_run_metadata(metadata_file)
+    records = load_records(raw_file)
+    if len(records) != metadata.raw_record_count:
+        raise ValueError(
+            "metadata raw_record_count does not match raw records: "
+            f"{metadata.raw_record_count} != {len(records)}"
+        )
+    raw_sha256 = hashlib.sha256(raw_file.read_bytes()).hexdigest()
+    if metadata.raw_sha256 != raw_sha256:
+        raise ValueError("metadata raw checksum does not match raw records")
+    if any(record.run_id != metadata.run_id for record in records):
+        raise ValueError("metadata run_id does not match raw records")
+    return metadata, records

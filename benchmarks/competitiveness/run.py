@@ -26,6 +26,7 @@ from .schema import (
     ProfileRecordV1,
     RunMetadataV1,
     SCHEMA_VERSION,
+    harness_tree_sha256,
     load_records,
     validate_record,
     validate_run_metadata,
@@ -205,6 +206,9 @@ def _write_run_metadata(
         measured_git_sha=measured_git_sha,
         git_sha_semantics="runner working-directory source commit; for AlloyGBM this is the measured library commit",
         harness_git_sha=_git_sha_at(harness_root),
+        harness_tree_sha256=harness_tree_sha256(
+            harness_root / "benchmarks" / "competitiveness"
+        ),
         harness_source_path="benchmarks/competitiveness",
         manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         manifest_identifier=_manifest_identifier(manifest_path, harness_root),
