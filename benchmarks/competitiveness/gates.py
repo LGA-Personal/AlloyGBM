@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
-from .schema import BenchmarkSummaryV1, METRIC_DIRECTIONS
+from .schema import BenchmarkSummaryV1, METRIC_DIRECTIONS, validate_summary
 
 STATUSES = frozenset({"pass", "defer", "reject", "insufficient-data"})
+_BOUNDARY_TOLERANCE = 1e-12
+
+
+def _strictly_greater(value: float, threshold: float) -> bool:
+    """Strict ``>`` with decimal-boundary floating-point noise ignored."""
+
+    return value > threshold and not math.isclose(
+        value, threshold, rel_tol=_BOUNDARY_TOLERANCE, abs_tol=_BOUNDARY_TOLERANCE
+    )
+
+
+def _at_least(value: float, threshold: float) -> bool:
+    return value > threshold or math.isclose(
+        value, threshold, rel_tol=_BOUNDARY_TOLERANCE, abs_tol=_BOUNDARY_TOLERANCE
+    )
 
 
 def _canonical(value: object) -> str:
@@ -150,7 +166,7 @@ def _pairs(
         if candidate is None or reference is None:
             reasons.append(f"missing paired scenario/thread slice: {key!r}")
             continue
-        if len(candidate.raw_repetition_ids) < minimum_repetitions or len(reference.raw_repetition_ids) < minimum_repetitions:
+        if len(set(candidate.raw_repetition_ids)) < minimum_repetitions or len(set(reference.raw_repetition_ids)) < minimum_repetitions:
             reasons.append(f"insufficient timed repetitions for slice: {key!r}")
             continue
         if candidate.library_version != reference.library_version:
@@ -186,6 +202,12 @@ def _validate_gate_inputs(
         raise ValueError("minimum_repetitions must be positive")
     allowed = _allowed_keys(allowed_param_differences)
     reasons: list[str] = []
+    for side, summaries in (("current", current), ("baseline", baseline)):
+        for index, summary in enumerate(summaries):
+            try:
+                validate_summary(summary)
+            except (TypeError, ValueError) as exc:
+                reasons.append(f"invalid {side} summary at index {index}: {exc}")
     current_runs = {item.run_id for item in current}
     baseline_runs = {item.run_id for item in baseline}
     if len(current_runs) != 1:
@@ -323,9 +345,9 @@ def evaluate_speed(
         improvement = fit_time_improvement(candidate.fit_median_seconds, reference.fit_median_seconds)
         regression = relative_metric_regression(candidate.metric_name, candidate.metric_median, reference.metric_median)
         evidence[f"{candidate.scenario}|threads={candidate.threads}"] = {"fit_improvement": improvement, "metric_regression": regression}
-        guardrail |= regression > 0.01
+        guardrail |= _strictly_greater(regression, 0.01)
         # Tolerate the one-ulp representation of the exact 10% boundary.
-        missed |= improvement < 0.10 - 1e-12
+        missed |= not _at_least(improvement, 0.10)
     if guardrail:
         return GateResult("speed", "reject", tuple(reasons) + ("metric regression exceeds the 1% speed guardrail",), evidence)
     if missed:
@@ -372,13 +394,13 @@ def evaluate_quality(
         floor = 0.005 * abs(reference.metric_median)
         fit_regression = candidate.fit_median_seconds / reference.fit_median_seconds - 1.0
         fit_regressions.append(fit_regression)
-        clears_noise = absolute_improvement > noise and absolute_improvement > floor
-        if clears_noise and improvement > 0.005:
+        clears_noise = _strictly_greater(absolute_improvement, noise) and _strictly_greater(absolute_improvement, floor)
+        if clears_noise and _strictly_greater(improvement, 0.005):
             meaningful_scenarios.add(candidate.scenario)
         evidence[f"{candidate.scenario}|threads={candidate.threads}"] = {"metric_improvement": improvement, "absolute_improvement": absolute_improvement, "noise": noise, "relative_floor": floor, "fit_regression": fit_regression, "clears_noise": clears_noise}
     median_fit_regression = float(statistics.median(fit_regressions))
     evidence["median_fit_regression"] = median_fit_regression
-    if not quality_first and median_fit_regression > 0.10:
+    if not quality_first and _strictly_greater(median_fit_regression, 0.10):
         return GateResult("quality", "reject", tuple(reasons) + ("median fit-time regression exceeds the 10% quality guardrail",), evidence)
     if len(meaningful_scenarios) < 2:
         return GateResult("quality", "defer", tuple(reasons) + ("fewer than two scenarios clear noise and the 0.5% relative improvement floor",), evidence)
@@ -388,6 +410,13 @@ def evaluate_quality(
 def normalized_ranks(summaries: Sequence[BenchmarkSummaryV1]) -> dict[str, float]:
     """Return each library's median normalized rank over comparable slices."""
 
+    for summary in summaries:
+        try:
+            validate_summary(summary)
+        except (TypeError, ValueError):
+            return {}
+    if len({summary.run_id for summary in summaries}) > 1:
+        return {}
     slices: dict[tuple[object, ...], list[BenchmarkSummaryV1]] = {}
     for item in summaries:
         slices.setdefault(_slice_key(item), []).append(item)
@@ -436,7 +465,7 @@ def catastrophic_regressions(
         # The specification's strict boundaries are mathematical values; the
         # tiny tolerance avoids rejecting decimal inputs such as 1.05 due to
         # binary floating-point rounding.
-        status = "reject" if metric_regression > 0.05 + 1e-12 or fit_ratio > 2.0 + 1e-12 else "pass"
+        status = "reject" if _strictly_greater(metric_regression, 0.05) or _strictly_greater(fit_ratio, 2.0) else "pass"
         reason = (f"catastrophic regression on {candidate.scenario}",) if status == "reject" else ()
         results.append(GateResult("catastrophic-regression", status, reason, {"allowed_param_differences": sorted(allowed), f"{candidate.scenario}|threads={candidate.threads}": {"metric_regression": metric_regression, "fit_ratio": fit_ratio}}))
     return results

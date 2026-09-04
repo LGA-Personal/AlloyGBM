@@ -16,6 +16,7 @@ from benchmarks.competitiveness.gates import (
     evaluate_catastrophic_regression,
 )
 from benchmarks.competitiveness.schema import BenchmarkRecordV1, SCHEMA_VERSION
+from benchmarks.competitiveness.schema import BenchmarkSummaryV1
 from benchmarks.competitiveness.summarize import aggregate_records, render_markdown, summarize_file
 
 
@@ -108,6 +109,30 @@ def test_speed_gate_has_exact_ten_percent_and_one_percent_boundaries(candidate_f
     assert result.status == status
 
 
+def test_speed_exact_one_percent_metric_guardrail_is_not_rejected() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=0.9, metric=1.01))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_speed([current], [baseline]).status == "pass"
+
+
+def test_quality_exact_ten_percent_fit_guardrail_is_allowed() -> None:
+    current = [aggregate_records(records("run-current", "alloygbm", fit=1.1, metric=0.9, scenario=name))[0] for name in ("a", "b")]
+    baseline = [aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario=name))[0] for name in ("a", "b")]
+    assert evaluate_quality(current, baseline).status == "pass"
+
+
+def test_quality_exact_relative_floor_and_noise_do_not_count_but_just_above_does() -> None:
+    baseline = [aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario=name))[0] for name in ("a", "b")]
+    exact_floor = [aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=0.995, scenario=name))[0] for name in ("a", "b")]
+    assert evaluate_quality(exact_floor, baseline).status == "defer"
+    just_above = [aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=0.9949, scenario=name))[0] for name in ("a", "b")]
+    assert evaluate_quality(just_above, baseline).status == "pass"
+    exact_noise = [replace(item, metric_median=0.99, metric_mad=0.01) for item in just_above]
+    assert evaluate_quality(exact_noise, baseline).status == "defer"
+    just_above_noise = [replace(item, metric_median=0.9899, metric_mad=0.01) for item in exact_noise]
+    assert evaluate_quality(just_above_noise, baseline).status == "pass"
+
+
 def test_quality_requires_two_noise_clearing_scenarios_and_allows_quality_first_fit_cost() -> None:
     current = [
         aggregate_records(records("run-current", "alloygbm", fit=1.2, metric=0.9, scenario=scenario))[0]
@@ -187,6 +212,20 @@ def test_normalized_ranks_average_ties_and_sole_library_is_insufficient() -> Non
     ranks = normalized_ranks(summaries)
     assert ranks["alloygbm"] == pytest.approx(0.25)
     assert normalized_ranks(summaries[:1]) == {}
+
+
+def test_gates_validate_duplicate_summary_repetition_provenance_and_ranks_return_empty() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    malformed = replace(current, raw_repetition_ids=(0, 0, 1, 2, 3))
+    assert evaluate_speed([malformed], [baseline]).status == "insufficient-data"
+    assert normalized_ranks([malformed]) == {}
+
+
+def test_hand_built_summary_missing_provenance_is_insufficient() -> None:
+    current = BenchmarkSummaryV1.from_dict(aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0].to_dict())
+    baseline = replace(current, run_id="run-base", fit_median_seconds=1.0, machine=None)
+    assert evaluate_speed([current], [baseline]).status == "insufficient-data"
 
 
 def test_duplicate_summary_slice_is_insufficient_for_gate_and_rank() -> None:
