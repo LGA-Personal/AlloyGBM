@@ -91,11 +91,9 @@ def _slice_key(item: BenchmarkSummaryV1, *, include_library: bool = False) -> tu
     return tuple(getattr(item, field) for field in fields)
 
 
-def _metadata(item: BenchmarkSummaryV1, name: str, default: object = None) -> object:
-    return getattr(item, name, default)
-
-
 def _allowed_keys(values: Sequence[str] | None) -> frozenset[str]:
+    if isinstance(values, str):
+        raise ValueError("allowed_param_differences must be a sequence, not a string")
     keys = frozenset(values or ())
     if any(not isinstance(key, str) or not key.strip() for key in keys):
         raise ValueError("allowed_param_differences must contain nonempty top-level keys")
@@ -115,11 +113,15 @@ def _parameter_reason(
     if not allow_candidate or not allowed:
         allowed = frozenset()
     keys = set(candidate_params) | set(reference_params)
-    mismatched = {
-        key for key in keys
-        if _canonical(candidate_params.get(key)) != _canonical(reference_params.get(key))
-        and key not in allowed
-    }
+    missing = object()
+    mismatched = set()
+    for key in keys:
+        left, right = candidate_params.get(key, missing), reference_params.get(key, missing)
+        differs = (left is missing) != (right is missing)
+        if not differs and left is not missing:
+            differs = _canonical(left) != _canonical(right)
+        if differs and key not in allowed:
+            mismatched.add(key)
     return f"effective_params mismatch (keys={sorted(mismatched)!r})" if mismatched else None
 
 
@@ -174,6 +176,23 @@ def _insufficient(claim: str, reasons: Sequence[str], evidence: Mapping[str, obj
     merged = dict(evidence or {})
     merged.setdefault("allowed_param_differences", sorted(allowed))
     return GateResult(claim, "insufficient-data", tuple(reasons) or ("no comparable slices",), merged)
+
+
+def _validate_gate_inputs(
+    current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1],
+    minimum_repetitions: int, allowed_param_differences: Sequence[str],
+) -> tuple[frozenset[str], list[str]]:
+    if minimum_repetitions <= 0:
+        raise ValueError("minimum_repetitions must be positive")
+    allowed = _allowed_keys(allowed_param_differences)
+    reasons: list[str] = []
+    current_runs = {item.run_id for item in current}
+    baseline_runs = {item.run_id for item in baseline}
+    if len(current_runs) != 1:
+        reasons.append(f"current cohort must contain exactly one run_id, found {sorted(current_runs)!r}")
+    if len(baseline_runs) != 1:
+        reasons.append(f"baseline cohort must contain exactly one run_id, found {sorted(baseline_runs)!r}")
+    return allowed, reasons
 
 
 def _compatibility_reasons(
@@ -246,6 +265,11 @@ def _rank_context_reasons(
         ):
             reasons.append(f"insufficient timed repetitions for rank-context slice: {key!r}")
             continue
+        current_machines = {_canonical(item.machine) for item in current_rows if item.machine is not None}
+        baseline_machines = {_canonical(item.machine) for item in baseline_rows if item.machine is not None}
+        if len(current_machines) != 1 or len(baseline_machines) != 1:
+            reasons.append(f"ranked libraries must share identical machine metadata for slice: {key!r}")
+            continue
         current_by_library = {item.library: item for item in current_rows}
         baseline_by_library = {item.library: item for item in baseline_rows}
         for library in sorted(current_libraries):
@@ -270,7 +294,9 @@ def evaluate_speed(
     target_scenarios: Sequence[str] | None = None, minimum_repetitions: int = 5,
     allowed_param_differences: Sequence[str] = (),
 ) -> GateResult:
-    allowed = _allowed_keys(allowed_param_differences)
+    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
+    if cohort_reasons:
+        return _insufficient("speed", cohort_reasons, allowed=allowed)
     if target_scenarios is not None:
         wanted = set(target_scenarios)
         missing_current = wanted - {item.scenario for item in current}
@@ -312,7 +338,9 @@ def evaluate_quality(
     target_scenarios: Sequence[str] | None = None, quality_first: bool = False,
     minimum_repetitions: int = 5, allowed_param_differences: Sequence[str] = (),
 ) -> GateResult:
-    allowed = _allowed_keys(allowed_param_differences)
+    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
+    if cohort_reasons:
+        return _insufficient("quality", cohort_reasons, allowed=allowed)
     if target_scenarios is not None:
         wanted = set(target_scenarios)
         missing_current = wanted - {item.scenario for item in current}
@@ -335,7 +363,7 @@ def evaluate_quality(
     if len({candidate.scenario for candidate, _ in pairs}) < 2:
         return _insufficient("quality", ["quality requires at least two distinct scenarios"], allowed=allowed)
     evidence: dict[str, object] = {"allowed_param_differences": sorted(allowed)}
-    meaningful = 0
+    meaningful_scenarios: set[str] = set()
     fit_regressions: list[float] = []
     for candidate, reference in pairs:
         improvement = relative_metric_improvement(candidate.metric_name, candidate.metric_median, reference.metric_median)
@@ -345,13 +373,14 @@ def evaluate_quality(
         fit_regression = candidate.fit_median_seconds / reference.fit_median_seconds - 1.0
         fit_regressions.append(fit_regression)
         clears_noise = absolute_improvement > noise and absolute_improvement > floor
-        meaningful += int(clears_noise and improvement > 0.005)
+        if clears_noise and improvement > 0.005:
+            meaningful_scenarios.add(candidate.scenario)
         evidence[f"{candidate.scenario}|threads={candidate.threads}"] = {"metric_improvement": improvement, "absolute_improvement": absolute_improvement, "noise": noise, "relative_floor": floor, "fit_regression": fit_regression, "clears_noise": clears_noise}
     median_fit_regression = float(statistics.median(fit_regressions))
     evidence["median_fit_regression"] = median_fit_regression
     if not quality_first and median_fit_regression > 0.10:
         return GateResult("quality", "reject", tuple(reasons) + ("median fit-time regression exceeds the 10% quality guardrail",), evidence)
-    if meaningful < 2:
+    if len(meaningful_scenarios) < 2:
         return GateResult("quality", "defer", tuple(reasons) + ("fewer than two scenarios clear noise and the 0.5% relative improvement floor",), evidence)
     return GateResult("quality", "pass", tuple(reasons), evidence)
 
@@ -390,7 +419,9 @@ def catastrophic_regressions(
     current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1], *, minimum_repetitions: int = 5,
     allowed_param_differences: Sequence[str] = (),
 ) -> list[GateResult]:
-    allowed = _allowed_keys(allowed_param_differences)
+    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
+    if cohort_reasons:
+        return [_insufficient("catastrophic-regression", cohort_reasons, allowed=allowed)]
     compatibility = _compatibility_reasons(current, baseline, allowed_param_differences=allowed)
     pairs, reasons = _pairs(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
     reasons = compatibility + reasons
@@ -415,7 +446,9 @@ def evaluate_default_policy(
     current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1], *,
     minimum_repetitions: int = 5, allowed_param_differences: Sequence[str] = (),
 ) -> GateResult:
-    allowed = _allowed_keys(allowed_param_differences)
+    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
+    if cohort_reasons:
+        return _insufficient("default-policy", cohort_reasons, allowed=allowed)
     compatibility = _compatibility_reasons(current, baseline, allowed_param_differences=allowed) + _rank_context_reasons(
         current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed
     )
@@ -456,11 +489,12 @@ def evaluate_catastrophic_regression(
     """Collapse protected-fixture results into one gate result."""
 
     results = catastrophic_regressions(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed_param_differences)
+    allowed = _allowed_keys(allowed_param_differences)
     if any(item.status == "insufficient-data" for item in results):
-        return _insufficient("catastrophic-regression", [reason for item in results for reason in item.reasons])
+        return _insufficient("catastrophic-regression", [reason for item in results for reason in item.reasons], allowed=allowed)
     if any(item.status == "reject" for item in results):
-        return GateResult("catastrophic-regression", "reject", tuple(reason for item in results for reason in item.reasons), {"fixtures": [item.to_dict() for item in results]})
-    return GateResult("catastrophic-regression", "pass", (), {"fixtures": [item.to_dict() for item in results]})
+        return GateResult("catastrophic-regression", "reject", tuple(reason for item in results for reason in item.reasons), {"allowed_param_differences": sorted(allowed), "fixtures": [item.to_dict() for item in results]})
+    return GateResult("catastrophic-regression", "pass", (), {"allowed_param_differences": sorted(allowed), "fixtures": [item.to_dict() for item in results]})
 
 
 compute_normalized_ranks = normalized_ranks

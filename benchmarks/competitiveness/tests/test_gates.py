@@ -13,6 +13,7 @@ from benchmarks.competitiveness.gates import (
     evaluate_speed,
     normalized_ranks,
     catastrophic_regressions,
+    evaluate_catastrophic_regression,
 )
 from benchmarks.competitiveness.schema import BenchmarkRecordV1, SCHEMA_VERSION
 from benchmarks.competitiveness.summarize import aggregate_records, render_markdown, summarize_file
@@ -127,6 +128,48 @@ def test_quality_requires_two_distinct_scenarios_not_two_thread_slices() -> None
     assert evaluate_quality(current, baseline).status == "insufficient-data"
 
 
+def test_quality_requires_two_distinct_meaningful_scenarios_not_two_wins_in_one() -> None:
+    current = [
+        aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=0.9, threads=threads, scenario="a"))[0]
+        for threads in (1, 4)
+    ] + [aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0, scenario="b"))[0]]
+    baseline = [
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, threads=threads, scenario="a"))[0]
+        for threads in (1, 4)
+    ] + [aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="b"))[0]]
+    result = evaluate_quality(current, baseline)
+    assert result.status == "defer"
+
+
+@pytest.mark.parametrize("gate", [evaluate_speed, evaluate_quality, catastrophic_regressions, evaluate_default_policy])
+def test_public_gates_reject_mixed_current_run_ids_even_for_disjoint_scenarios(gate) -> None:
+    current = [
+        aggregate_records(records("run-a", "alloygbm", fit=0.8, metric=0.9, scenario="a"))[0],
+        aggregate_records(records("run-b", "alloygbm", fit=0.8, metric=0.9, scenario="b"))[0],
+    ]
+    baseline = [
+        aggregate_records(records("base", "alloygbm", fit=1.0, metric=1.0, scenario="a"))[0],
+        aggregate_records(records("base", "alloygbm", fit=1.0, metric=1.0, scenario="b"))[0],
+    ]
+    result = gate(current, baseline)
+    if isinstance(result, list):
+        assert result[0].status == "insufficient-data"
+    else:
+        assert result.status == "insufficient-data"
+
+
+def test_default_policy_requires_one_machine_for_all_libraries_in_each_ranked_slice() -> None:
+    current = [
+        aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=0.5, machine={"hostname": "a"}))[0],
+        aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=0.7, machine={"hostname": "b"}))[0],
+    ]
+    baseline = [
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=0.8, machine={"hostname": "a"}))[0],
+        aggregate_records(records("run-base", "lightgbm", fit=1.0, metric=0.7, machine={"hostname": "a"}))[0],
+    ]
+    assert evaluate_default_policy(current, baseline).status == "insufficient-data"
+
+
 def test_requested_target_scenario_missing_from_one_side_is_insufficient() -> None:
     current = [aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0]]
     baseline = [aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]]
@@ -185,10 +228,37 @@ def test_candidate_allowlisted_top_level_parameter_can_differ_but_other_keys_can
     assert evaluate_speed([current], [baseline], allowed_param_differences=["mechanism"]).status == "insufficient-data"
 
 
+def test_parameter_presence_differs_from_explicit_null() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0, effective_params={"mechanism": None}))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, effective_params={}))[0]
+    assert evaluate_speed([current], [baseline]).status == "insufficient-data"
+    assert evaluate_speed([current], [baseline], allowed_param_differences=["mechanism"]).status == "pass"
+
+
 def test_competitor_parameter_difference_cannot_be_allowlisted() -> None:
     current = [aggregate_records(records("run-current", library, fit=1.0, metric=value, effective_params={"depth": 7}))[0] for library, value in (("alloygbm", 1.0), ("lightgbm", 0.8))]
     baseline = [aggregate_records(records("run-base", library, fit=1.0, metric=value, effective_params={"depth": 6}))[0] for library, value in (("alloygbm", 1.0), ("lightgbm", 0.8))]
     assert evaluate_default_policy(current, baseline, allowed_param_differences=["depth"]).status == "insufficient-data"
+
+
+@pytest.mark.parametrize("gate", [evaluate_speed, evaluate_quality, evaluate_default_policy])
+def test_public_gate_rejects_nonpositive_minimum_repetitions(gate) -> None:
+    with pytest.raises(ValueError, match="minimum_repetitions"):
+        gate([], [], minimum_repetitions=0)
+
+
+def test_bare_string_and_blank_allow_list_keys_are_rejected() -> None:
+    with pytest.raises(ValueError, match="allowed_param_differences"):
+        evaluate_speed([], [], allowed_param_differences="depth")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="nonempty"):
+        evaluate_speed([], [], allowed_param_differences=["  "])
+
+
+def test_catastrophic_public_result_records_allowed_keys_at_top_level() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    result = evaluate_catastrophic_regression([current], [baseline], allowed_param_differences=["depth"])
+    assert result.to_dict()["evidence"]["allowed_param_differences"] == ["depth"]
 
 
 def test_gate_result_is_serializable() -> None:
