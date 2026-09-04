@@ -2,6 +2,27 @@
 
 This directory organizes benchmark dataset preparation and cross-library model comparison for AlloyGBM.
 
+### Manifest-driven competitiveness runner
+
+The reproducible competitiveness fixtures and raw repetition contract live in
+`benchmarks/competitiveness`. The runner performs no downloads and writes
+validated records to a fresh UUID directory for every invocation:
+
+```bash
+python -m benchmarks.competitiveness.run \
+  --manifest benchmarks/competitiveness/manifests/pr_smoke.yaml \
+  --output-dir /tmp/alloygbm-competitiveness \
+  --scenario dense_regression --libraries alloygbm \
+  --threads 1 --repetitions 1 --warmups 0 --smoke
+```
+
+Comparison runs default to AlloyGBM, LightGBM, XGBoost, and CatBoost and
+require at least three timed repetitions. `--smoke` only permits a shorter
+repetition count; it does not change fixture dimensions or model parameters.
+Optional competitor dependencies are imported lazily and missing dependencies
+are errors for normal comparison runs. Validate emitted data with
+`benchmarks.competitiveness.schema.load_records`.
+
 ## Scenario Overview
 
 | Scenario | Task | Source | Rows | Features | Notes |
