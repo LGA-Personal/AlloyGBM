@@ -848,6 +848,9 @@ def load_run_bundle(
 
     The default sidecar location is adjacent to ``raw_path``. The run UUID,
     record count, and exact raw-file SHA-256 are checked before returning.
+    Scenario and library declarations are compared as sets (their order is
+    not a metadata contract); seed, thread count, git SHA, and every declared
+    cohort's repetition population are exact metadata contracts.
     """
 
     raw_file = Path(raw_path)
@@ -877,4 +880,43 @@ def load_run_bundle(
         raise ValueError("metadata raw checksum does not match raw records")
     if any(record.run_id != metadata.run_id for record in records):
         raise ValueError("metadata run_id does not match raw records")
+    observed_scenarios = {record.scenario for record in records}
+    if observed_scenarios != set(metadata.scenarios):
+        raise ValueError("metadata scenarios do not match raw records")
+    observed_libraries = {record.library for record in records}
+    if observed_libraries != set(metadata.libraries):
+        raise ValueError("metadata libraries do not match raw records")
+    observed_threads = {record.threads for record in records}
+    if observed_threads != {metadata.threads}:
+        raise ValueError("metadata threads do not match raw records")
+    observed_seeds = {record.seed for record in records}
+    if observed_seeds != {metadata.seed}:
+        raise ValueError("metadata seed does not match raw records")
+    observed_git_shas = {record.git_sha for record in records}
+    if observed_git_shas != {metadata.measured_git_sha}:
+        raise ValueError("metadata git_sha does not match raw records")
+
+    cohort_repetitions: dict[tuple[str, str, int], set[int]] = {}
+    for record in records:
+        cohort_key = (record.scenario, record.library, record.threads)
+        cohort_repetitions.setdefault(cohort_key, set()).add(record.repetition)
+    expected_cohorts = {
+        (scenario, library, metadata.threads)
+        for scenario in metadata.scenarios
+        for library in metadata.libraries
+    }
+    if set(cohort_repetitions) != expected_cohorts:
+        raise ValueError("metadata cohorts do not match raw records")
+    expected_repetitions = set(range(metadata.repetitions))
+    if any(
+        repetitions != expected_repetitions
+        for repetitions in cohort_repetitions.values()
+    ):
+        raise ValueError("cohort repetition IDs do not match metadata repetitions")
+    expected_count = len(expected_cohorts) * metadata.repetitions
+    if len(records) != expected_count:
+        raise ValueError(
+            "metadata cohort population does not match raw records: "
+            f"{expected_count} != {len(records)}"
+        )
     return metadata, records

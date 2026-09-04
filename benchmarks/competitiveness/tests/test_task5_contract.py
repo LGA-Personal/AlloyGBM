@@ -233,6 +233,64 @@ def test_run_bundle_loader_fails_closed_on_metadata_raw_drift(tmp_path: Path) ->
         load_run_bundle(copied_raw, copied_metadata)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("scenarios", ["bogus-scenario"], "scenarios"),
+        ("libraries", ["bogus-library"], "libraries"),
+        ("threads", 4, "threads"),
+        ("seed", 17, "seed"),
+        ("measured_git_sha", "0" * 40, "git_sha"),
+    ],
+)
+def test_run_bundle_rejects_false_metadata_declarations(
+    tmp_path: Path, field: str, value: object, error: str
+) -> None:
+    raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
+    metadata_path = BASELINES / "adfa2c8-pr-smoke.run-metadata.json"
+    copied_raw = tmp_path / raw_path.name
+    copied_metadata = tmp_path / metadata_path.name
+    shutil.copyfile(raw_path, copied_raw)
+    metadata = json.loads(metadata_path.read_text())
+    metadata[field] = value
+    copied_metadata.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+    with pytest.raises(ValueError, match=error):
+        load_run_bundle(copied_raw, copied_metadata)
+
+
+def test_run_bundle_rejects_missing_and_extra_cohort_repetitions(tmp_path: Path) -> None:
+    raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
+    metadata_path = BASELINES / "adfa2c8-pr-smoke.run-metadata.json"
+    records = load_records(raw_path)
+
+    missing_raw = tmp_path / "missing.jsonl"
+    missing_metadata = tmp_path / "missing.run-metadata.json"
+    missing_raw.write_text("\n".join(record.to_json() for record in records[:-1]) + "\n")
+    missing_payload = json.loads(metadata_path.read_text())
+    missing_payload["raw_record_count"] = len(records) - 1
+    missing_payload["raw_sha256"] = hashlib.sha256(missing_raw.read_bytes()).hexdigest()
+    missing_metadata.write_text(json.dumps(missing_payload, sort_keys=True, indent=2) + "\n")
+    with pytest.raises(ValueError, match="repetition IDs"):
+        load_run_bundle(missing_raw, missing_metadata)
+
+    extra_raw = tmp_path / "extra.jsonl"
+    extra_metadata = tmp_path / "extra.run-metadata.json"
+    extra_record = records[-1].to_dict()
+    extra_record["repetition"] = 5
+    extra_raw.write_text(
+        "\n".join(record.to_json() for record in records)
+        + "\n"
+        + json.dumps(extra_record, sort_keys=True)
+        + "\n"
+    )
+    extra_payload = json.loads(metadata_path.read_text())
+    extra_payload["raw_record_count"] = len(records) + 1
+    extra_payload["raw_sha256"] = hashlib.sha256(extra_raw.read_bytes()).hexdigest()
+    extra_metadata.write_text(json.dumps(extra_payload, sort_keys=True, indent=2) + "\n")
+    with pytest.raises(ValueError, match="repetition IDs"):
+        load_run_bundle(extra_raw, extra_metadata)
+
+
 def test_alloy_only_smoke_command_emits_six_records_without_peers(tmp_path: Path) -> None:
     output = tmp_path / "smoke"
     env = os.environ.copy()
