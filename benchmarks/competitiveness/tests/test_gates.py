@@ -615,7 +615,7 @@ def test_deep_scaling_manifest_has_exact_27_scenarios() -> None:
     for item in manifest["scenarios"]:
         assert item["name"] == f"dense_r{item['rows']}_f{item['features']}_d{item['depth']}"
         assert item == {
-            "name": item["name"], "task": "regression", "rows": item["rows"],
+            "name": item["name"], "fixture": "nightly_dense", "task": "regression", "rows": item["rows"],
             "features": item["features"], "rounds": 200, "depth": item["depth"],
             "metric": "rmse", "input_representation": "dense",
         }

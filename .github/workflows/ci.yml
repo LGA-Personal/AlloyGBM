@@ -131,9 +131,10 @@ jobs:
             --output-dir "$smoke_dir" \
             --smoke --libraries alloygbm --threads 1 --repetitions 1 --warmups 0
           python - "$smoke_dir" <<'PY'
+          import hashlib
           import sys
           from pathlib import Path
-          from benchmarks.competitiveness.schema import load_records
+          from benchmarks.competitiveness.schema import load_records, load_run_metadata
 
           candidates = list(Path(sys.argv[1]).glob("*/raw.jsonl"))
           if len(candidates) != 1:
@@ -146,6 +147,11 @@ jobs:
               raise SystemExit("smoke output contained a non-Alloy library")
           if {record.repetition for record in records} != {0}:
               raise SystemExit("smoke output did not contain repetition 0 only")
+          metadata = load_run_metadata(candidates[0].with_name("run-metadata.json"))
+          if metadata.run_id != records[0].run_id or metadata.raw_record_count != 6:
+              raise SystemExit("smoke metadata does not bind to the raw records")
+          if metadata.raw_sha256 != hashlib.sha256(candidates[0].read_bytes()).hexdigest():
+              raise SystemExit("smoke metadata raw checksum drifted")
           print(f"validated {len(records)} AlloyGBM smoke records from {candidates[0]}")
           PY
 
@@ -464,11 +470,13 @@ jobs:
             --json-output "$comparator_dir/summary.json" \
             --markdown-output "$comparator_dir/summary.md"
           python - "$raw_path" "$comparator_dir/summary.json" <<'PY'
+          import hashlib
           import json
           import sys
-          from benchmarks.competitiveness.schema import load_records
+          from benchmarks.competitiveness.schema import load_records, load_run_metadata
 
           records = load_records(sys.argv[1])
+          metadata = load_run_metadata(sys.argv[1].replace("raw.jsonl", "run-metadata.json"))
           summary = json.loads(open(sys.argv[2]).read())
           if len(records) != 72:
               raise SystemExit(f"expected 72 comparator records, got {len(records)}")
@@ -476,6 +484,10 @@ jobs:
               raise SystemExit("comparator summary did not contain 24 rows")
           if {record.repetition for record in records} != {0, 1, 2}:
               raise SystemExit("comparator repetitions were not 0, 1, 2")
+          if metadata.run_id != records[0].run_id or metadata.raw_record_count != len(records):
+              raise SystemExit("comparator metadata does not bind to raw records")
+          if metadata.raw_sha256 != hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest():
+              raise SystemExit("comparator metadata raw checksum drifted")
           print("validated comparator raw and summary artifacts; no timing gate applied")
           PY
 

@@ -294,6 +294,97 @@ class BenchmarkRecordV1:
 
 
 @dataclass(frozen=True)
+class RunMetadataV1:
+    """Durable provenance for one raw benchmark run."""
+
+    schema: SchemaVersion
+    run_id: str
+    measured_git_sha: str | None
+    git_sha_semantics: str
+    harness_git_sha: str | None
+    harness_source_path: str
+    manifest_sha256: str
+    manifest_identifier: str
+    manifest_path: str
+    libraries: tuple[str, ...]
+    scenarios: tuple[str, ...]
+    seed: int
+    threads: int
+    repetitions: int
+    warmups: int
+    smoke: bool
+    raw_sha256: str
+    raw_record_count: int
+    created_at_utc: str
+    working_directory: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "libraries", tuple(self.libraries))
+        object.__setattr__(self, "scenarios", tuple(self.scenarios))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "run_id": self.run_id,
+            "measured_git_sha": self.measured_git_sha,
+            "git_sha_semantics": self.git_sha_semantics,
+            "harness_git_sha": self.harness_git_sha,
+            "harness_source_path": self.harness_source_path,
+            "manifest_sha256": self.manifest_sha256,
+            "manifest_identifier": self.manifest_identifier,
+            "manifest_path": self.manifest_path,
+            "libraries": list(self.libraries),
+            "scenarios": list(self.scenarios),
+            "seed": self.seed,
+            "threads": self.threads,
+            "repetitions": self.repetitions,
+            "warmups": self.warmups,
+            "smoke": self.smoke,
+            "raw_sha256": self.raw_sha256,
+            "raw_record_count": self.raw_record_count,
+            "created_at_utc": self.created_at_utc,
+            "working_directory": self.working_directory,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), allow_nan=False, sort_keys=True)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> RunMetadataV1:
+        metadata = cls(
+            schema=value["schema"],  # type: ignore[arg-type]
+            run_id=value["run_id"],  # type: ignore[arg-type]
+            measured_git_sha=value.get("measured_git_sha"),  # type: ignore[arg-type]
+            git_sha_semantics=value["git_sha_semantics"],  # type: ignore[arg-type]
+            harness_git_sha=value.get("harness_git_sha"),  # type: ignore[arg-type]
+            harness_source_path=value["harness_source_path"],  # type: ignore[arg-type]
+            manifest_sha256=value["manifest_sha256"],  # type: ignore[arg-type]
+            manifest_identifier=value["manifest_identifier"],  # type: ignore[arg-type]
+            manifest_path=value["manifest_path"],  # type: ignore[arg-type]
+            libraries=tuple(value["libraries"]),  # type: ignore[arg-type]
+            scenarios=tuple(value["scenarios"]),  # type: ignore[arg-type]
+            seed=value["seed"],  # type: ignore[arg-type]
+            threads=value["threads"],  # type: ignore[arg-type]
+            repetitions=value["repetitions"],  # type: ignore[arg-type]
+            warmups=value["warmups"],  # type: ignore[arg-type]
+            smoke=value["smoke"],  # type: ignore[arg-type]
+            raw_sha256=value["raw_sha256"],  # type: ignore[arg-type]
+            raw_record_count=value["raw_record_count"],  # type: ignore[arg-type]
+            created_at_utc=value["created_at_utc"],  # type: ignore[arg-type]
+            working_directory=value["working_directory"],  # type: ignore[arg-type]
+        )
+        validate_run_metadata(metadata)
+        return metadata
+
+    @classmethod
+    def from_json(cls, value: str) -> RunMetadataV1:
+        decoded = json.loads(value)
+        if not isinstance(decoded, Mapping):
+            raise ValueError("run metadata JSON must contain an object")
+        return cls.from_dict(decoded)
+
+
+@dataclass(frozen=True)
 class BenchmarkSummaryV1:
     """Median/MAD aggregate retaining the raw repetitions behind it."""
 
@@ -572,6 +663,39 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
             _positive_int(line, "raw_line_numbers entry")
 
 
+def validate_run_metadata(metadata: RunMetadataV1) -> None:
+    """Validate the sidecar that binds a raw run to its execution context."""
+
+    if not isinstance(metadata, RunMetadataV1):
+        raise ValueError("metadata must be a RunMetadataV1")
+    if metadata.schema != SCHEMA_VERSION:
+        raise ValueError(f"unsupported schema: {metadata.schema!r}")
+    for field in (
+        "run_id", "git_sha_semantics", "harness_source_path", "manifest_sha256",
+        "manifest_identifier", "manifest_path", "raw_sha256", "created_at_utc",
+        "working_directory",
+    ):
+        _nonempty_string(getattr(metadata, field), field)
+    for field in ("manifest_sha256", "raw_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", getattr(metadata, field)) is None:
+            raise ValueError(f"{field} must be exactly 64 lowercase hexadecimal characters")
+    for field in ("measured_git_sha", "harness_git_sha"):
+        value = getattr(metadata, field)
+        if value is not None:
+            _nonempty_string(value, field)
+    if not metadata.libraries or not all(isinstance(value, str) and value.strip() for value in metadata.libraries):
+        raise ValueError("libraries must be a nonempty sequence of strings")
+    if not metadata.scenarios or not all(isinstance(value, str) and value.strip() for value in metadata.scenarios):
+        raise ValueError("scenarios must be a nonempty sequence of strings")
+    _nonnegative_int(metadata.seed, "seed")
+    _positive_int(metadata.threads, "threads")
+    _positive_int(metadata.repetitions, "repetitions")
+    _nonnegative_int(metadata.warmups, "warmups")
+    if not isinstance(metadata.smoke, bool):
+        raise ValueError("smoke must be a boolean")
+    _positive_int(metadata.raw_record_count, "raw_record_count")
+
+
 def _validate_finite_values(value: object, name: str) -> None:
     """Validate JSON-like effective parameter values and finite numbers."""
 
@@ -662,3 +786,11 @@ def load_records(path: str | Path) -> list[BenchmarkRecordV1]:
             raise ValueError(f"duplicate record key: {duplicate_key!r}")
         keys.add(duplicate_key)
     return records
+
+
+def load_run_metadata(path: str | Path) -> RunMetadataV1:
+    """Load and validate a run metadata JSON sidecar."""
+
+    metadata = RunMetadataV1.from_json(Path(path).read_text())
+    validate_run_metadata(metadata)
+    return metadata

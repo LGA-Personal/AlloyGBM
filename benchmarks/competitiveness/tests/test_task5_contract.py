@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -13,8 +14,10 @@ import yaml
 from benchmarks.competitiveness.schema import (
     BenchmarkSummaryV1,
     METRIC_DIRECTIONS,
+    RunMetadataV1,
     SCHEMA_VERSION,
     load_records,
+    load_run_metadata,
 )
 from benchmarks.competitiveness.datasets import build_dataset_cases
 from benchmarks.competitiveness.run import load_manifest
@@ -111,6 +114,37 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
         expected_payload, allow_nan=False, sort_keys=True, indent=2
     ) + "\n"
 
+    metadata = load_run_metadata(BASELINES / "adfa2c8-pr-smoke.run-metadata.json")
+    assert metadata.run_id == records[0].run_id
+    assert metadata.measured_git_sha == "adfa2c8e593cea68b124e7975f3b4fd9f862a148"
+    assert metadata.harness_git_sha == "7082301fcd79bac3e1f05e696c376588158eaee3"
+    assert metadata.manifest_identifier == "benchmarks/competitiveness/manifests/pr_smoke.yaml"
+    assert metadata.manifest_sha256 == "02bb62801670d5104aa44a304bafa4d2469a6c66191deb3e872424df89453fce"
+    assert metadata.raw_record_count == len(records)
+    assert metadata.raw_sha256 == hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    assert metadata.libraries == ("alloygbm", "lightgbm", "xgboost", "catboost")
+    assert metadata.scenarios == tuple(cases)
+
+
+def test_deep_scaling_fixture_identity_is_runnable_and_published_fixture_is_distinct() -> None:
+    deep_manifest = load_manifest(ROOT / "benchmarks" / "competitiveness" / "manifests" / "deep_scaling.yaml")
+    deep_specs = [item for item in deep_manifest["scenarios"] if isinstance(item, Mapping)]
+    assert len(deep_specs) == 27
+    assert {item["fixture"] for item in deep_specs} == {"nightly_dense"}
+    small_specs = [dict(item, rows=32, rounds=2) for item in deep_specs]
+    small_cases = build_dataset_cases(small_specs, int(deep_manifest["seed"]))
+    assert len(small_cases) == 27
+    assert all(case.input_representation == "dense" for case in small_cases)
+    assert all(case.X_train.shape[0] > 0 and case.X_test.shape[0] > 0 for case in small_cases)
+
+    published_manifest = load_manifest(ROOT / "benchmarks" / "competitiveness" / "manifests" / "published_v1_crosscheck.yaml")
+    published_spec = [item for item in published_manifest["scenarios"] if isinstance(item, Mapping)][0]
+    published_case = build_dataset_cases([published_spec], int(published_manifest["seed"]))[0]
+    assert published_spec["fixture"] == "published_deep_scaling_v1"
+    assert published_case.X_train.shape == (400000, 40)
+    assert published_case.X_test.shape == (100000, 40)
+    assert published_case.dataset_sha256 != small_cases[0].dataset_sha256
+
 
 def test_alloy_only_smoke_command_emits_six_records_without_peers(tmp_path: Path) -> None:
     output = tmp_path / "smoke"
@@ -176,10 +210,13 @@ def test_docs_link_committed_artifacts_and_match_recorded_provenance() -> None:
     for text in (benchmark_doc, readme):
         assert "adfa2c8-pr-smoke.jsonl" in text
         assert "adfa2c8-pr-smoke.summary.json" in text
+        assert "run-metadata" in text
     assert "2026-09-04 PDT" in benchmark_doc
     assert "median and unscaled MAD" in benchmark_doc
     assert "numerically comparable" in benchmark_doc
     assert "adfa2c8e593cea68b124e7975f3b4fd9f862a148" in benchmark_doc
+    assert "legacy comparison scripts" in readme
+    assert "manifest-driven" in readme
     records = load_records(BASELINES / "adfa2c8-pr-smoke.jsonl")
     versions = {record.library_version for record in records}
     assert all(version in benchmark_doc for version in versions)

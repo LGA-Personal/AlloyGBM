@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import os
 import platform
@@ -19,7 +21,15 @@ import yaml
 
 from .adapters import Adapter, AdapterResult, load_adapters
 from .datasets import DatasetCase, build_dataset_cases
-from .schema import BenchmarkRecordV1, ProfileRecordV1, SCHEMA_VERSION, load_records, validate_record
+from .schema import (
+    BenchmarkRecordV1,
+    ProfileRecordV1,
+    RunMetadataV1,
+    SCHEMA_VERSION,
+    load_records,
+    validate_record,
+    validate_run_metadata,
+)
 
 DEFAULT_LIBRARIES = ("alloygbm", "lightgbm", "xgboost", "catboost")
 KNOWN_LIBRARIES = frozenset(DEFAULT_LIBRARIES)
@@ -149,6 +159,74 @@ def _git_sha() -> str | None:
         return None
 
 
+def _git_sha_at(path: str | Path) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip() or None
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _harness_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _manifest_identifier(path: Path, harness_root: Path) -> str:
+    try:
+        return path.resolve().relative_to(harness_root.resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _write_run_metadata(
+    run_path: Path,
+    manifest: str | Path,
+    *,
+    run_id: str,
+    measured_git_sha: str | None,
+    scenario_names: Sequence[str],
+    libraries: Sequence[str],
+    seed: int,
+    threads: int,
+    repetitions: int,
+    warmups: int,
+    smoke: bool,
+    profile_alloy: bool = False,
+) -> Path:
+    raw_path = run_path / "raw.jsonl"
+    manifest_path = Path(manifest).resolve()
+    harness_root = _harness_root()
+    metadata = RunMetadataV1(
+        schema=SCHEMA_VERSION,
+        run_id=run_id,
+        measured_git_sha=measured_git_sha,
+        git_sha_semantics="runner working-directory source commit; for AlloyGBM this is the measured library commit",
+        harness_git_sha=_git_sha_at(harness_root),
+        harness_source_path=str(harness_root),
+        manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        manifest_identifier=_manifest_identifier(manifest_path, harness_root),
+        manifest_path=str(manifest_path),
+        libraries=tuple(libraries),
+        scenarios=tuple(scenario_names),
+        seed=seed,
+        threads=threads,
+        repetitions=repetitions,
+        warmups=warmups,
+        smoke=smoke,
+        raw_sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+        raw_record_count=len(load_records(raw_path)),
+        created_at_utc=datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(),
+        working_directory=os.getcwd(),
+    )
+    validate_run_metadata(metadata)
+    metadata_path = run_path / "run-metadata.json"
+    metadata_path.write_text(json.dumps(metadata.to_dict(), allow_nan=False, sort_keys=True, indent=2) + "\n")
+    return metadata_path
+
+
 def _record(case: DatasetCase, result: AdapterResult, run_id: str, repetition: int, seed: int, threads: int, git_sha: str | None = None) -> BenchmarkRecordV1:
     record = BenchmarkRecordV1(
         schema=SCHEMA_VERSION, run_id=run_id, repetition=repetition,
@@ -215,6 +293,11 @@ def run_benchmark(
                     result = adapter.fit_predict(case, seed, threads)
                     output.write(_record(case, result, run_id, repetition, seed, threads, git_sha).to_json() + "\n")
     load_records(raw_path)
+    _write_run_metadata(
+        run_path, manifest, run_id=run_id, measured_git_sha=git_sha,
+        scenario_names=selected_names, libraries=selected_libraries, seed=seed,
+        threads=threads, repetitions=timed, warmups=warmup_count, smoke=smoke,
+    )
     return run_path
 
 
@@ -397,6 +480,12 @@ def run_subprocess_benchmark(
                     spec = spec_by_name[name]
                     output.write(_record_from_measurement(value, run_id, repetition, seed, threads, git_sha, expected_scenario=name, expected_task=str(spec["task"]), expected_metric=str(spec["metric"]), requested_library=library).to_json() + "\n")
     load_records(run_path / "raw.jsonl")
+    _write_run_metadata(
+        run_path, manifest, run_id=run_id, measured_git_sha=git_sha,
+        scenario_names=selected_names, libraries=selected_libraries, seed=seed,
+        threads=threads, repetitions=timed, warmups=warmup_count, smoke=smoke,
+        profile_alloy=profile_alloy,
+    )
     return run_path
 
 

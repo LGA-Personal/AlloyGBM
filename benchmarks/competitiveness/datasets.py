@@ -51,6 +51,18 @@ def _dense_regression(rng: np.random.Generator, rows: int, features: int) -> tup
     return X, y.astype(np.float32)
 
 
+def _published_deep_scaling_dense(
+    rng: np.random.Generator, rows: int, features: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reproduce ``benchmarks/deep_scaling_comparison.py::make_dataset``."""
+
+    X = rng.normal(size=(rows, features)).astype(np.float32)
+    signal = X[:, :5] @ np.array([1.5, -2.0, 0.75, 1.0, -0.5], dtype=np.float32)
+    interaction = 0.8 * X[:, 0] * X[:, 1]
+    y = (signal + interaction + rng.normal(scale=0.1, size=rows)).astype(np.float32)
+    return X, y
+
+
 def _binary(rng: np.random.Generator, rows: int, features: int) -> tuple[np.ndarray, np.ndarray]:
     X = rng.standard_normal((rows, features)).astype(np.float32)
     coefficients = np.array([1.2, -1.0, 0.7, 0.45, -0.35], dtype=np.float32)[:features]
@@ -156,13 +168,18 @@ def build_dataset_cases(scenarios: Sequence[Mapping[str, object]], seed: int) ->
     for spec in scenarios:
         name = str(spec["name"])
         task = str(spec["task"])
+        fixture = str(spec.get("fixture", "legacy"))
         rows = int(spec["rows"])
         rng = np.random.default_rng(seed)
         groups: int | None = None
         cat_indices: tuple[int, ...] = ()
         cat_values: list[np.ndarray] = []
-        if name == "dense_regression":
+        if fixture in {"legacy", "nightly_dense"} and name == "dense_regression":
             X, y = _dense_regression(rng, rows, int(spec["features"]))
+        elif fixture == "nightly_dense":
+            X, y = _dense_regression(rng, rows, int(spec["features"]))
+        elif fixture == "published_deep_scaling_v1":
+            X, y = _published_deep_scaling_dense(rng, rows, int(spec["features"]))
         elif name == "binary":
             X, y = _binary(rng, rows, int(spec["features"]))
         elif name == "grouped_ranking":

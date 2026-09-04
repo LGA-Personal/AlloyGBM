@@ -27,6 +27,9 @@ The pinned pre-optimization six-scenario capture is committed at
 [`benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.jsonl`](competitiveness/baselines/adfa2c8-pr-smoke.jsonl),
 with its median/MAD summary at
 [`benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.summary.json`](competitiveness/baselines/adfa2c8-pr-smoke.summary.json).
+Its [run metadata sidecar](competitiveness/baselines/adfa2c8-pr-smoke.run-metadata.json)
+binds the raw records to the measured library commit, harness revision, and
+manifest checksum.
 It contains 120 raw records (four libraries, five repetitions) and is a
 provenance anchor, not a CI timing gate. CI runs the Alloy-only smoke command
 with one repetition; scheduled/manual comparator runs are observational and
@@ -112,8 +115,10 @@ under the closed-form ridge solve.
 `--threads N` applies one compute budget to **every** library through its own
 knob (AlloyGBM/LightGBM/XGBoost `n_jobs`, CatBoost `thread_count`), and pins
 `OMP_NUM_THREADS` and the BLAS thread variables to match so no runtime quietly
-takes more. `--threads 0` uses all logical CPUs. Every run records the budget,
-host, and library versions in its JSON output under `params.environment`, and
+takes more. The legacy comparison scripts accept `--threads 0` to use all
+logical CPUs; the manifest-driven `benchmarks.competitiveness.run` requires a
+positive thread count. Every run records the budget, host, and library versions
+in its JSON output under `params.environment`, and
 the matched-hyperparameter settings under `params.fairness`.
 
 Two LightGBM-specific corrections are applied automatically, without which the
