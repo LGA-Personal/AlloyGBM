@@ -6,14 +6,19 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Mapping
 
 import yaml
 
 from benchmarks.competitiveness.schema import (
     BenchmarkSummaryV1,
+    METRIC_DIRECTIONS,
     SCHEMA_VERSION,
     load_records,
 )
+from benchmarks.competitiveness.datasets import build_dataset_cases
+from benchmarks.competitiveness.run import load_manifest
+from benchmarks.competitiveness.summarize import summarize_file
 
 
 ROOT = Path(__file__).parents[3]
@@ -24,6 +29,17 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
     raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
     summary_path = BASELINES / "adfa2c8-pr-smoke.summary.json"
     records = load_records(raw_path)
+    manifest = load_manifest(ROOT / "benchmarks" / "competitiveness" / "manifests" / "pr_smoke.yaml")
+    specs = [item for item in manifest["scenarios"] if isinstance(item, Mapping)]
+    cases = {case.name: case for case in build_dataset_cases(specs, int(manifest["seed"]))}
+    expected_scenarios = set(cases)
+    expected_libraries = {"alloygbm", "lightgbm", "xgboost", "catboost"}
+    expected_versions = {
+        "alloygbm": "1.0.0",
+        "lightgbm": "4.6.0",
+        "xgboost": "3.2.0",
+        "catboost": "1.2.10",
+    }
     assert len(records) == 120
     assert {record.git_sha for record in records} == {
         "adfa2c8e593cea68b124e7975f3b4fd9f862a148"
@@ -32,30 +48,68 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
     assert len({tuple(sorted(record.machine.items())) for record in records}) == 1
     assert {record.repetition for record in records} == {0, 1, 2, 3, 4}
     assert all(record.effective_params for record in records)
+    assert {record.scenario for record in records} == expected_scenarios
+    assert {record.library for record in records} == expected_libraries
+    assert {record.library: record.library_version for record in records} == expected_versions
     populations = Counter((record.scenario, record.library) for record in records)
-    assert len(populations) == 24
-    assert set(populations.values()) == {5}
-    assert len({record.dataset_sha256 for record in records if record.scenario == "dense_regression"}) == 1
-    assert len({record.dataset_sha256 for record in records if record.scenario == "binary"}) == 1
-    assert len({record.dataset_sha256 for record in records if record.scenario == "grouped_ranking"}) == 1
-    assert len({record.dataset_sha256 for record in records if record.scenario == "native_categorical"}) == 1
-    assert len({record.dataset_sha256 for record in records if record.scenario == "csr_sparse"}) == 1
-    assert len({record.dataset_sha256 for record in records if record.scenario == "joint_multi_output"}) == 1
+    assert set(populations) == {
+        (scenario, library)
+        for scenario in expected_scenarios
+        for library in expected_libraries
+    }
+    assert len(populations) == 24 and set(populations.values()) == {5}
+    for record in records:
+        case = cases[record.scenario]
+        assert record.dataset_sha256 == case.dataset_sha256
+        assert record.task == case.task
+        assert record.metric_name == case.metric_name
+        allowed_inputs = {case.input_representation}
+        if record.scenario == "csr_sparse" and record.library == "alloygbm":
+            allowed_inputs.add("dense_fallback")
+        assert record.input_representation in allowed_inputs
 
     payload = json.loads(summary_path.read_text())
     assert payload["schema"] == SCHEMA_VERSION
     assert payload["status"] == "insufficient-data"
     assert len(payload["summaries"]) == 24
     raw_lines = raw_path.read_text().splitlines()
+    referenced_lines: list[int] = []
     for encoded in payload["summaries"]:
         summary = BenchmarkSummaryV1.from_json(json.dumps(encoded, sort_keys=True))
         assert summary.raw_line_numbers is not None
         assert summary.raw_repetition_ids == (0, 1, 2, 3, 4)
         assert len(summary.raw_line_numbers) == 5
-        for line_number in summary.raw_line_numbers:
-            assert json.loads(raw_lines[line_number - 1])["run_id"] == summary.run_id
-            assert json.loads(raw_lines[line_number - 1])["scenario"] == summary.scenario
-            assert json.loads(raw_lines[line_number - 1])["library"] == summary.library
+        referenced_lines.extend(summary.raw_line_numbers)
+        summary_records = [records[line_number - 1] for line_number in summary.raw_line_numbers]
+        assert [record.repetition for record in summary_records] == list(summary.raw_repetition_ids)
+        assert len(summary_records) == 5
+        for index, record in enumerate(summary_records):
+            assert record.run_id == summary.run_id
+            assert record.scenario == summary.scenario
+            assert record.task == summary.task
+            assert record.library == summary.library
+            assert record.library_version == summary.library_version
+            assert record.threads == summary.threads
+            assert record.dataset_sha256 == summary.dataset_sha256
+            assert record.input_representation == summary.input_representation
+            assert record.metric_name == summary.metric_name
+            assert METRIC_DIRECTIONS[record.metric_name] == summary.metric_direction
+            assert dict(record.machine) == dict(summary.machine or {})
+            assert dict(record.effective_params) == dict(summary.effective_params or {})
+            assert json.loads(raw_lines[summary.raw_line_numbers[index] - 1]) == record.to_dict()
+    assert sorted(referenced_lines) == list(range(1, 121))
+    regenerated = summarize_file(raw_path)
+    regenerated_rows = [summary.to_dict() for summary in regenerated]
+    assert payload["summaries"] == regenerated_rows
+    expected_payload = {
+        "schema": SCHEMA_VERSION,
+        "status": "insufficient-data",
+        "claim": None,
+        "summaries": regenerated_rows,
+    }
+    assert summary_path.read_text() == json.dumps(
+        expected_payload, allow_nan=False, sort_keys=True, indent=2
+    ) + "\n"
 
 
 def test_alloy_only_smoke_command_emits_six_records_without_peers(tmp_path: Path) -> None:
@@ -108,7 +162,8 @@ def test_ci_workflow_has_event_scoped_smoke_and_observational_comparator() -> No
     comparator = workflow["jobs"]["competitiveness-comparator"]
     assert "workflow_dispatch" in comparator["if"]
     assert "schedule" in comparator["if"]
-    assert "actions/upload-artifact@v4" in workflow_text
+    assert "actions/upload-artifact@v7" in workflow_text
+    assert "actions/upload-artifact@v4" not in workflow_text
     assert "--smoke --libraries alloygbm --threads 1 --repetitions 1 --warmups 0" in workflow_text
     assert "--repetitions 3 --warmups 1" in workflow_text
     assert "evaluate_claim" not in workflow_text
