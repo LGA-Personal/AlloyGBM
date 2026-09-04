@@ -205,10 +205,10 @@ def _write_run_metadata(
         measured_git_sha=measured_git_sha,
         git_sha_semantics="runner working-directory source commit; for AlloyGBM this is the measured library commit",
         harness_git_sha=_git_sha_at(harness_root),
-        harness_source_path=str(harness_root),
+        harness_source_path="benchmarks/competitiveness",
         manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         manifest_identifier=_manifest_identifier(manifest_path, harness_root),
-        manifest_path=str(manifest_path),
+        manifest_path=_manifest_identifier(manifest_path, harness_root),
         libraries=tuple(libraries),
         scenarios=tuple(scenario_names),
         seed=seed,
@@ -219,7 +219,7 @@ def _write_run_metadata(
         raw_sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest(),
         raw_record_count=len(load_records(raw_path)),
         created_at_utc=datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(),
-        working_directory=os.getcwd(),
+        working_directory="repository-root",
     )
     validate_run_metadata(metadata)
     metadata_path = run_path / "run-metadata.json"
@@ -297,6 +297,7 @@ def run_benchmark(
         run_path, manifest, run_id=run_id, measured_git_sha=git_sha,
         scenario_names=selected_names, libraries=selected_libraries, seed=seed,
         threads=threads, repetitions=timed, warmups=warmup_count, smoke=smoke,
+        profile_alloy=False,
     )
     return run_path
 

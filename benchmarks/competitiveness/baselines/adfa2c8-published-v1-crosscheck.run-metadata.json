@@ -2,12 +2,12 @@
   "created_at_utc": "2026-09-04T13:06:44+00:00",
   "git_sha_semantics": "runner working-directory source commit; for AlloyGBM this is the measured library commit",
   "harness_git_sha": "88f754c9f3f2d17d8e929842923d6a3760ebbc09",
-  "harness_source_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/competitiveness-benchmark-gates",
+  "harness_source_path": "benchmarks/competitiveness",
   "libraries": [
     "alloygbm"
   ],
   "manifest_identifier": "benchmarks/competitiveness/manifests/published_v1_crosscheck.yaml",
-  "manifest_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/competitiveness-benchmark-gates/benchmarks/competitiveness/manifests/published_v1_crosscheck.yaml",
+  "manifest_path": "benchmarks/competitiveness/manifests/published_v1_crosscheck.yaml",
   "manifest_sha256": "37200bf8c8496ed48cfdeea415f9bbab1bfcf697806ca7b638341350ce8efa7b",
   "measured_git_sha": "adfa2c8e593cea68b124e7975f3b4fd9f862a148",
   "raw_record_count": 5,
@@ -19,8 +19,9 @@
   ],
   "schema": "alloygbm-competitiveness/v1",
   "seed": 20260902,
+  "profile_alloy": false,
   "smoke": false,
   "threads": 1,
   "warmups": 1,
-  "working_directory": "/Users/lashby/Projects/AlloyGBM"
+  "working_directory": "repository-root"
 }

@@ -119,6 +119,10 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
     assert metadata.measured_git_sha == "adfa2c8e593cea68b124e7975f3b4fd9f862a148"
     assert metadata.harness_git_sha == "7082301fcd79bac3e1f05e696c376588158eaee3"
     assert metadata.manifest_identifier == "benchmarks/competitiveness/manifests/pr_smoke.yaml"
+    assert metadata.harness_source_path == "benchmarks/competitiveness"
+    assert metadata.manifest_path == metadata.manifest_identifier
+    assert metadata.working_directory == "repository-root"
+    assert "/Users/" not in metadata.to_json()
     assert metadata.manifest_sha256 == "02bb62801670d5104aa44a304bafa4d2469a6c66191deb3e872424df89453fce"
     assert metadata.raw_record_count == len(records)
     assert metadata.raw_sha256 == hashlib.sha256(raw_path.read_bytes()).hexdigest()
@@ -158,6 +162,10 @@ def test_published_crosscheck_artifacts_bind_to_exact_five_row_capture() -> None
     assert metadata.run_id == records[0].run_id
     assert metadata.harness_git_sha == "88f754c9f3f2d17d8e929842923d6a3760ebbc09"
     assert metadata.manifest_identifier.endswith("published_v1_crosscheck.yaml")
+    assert metadata.manifest_path == metadata.manifest_identifier
+    assert metadata.harness_source_path == "benchmarks/competitiveness"
+    assert metadata.working_directory == "repository-root"
+    assert "/Users/" not in metadata.to_json()
     assert metadata.raw_sha256 == hashlib.sha256(raw_path.read_bytes()).hexdigest()
     payload = json.loads(summary_path.read_text())
     assert payload["status"] == "insufficient-data"

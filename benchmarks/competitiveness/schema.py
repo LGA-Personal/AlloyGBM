@@ -313,6 +313,7 @@ class RunMetadataV1:
     repetitions: int
     warmups: int
     smoke: bool
+    profile_alloy: bool
     raw_sha256: str
     raw_record_count: int
     created_at_utc: str
@@ -340,6 +341,7 @@ class RunMetadataV1:
             "repetitions": self.repetitions,
             "warmups": self.warmups,
             "smoke": self.smoke,
+            "profile_alloy": self.profile_alloy,
             "raw_sha256": self.raw_sha256,
             "raw_record_count": self.raw_record_count,
             "created_at_utc": self.created_at_utc,
@@ -374,6 +376,7 @@ class RunMetadataV1:
             repetitions=value["repetitions"],  # type: ignore[arg-type]
             warmups=value["warmups"],  # type: ignore[arg-type]
             smoke=value["smoke"],  # type: ignore[arg-type]
+            profile_alloy=value["profile_alloy"],  # type: ignore[arg-type]
             raw_sha256=value["raw_sha256"],  # type: ignore[arg-type]
             raw_record_count=value["raw_record_count"],  # type: ignore[arg-type]
             created_at_utc=value["created_at_utc"],  # type: ignore[arg-type]
@@ -705,6 +708,8 @@ def validate_run_metadata(metadata: RunMetadataV1) -> None:
     _nonnegative_int(metadata.warmups, "warmups")
     if not isinstance(metadata.smoke, bool):
         raise ValueError("smoke must be a boolean")
+    if not isinstance(metadata.profile_alloy, bool):
+        raise ValueError("profile_alloy must be a boolean")
     _positive_int(metadata.raw_record_count, "raw_record_count")
 
 
