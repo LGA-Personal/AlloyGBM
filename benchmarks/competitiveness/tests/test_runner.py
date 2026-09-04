@@ -336,6 +336,31 @@ def test_compact_worker_rejects_non_mapping_payload() -> None:
         _record_from_measurement([], "run", 0, 7, 1, None)  # type: ignore[arg-type]
 
 
+def test_alloy_joint_metadata_does_not_claim_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+    import benchmarks.competitiveness.adapters as adapters
+    spec = {"name": "joint_multi_output", "task": "multi_output_regression", "rows": 20,
+            "features": 4, "outputs": 2, "rounds": 2, "depth": 2,
+            "metric": "rmse", "input_representation": "dense"}
+    case = build_dataset_cases([spec], seed=7)[0]
+
+    class FakeJoint:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+        def fit(self, X, y):
+            self.resolved_training_policy_ = None
+        def predict(self, X):
+            return np.zeros((len(X), 2), dtype=np.float32)
+
+    fake_module = types.SimpleNamespace(MultiLabelGBMRanker=FakeJoint)
+    monkeypatch.setattr(adapters.importlib, "import_module", lambda name: fake_module if name == "alloygbm" else __import__(name))
+    result = adapters._fit_alloy(case, 7, 1)
+    assert result.predictions.shape == case.y_test.shape
+    assert result.effective_params["deterministic_applied"] is False
+    assert result.effective_params["policy_verification"] == "unavailable_joint_bridge"
+    assert result.effective_params.get("deterministic") is not True
+
+
 def test_mismatched_later_measurement_is_not_appended(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
     tiny_manifest(manifest)

@@ -155,6 +155,7 @@ def _fit_alloy(case: DatasetCase, seed: int, threads: int) -> AdapterResult:
         params["deterministic_applied"] = False
         params["deterministic_limitation"] = "joint bridge does not accept deterministic kwarg"
         params["policy_verification"] = "unavailable_joint_bridge"
+        params.pop("deterministic", None)
         params["objective"] = "squared_error"
     else:
         raise ValueError(f"unsupported task: {case.task}")
