@@ -2,6 +2,9 @@ name: CI
 
 on:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
   # Only run push-triggered CI on `main`.  Feature branches rely on the
   # `pull_request` trigger above so PR runs aren't shadowed by a
   # duplicate push run on the same commit — that duplicate would either
@@ -23,6 +26,7 @@ concurrency:
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -65,6 +69,7 @@ jobs:
 
   python-smoke:
     name: Python smoke (${{ matrix.os }} / py${{ matrix.python-version }})
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -108,6 +113,41 @@ jobs:
 
       - name: Install test dependencies
         run: python -m pip install pytest pytest-subtests numpy "scikit-learn>=1.9,<1.10" pandas
+
+      - name: Install competitiveness dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pip install pyyaml
+
+      - name: Run competitiveness contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/competitiveness/tests/ -q
+
+      - name: Run AlloyGBM competitiveness smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          smoke_dir="$RUNNER_TEMP/alloygbm-competitiveness-smoke"
+          python -m benchmarks.competitiveness.run \
+            --manifest benchmarks/competitiveness/manifests/pr_smoke.yaml \
+            --output-dir "$smoke_dir" \
+            --smoke --libraries alloygbm --threads 1 --repetitions 1 --warmups 0
+          python - "$smoke_dir" <<'PY'
+          import sys
+          from pathlib import Path
+          from benchmarks.competitiveness.schema import load_records
+
+          candidates = list(Path(sys.argv[1]).glob("*/raw.jsonl"))
+          if len(candidates) != 1:
+              raise SystemExit(f"expected exactly one raw JSONL, found {len(candidates)}")
+          records = load_records(candidates[0])
+          scenarios = {record.scenario for record in records}
+          if len(records) != 6 or len(scenarios) != 6:
+              raise SystemExit(f"expected six Alloy records/scenarios, got {len(records)}/{len(scenarios)}")
+          if {record.library for record in records} != {"alloygbm"}:
+              raise SystemExit("smoke output contained a non-Alloy library")
+          if {record.repetition for record in records} != {0}:
+              raise SystemExit("smoke output did not contain repetition 0 only")
+          print(f"validated {len(records)} AlloyGBM smoke records from {candidates[0]}")
+          PY
 
       - name: Run pytest suite
         run: python -m pytest bindings/python/tests/ -q
@@ -339,6 +379,7 @@ jobs:
 
   sklearn-conformance:
     name: sklearn ${{ matrix.sklearn-minor }} conformance
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -379,3 +420,68 @@ jobs:
             bindings/python/tests/test_regressor_contract.py \
             bindings/python/tests/test_classifier_and_metrics.py \
             bindings/python/tests/test_ranker.py -q
+
+  competitiveness-comparator:
+    name: Competitiveness comparator (observational)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python --out dist
+
+      - name: Install comparator dependencies
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install pyyaml numpy pandas scipy "scikit-learn>=1.9,<1.10" \
+            "lightgbm==4.6.0" "xgboost==3.2.0" "catboost==1.2.10"
+
+      - name: Run observational comparator
+        run: |
+          comparator_dir="$RUNNER_TEMP/alloygbm-competitiveness-comparator"
+          python -m benchmarks.competitiveness.run \
+            --manifest benchmarks/competitiveness/manifests/pr_smoke.yaml \
+            --output-dir "$comparator_dir" \
+            --libraries alloygbm lightgbm xgboost catboost \
+            --threads 1 --repetitions 3 --warmups 1
+          raw_path=$(find "$comparator_dir" -name raw.jsonl -type f -print -quit)
+          test -n "$raw_path"
+          python -m benchmarks.competitiveness.summarize "$raw_path" \
+            --minimum-repetitions 3 \
+            --json-output "$comparator_dir/summary.json" \
+            --markdown-output "$comparator_dir/summary.md"
+          python - "$raw_path" "$comparator_dir/summary.json" <<'PY'
+          import json
+          import sys
+          from benchmarks.competitiveness.schema import load_records
+
+          records = load_records(sys.argv[1])
+          summary = json.loads(open(sys.argv[2]).read())
+          if len(records) != 72:
+              raise SystemExit(f"expected 72 comparator records, got {len(records)}")
+          if len(summary.get("summaries", [])) != 24:
+              raise SystemExit("comparator summary did not contain 24 rows")
+          if {record.repetition for record in records} != {0, 1, 2}:
+              raise SystemExit("comparator repetitions were not 0, 1, 2")
+          print("validated comparator raw and summary artifacts; no timing gate applied")
+          PY
+
+      - name: Upload comparator artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alloygbm-competitiveness-comparator-${{ github.run_id }}
+          path: ${{ runner.temp }}/alloygbm-competitiveness-comparator/**
+          if-no-files-found: error

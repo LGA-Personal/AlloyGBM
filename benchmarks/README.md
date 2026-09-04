@@ -23,6 +23,15 @@ Optional competitor dependencies are imported lazily and missing dependencies
 are errors for normal comparison runs. Validate emitted data with
 `benchmarks.competitiveness.schema.load_records`.
 
+The pinned pre-optimization six-scenario capture is committed at
+[`benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.jsonl`](competitiveness/baselines/adfa2c8-pr-smoke.jsonl),
+with its median/MAD summary at
+[`benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.summary.json`](competitiveness/baselines/adfa2c8-pr-smoke.summary.json).
+It contains 120 raw records (four libraries, five repetitions) and is a
+provenance anchor, not a CI timing gate. CI runs the Alloy-only smoke command
+with one repetition; scheduled/manual comparator runs are observational and
+upload their raw and summarized artifacts.
+
 ## Scenario Overview
 
 | Scenario | Task | Source | Rows | Features | Notes |
