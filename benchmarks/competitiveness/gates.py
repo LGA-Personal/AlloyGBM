@@ -80,7 +80,7 @@ def _metadata(item: BenchmarkSummaryV1, name: str, default: object = None) -> ob
 
 def _allowed_keys(values: Sequence[str] | None) -> frozenset[str]:
     keys = frozenset(values or ())
-    if any(not isinstance(key, str) or not key.strip() or "." in key for key in keys):
+    if any(not isinstance(key, str) or not key.strip() for key in keys):
         raise ValueError("allowed_param_differences must contain nonempty top-level keys")
     return keys
 
