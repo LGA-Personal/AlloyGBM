@@ -27,8 +27,11 @@ def profile() -> ProfileRecordV1:
         rounds=4,
         threads=2,
         loop_wall_ns=10_000,
-        stage_ns={"gradients": 100, "tree_build": 9_000},
-        tree_stage_ns={"histogram_build": 4_000, "split_find": 1_000},
+        untimed_ns=900,
+        stage_ns={label: (100 if label == "gradients" else 9_000 if label == "tree_build" else 0)
+                  for label in ("gradients", "row_sampling", "feature_tiles", "prediction_copy", "tree_build", "prediction_update", "loss", "validation")},
+        tree_stage_ns={label: (4_000 if label == "histogram_build" else 1_000 if label == "split_find" else 0)
+                       for label in ("histogram_build", "split_find", "partition")},
     )
 
 
@@ -247,6 +250,26 @@ def test_profile_stage_maps_reject_unknown_labels() -> None:
     bad = replace(profile(), stage_ns={"not_a_stage": 1})
     with pytest.raises(ValueError, match="stage"):
         validate_record(replace(record(), profile=bad))
+
+
+def test_profile_requires_untimed_ns_and_exact_stage_maps() -> None:
+    payload = json.loads(profile().to_json())
+    payload.pop("untimed_ns")
+    with pytest.raises((KeyError, ValueError), match="untimed_ns"):
+        ProfileRecordV1.from_dict(payload)
+    missing_stage = replace(profile(), stage_ns={"gradients": 1})
+    with pytest.raises(ValueError, match="exact|missing|stage"):
+        validate_record(replace(record(), profile=missing_stage))
+    missing_tree_stage = replace(profile(), tree_stage_ns={"histogram_build": 1})
+    with pytest.raises(ValueError, match="exact|missing|tree_stage"):
+        validate_record(replace(record(), profile=missing_tree_stage))
+
+
+@pytest.mark.parametrize("field", ["untimed_ns", "loop_wall_ns"])
+def test_profile_rejects_bool_or_negative_durations(field: str) -> None:
+    for value in (True, -1):
+        with pytest.raises(ValueError):
+            validate_record(replace(record(), profile=replace(profile(), **{field: value})))
 
 
 def test_smoke_manifest_is_deterministic_and_complete() -> None:

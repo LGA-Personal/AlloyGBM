@@ -3203,6 +3203,15 @@ impl Trainer {
             }
         }
 
+        // Freeze profiling at the loop boundary. Finalization below can be
+        // substantial (leaf refinement, DART stamping, artifact assembly),
+        // but it is intentionally excluded from loop timing.
+        let profile_snapshot = profile.snapshot_if_enabled(
+            active_dataset.row_count(),
+            binned_matrix.feature_count,
+            rayon::current_num_threads(),
+        );
+
         // Determine the best round for truncation: custom metric takes priority
         let truncation_round = if stop_reason == IterationStopReason::CustomMetricPlateau {
             best_custom_metric_round
@@ -3404,7 +3413,7 @@ impl Trainer {
             neutralization_metadata: None,
         };
         let final_loss = current_loss;
-        profile.report(active_dataset.row_count(), binned_matrix.feature_count);
+        profile.report(profile_snapshot.as_ref());
 
         Ok(IterationRunSummary {
             model,

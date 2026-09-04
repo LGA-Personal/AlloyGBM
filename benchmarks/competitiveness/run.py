@@ -19,7 +19,7 @@ import yaml
 
 from .adapters import Adapter, AdapterResult, load_adapters
 from .datasets import DatasetCase, build_dataset_cases
-from .schema import BenchmarkRecordV1, SCHEMA_VERSION, load_records, validate_record
+from .schema import BenchmarkRecordV1, ProfileRecordV1, SCHEMA_VERSION, load_records, validate_record
 
 DEFAULT_LIBRARIES = ("alloygbm", "lightgbm", "xgboost", "catboost")
 KNOWN_LIBRARIES = frozenset(DEFAULT_LIBRARIES)
@@ -27,6 +27,7 @@ THREAD_ENVIRONMENT = (
     "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "RAYON_NUM_THREADS",
 )
+PROFILE_JSON_PREFIX = "[alloygbm profile json] "
 
 
 def load_manifest(path: str | Path) -> dict[str, object]:
@@ -245,10 +246,64 @@ def _subprocess_adapter(manifest: str | Path, case: DatasetCase, library: str, s
     return AdapterResult(np.asarray(value["predictions"]), value["preprocessing_seconds"], value["fit_seconds"], value["predict_seconds"], value["peak_rss_bytes"], value["library"], value["library_version"], value["effective_params"], value["input_representation"], value["rounds_completed"])
 
 
-def _subprocess_measurement(manifest: str | Path, scenario: str, library: str, seed: int, threads: int) -> dict[str, object]:
+def _profile_from_stderr(
+    stderr: str,
+    *,
+    required: bool,
+    manifest: str | Path | None = None,
+    scenario: str | None = None,
+    threads: int | None = None,
+) -> ProfileRecordV1 | None:
+    lines = [line[len(PROFILE_JSON_PREFIX):] for line in stderr.splitlines() if line.startswith(PROFILE_JSON_PREFIX)]
+    if not required:
+        return None
+    if len(lines) != 1:
+        raise RuntimeError(f"profile JSON must contain exactly one record, found {len(lines)}")
+    try:
+        profile = ProfileRecordV1.from_json(lines[0])
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid AlloyGBM profile JSON: {exc}") from exc
+    if threads is not None and profile.threads != threads:
+        raise RuntimeError(f"profile threads {profile.threads} do not match requested {threads}")
+    if manifest is not None and scenario is not None and Path(manifest).exists():
+        config = load_manifest(manifest)
+        spec = next((item for item in config["scenarios"] if isinstance(item, Mapping) and item.get("name") == scenario), None)  # type: ignore[index]
+        if spec is not None:
+            expected_rows = int(spec["rows"]) * 4 // 5
+            if "groups" in spec:
+                group_size = int(spec["rows"]) // int(spec["groups"])
+                expected_rows = (expected_rows // group_size) * group_size
+            expected_features = int(spec.get("features", int(spec.get("numeric_features", 0)) + len(spec.get("categorical_cardinalities", []))))
+            expected_rounds = int(spec["rounds"])
+            if (profile.rows, profile.features) != (expected_rows, expected_features):
+                raise RuntimeError(
+                    "profile dimensions do not match manifest: "
+                    f"got {(profile.rows, profile.features)}, "
+                    f"expected {(expected_rows, expected_features)}"
+                )
+            if profile.rounds > expected_rounds:
+                raise RuntimeError(
+                    "profile dimensions do not match manifest: "
+                    f"profile rounds {profile.rounds} exceeds configured {expected_rounds}"
+                )
+    return profile
+
+
+def _subprocess_measurement(
+    manifest: str | Path,
+    scenario: str,
+    library: str,
+    seed: int,
+    threads: int,
+    *,
+    profile_alloy: bool = False,
+) -> dict[str, object]:
     env = os.environ.copy()
     for variable in THREAD_ENVIRONMENT:
         env[variable] = str(threads)
+    env.pop("ALLOYGBM_PROFILE", None)
+    if profile_alloy and library == "alloygbm":
+        env["ALLOYGBM_PROFILE"] = "json"
     command = [sys.executable, "-m", "benchmarks.competitiveness.run", "--worker", "--measurement", "--manifest", str(manifest), "--scenario", scenario, "--library", library, "--seed", str(seed), "--threads", str(threads)]
     completed = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
     if completed.returncode:
@@ -259,6 +314,20 @@ def _subprocess_measurement(manifest: str | Path, scenario: str, library: str, s
         raise RuntimeError(f"{library} worker returned invalid JSON: {completed.stdout!r}") from exc
     if "predictions" in value:
         raise RuntimeError("worker measurement payload must not contain predictions")
+    profile = _profile_from_stderr(
+        completed.stderr,
+        required=profile_alloy and library == "alloygbm",
+        manifest=manifest,
+        scenario=scenario,
+        threads=threads,
+    )
+    if profile is not None:
+        completed_rounds = int(value["rounds_completed"])
+        if profile.rounds < completed_rounds:
+            raise RuntimeError(
+                f"profile rounds {profile.rounds} are fewer than completed rounds {completed_rounds}"
+            )
+        value["profile"] = profile
     return value
 
 
@@ -275,6 +344,16 @@ def _record_from_measurement(value: Mapping[str, object], run_id: str, repetitio
     for field, expected in checks:
         if expected is not None and value.get(field) != expected:
             raise ValueError(f"worker payload {field} does not match requested value {expected!r}")
+    profile_value = value.get("profile")
+    if profile_value is not None and not isinstance(profile_value, ProfileRecordV1 | Mapping):
+        raise ValueError("worker profile must be a profile object")
+    profile = profile_value if isinstance(profile_value, ProfileRecordV1) else ProfileRecordV1.from_dict(profile_value) if profile_value is not None else None
+    if profile is not None and profile.threads != threads:
+        raise ValueError(f"worker profile threads {profile.threads} do not match requested {threads}")
+    if profile is not None and profile.rounds < int(value["rounds_completed"]):
+        raise ValueError(
+            f"worker profile rounds {profile.rounds} are fewer than completed rounds {value['rounds_completed']}"
+        )
     record = BenchmarkRecordV1(
         schema=SCHEMA_VERSION, run_id=run_id, repetition=repetition,
         dataset_sha256=str(value["dataset_sha256"]), scenario=str(value["scenario"]),
@@ -286,7 +365,7 @@ def _record_from_measurement(value: Mapping[str, object], run_id: str, repetitio
         fit_seconds=float(value["fit_seconds"]), predict_seconds=float(value["predict_seconds"]),
         peak_rss_bytes=int(value["peak_rss_bytes"]), metric_name=str(value["metric_name"]),
         metric_value=float(value["metric_value"]), rounds_completed=int(value["rounds_completed"]),
-        machine=_machine(), profile=None,
+        machine=_machine(), profile=profile,
     )
     validate_record(record)
     return record
@@ -296,6 +375,7 @@ def run_subprocess_benchmark(
     manifest: str | Path, output_dir: str | Path, *, scenario: str | None = None,
     libraries: Sequence[str] | None = None, threads: int = 1,
     repetitions: int | None = None, warmups: int | None = None, smoke: bool = False,
+    profile_alloy: bool = False,
 ) -> Path:
     """Run the real CLI path without retaining feature matrices in the parent."""
     config = load_manifest(manifest)
@@ -319,9 +399,9 @@ def run_subprocess_benchmark(
         for name in selected_names:
             for library in selected_libraries:
                 for _ in range(warmup_count):
-                    _subprocess_measurement(manifest, name, library, seed, threads)
+                    _subprocess_measurement(manifest, name, library, seed, threads, profile_alloy=profile_alloy)
                 for repetition in range(timed):
-                    value = _subprocess_measurement(manifest, name, library, seed, threads)
+                    value = _subprocess_measurement(manifest, name, library, seed, threads, profile_alloy=profile_alloy)
                     spec = spec_by_name[name]
                     output.write(_record_from_measurement(value, run_id, repetition, seed, threads, git_sha, expected_scenario=name, expected_task=str(spec["task"]), expected_metric=str(spec["metric"]), requested_library=library).to_json() + "\n")
     load_records(run_path / "raw.jsonl")
@@ -338,6 +418,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repetitions", type=int)
     parser.add_argument("--warmups", type=int)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--profile-alloy", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--measurement", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--library", help=argparse.SUPPRESS)
@@ -350,7 +431,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     names = [str(item["name"]) for item in config["scenarios"] if isinstance(item, Mapping)]  # type: ignore[index]
     selected = [args.scenario] if args.scenario else names
     validate_options(selected, args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke, known_scenarios=names)
-    run_path = run_subprocess_benchmark(args.manifest, args.output_dir, scenario=args.scenario, libraries=args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke)
+    run_path = run_subprocess_benchmark(args.manifest, args.output_dir, scenario=args.scenario, libraries=args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke, profile_alloy=args.profile_alloy)
     print(run_path)
     return 0
 

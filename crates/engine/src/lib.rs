@@ -60,7 +60,7 @@ pub use objectives::{
     SquaredErrorObjective, TweedieObjective, XeNDCGObjective, YetiRankObjective,
     compute_group_boundaries,
 };
-pub use profiling::{TreeStage, time_tree_stage};
+pub use profiling::{TrainingProfileSnapshot, TreeStage, time_tree_stage};
 mod multiclass_model;
 pub use multiclass_model::{MultiClassIterationRunSummary, MultiClassTrainedModel};
 

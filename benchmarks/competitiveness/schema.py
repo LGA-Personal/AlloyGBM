@@ -31,8 +31,8 @@ METRIC_DIRECTIONS: dict[str, Literal["minimize", "maximize"]] = {
 INPUT_REPRESENTATIONS = frozenset({"dense", "native_categorical", "csr", "csc", "dense_fallback"})
 
 # Keep these in lockstep with Stage::label and report_tree_stages in
-# crates/engine/src/profiling.rs.  Profile maps may omit stages that have no
-# observations, but may not invent labels.
+# crates/engine/src/profiling.rs. Structured v1 profiles always include every
+# key, including stages with zero observations.
 PROFILE_STAGE_LABELS = frozenset(
     {
         "gradients",
@@ -107,9 +107,13 @@ def _validate_ns_map(
 ) -> None:
     if not isinstance(values, Mapping):
         raise ValueError(f"{name} must be a mapping")
-    unknown = set(values) - labels
-    if unknown:
-        raise ValueError(f"{name} contains unknown stage label(s): {sorted(unknown)}")
+    actual = set(values)
+    if actual != labels:
+        missing = sorted(labels - actual)
+        unknown = sorted(actual - labels)
+        raise ValueError(
+            f"{name} must contain exactly the stage labels; missing={missing}, unknown={unknown}"
+        )
     for label, duration in values.items():
         _nonnegative_int(duration, f"{name}[{label!r}]")
 
@@ -123,6 +127,7 @@ class ProfileRecordV1:
     rounds: int
     threads: int
     loop_wall_ns: int
+    untimed_ns: int
     stage_ns: dict[str, int]
     tree_stage_ns: dict[str, int]
 
@@ -137,6 +142,7 @@ class ProfileRecordV1:
             "rounds": self.rounds,
             "threads": self.threads,
             "loop_wall_ns": self.loop_wall_ns,
+            "untimed_ns": self.untimed_ns,
             "stage_ns": dict(self.stage_ns),
             "tree_stage_ns": dict(self.tree_stage_ns),
         }
@@ -152,8 +158,9 @@ class ProfileRecordV1:
             rounds=value["rounds"],  # type: ignore[arg-type]
             threads=value["threads"],  # type: ignore[arg-type]
             loop_wall_ns=value["loop_wall_ns"],  # type: ignore[arg-type]
-            stage_ns=dict(value.get("stage_ns", {})),  # type: ignore[arg-type]
-            tree_stage_ns=dict(value.get("tree_stage_ns", {})),  # type: ignore[arg-type]
+            untimed_ns=value["untimed_ns"],  # type: ignore[arg-type]
+            stage_ns=dict(value["stage_ns"]),  # type: ignore[arg-type]
+            tree_stage_ns=dict(value["tree_stage_ns"]),  # type: ignore[arg-type]
         )
 
     @classmethod
@@ -391,6 +398,7 @@ def validate_profile(profile: ProfileRecordV1) -> None:
     _positive_int(profile.rounds, "profile.rounds")
     _positive_int(profile.threads, "profile.threads")
     _positive_int(profile.loop_wall_ns, "profile.loop_wall_ns")
+    _nonnegative_int(profile.untimed_ns, "profile.untimed_ns")
     _validate_ns_map(profile.stage_ns, "profile.stage_ns", PROFILE_STAGE_LABELS)
     _validate_ns_map(profile.tree_stage_ns, "profile.tree_stage_ns", TREE_STAGE_LABELS)
 

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from benchmarks.competitiveness.adapters import AdapterResult, _prepare_input
-from benchmarks.competitiveness.schema import INPUT_REPRESENTATIONS, validate_record
+from benchmarks.competitiveness.schema import INPUT_REPRESENTATIONS, ProfileRecordV1, validate_record
 from benchmarks.competitiveness.datasets import build_dataset_cases, fingerprint_case
 from benchmarks.competitiveness.run import (
     _record_from_measurement,
@@ -313,6 +313,98 @@ def _measurement_payload(**changes):
     value = {"dataset_sha256": "a" * 64, "scenario": "dense_regression", "task": "regression", "metric_name": "rmse", "metric_value": 1.0, "preprocessing_seconds": 0.01, "fit_seconds": 0.02, "predict_seconds": 0.01, "peak_rss_bytes": 123, "library": "alloygbm", "library_version": "1", "effective_params": {"topology": "levelwise", "objective": "squared_error"}, "input_representation": "dense", "rounds_completed": 2}
     value.update(changes)
     return value
+
+
+def _profile_payload(**changes):
+    value = {
+        "rows": 20,
+        "features": 4,
+        "rounds": 2,
+        "threads": 1,
+        "loop_wall_ns": 100,
+        "untimed_ns": 10,
+        "stage_ns": {label: (20 if label == "tree_build" else 0) for label in (
+            "gradients", "row_sampling", "feature_tiles", "prediction_copy",
+            "tree_build", "prediction_update", "loss", "validation")},
+        "tree_stage_ns": {label: 0 for label in ("histogram_build", "split_find", "partition")},
+    }
+    value.update(changes)
+    return value
+
+
+@pytest.mark.parametrize("stderr, message", [
+    ("", "exactly one"),
+    ("[alloygbm profile json] {}\n[alloygbm profile json] {}\n", "exactly one"),
+    ("[alloygbm profile json] not-json\n", "JSON"),
+])
+def test_profiled_alloy_requires_exactly_one_valid_json_record(monkeypatch: pytest.MonkeyPatch, stderr: str, message: str) -> None:
+    import subprocess
+    class Completed:
+        returncode = 0
+        stdout = json.dumps(_measurement_payload())
+    Completed.stderr = stderr
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: Completed())
+    with pytest.raises((RuntimeError, ValueError), match=message):
+        _subprocess_measurement("manifest.yaml", "dense_regression", "alloygbm", 7, 1, profile_alloy=True)
+
+
+def test_valid_profile_is_attached_to_compact_alloy_measurement(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+    class Completed:
+        returncode = 0
+        stdout = json.dumps(_measurement_payload())
+        stderr = "[alloygbm profile json] " + json.dumps(_profile_payload()) + "\n"
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: Completed())
+    value = _subprocess_measurement("manifest.yaml", "dense_regression", "alloygbm", 7, 1, profile_alloy=True)
+    assert isinstance(value["profile"], ProfileRecordV1)
+    assert value["profile"].threads == 1
+
+
+def test_profile_flag_sets_environment_only_for_alloy(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+    captured: list[dict[str, str]] = []
+    class Completed:
+        returncode = 0
+        stdout = json.dumps(_measurement_payload())
+        stderr = "[alloygbm profile json] " + json.dumps(_profile_payload()) + "\n"
+    def fake_run(*args, **kwargs):
+        captured.append(kwargs["env"])
+        return Completed()
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("ALLOYGBM_PROFILE", "json")
+    _subprocess_measurement("manifest.yaml", "dense_regression", "alloygbm", 7, 1, profile_alloy=True)
+    _subprocess_measurement("manifest.yaml", "dense_regression", "lightgbm", 7, 1, profile_alloy=True)
+    _subprocess_measurement("manifest.yaml", "dense_regression", "alloygbm", 7, 1, profile_alloy=False)
+    assert captured[0]["ALLOYGBM_PROFILE"] == "json"
+    assert "ALLOYGBM_PROFILE" not in captured[1]
+    assert "ALLOYGBM_PROFILE" not in captured[2]
+
+
+def test_warmup_profile_is_not_persisted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    tiny_manifest(manifest)
+    payload = _measurement_payload(profile=_profile_payload())
+    calls: list[bool] = []
+    import benchmarks.competitiveness.run as runner
+    def fake_measurement(*args, **kwargs):
+        calls.append(kwargs.get("profile_alloy", False))
+        return payload
+    monkeypatch.setattr(runner, "_subprocess_measurement", fake_measurement)
+    run_dir = runner.run_subprocess_benchmark(manifest, tmp_path / "out", libraries=["alloygbm"], repetitions=1, warmups=1, smoke=True, profile_alloy=True)
+    records = load_records(run_dir / "raw.jsonl")
+    assert len(records) == 1
+    assert records[0].profile is not None
+    assert calls == [True, True]
+
+
+def test_profile_allows_honest_early_termination_but_rejects_impossible_rounds() -> None:
+    early = _measurement_payload(profile=_profile_payload(rounds=1), rounds_completed=1)
+    record = _record_from_measurement(early, "run", 0, 7, 1, None,
+                                      expected_scenario="dense_regression", expected_task="regression",
+                                      expected_metric="rmse", requested_library="alloygbm")
+    assert record.profile is not None and record.profile.rounds == 1
+    with pytest.raises(ValueError, match="fewer than completed"):
+        _record_from_measurement(_measurement_payload(profile=_profile_payload(rounds=1), rounds_completed=2), "run", 0, 7, 1, None)
 
 
 @pytest.mark.parametrize("changes, message", [
