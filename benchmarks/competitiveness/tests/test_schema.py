@@ -160,6 +160,12 @@ def test_validate_record_requires_nonempty_hostname_machine_metadata(machine: ob
         validate_record(replace(record(), machine=machine))  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("params", [{"set": {1, 2}}, {"bytes": b"x"}, {1: "non-string-key"}])
+def test_validate_record_rejects_non_json_like_effective_params(params: object) -> None:
+    with pytest.raises(ValueError, match="JSON-like|effective_params"):
+        validate_record(replace(record(), effective_params=params))  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("field", ["preprocessing_seconds", "fit_seconds", "predict_seconds"])
 def test_validate_record_rejects_nonpositive_durations(field: str) -> None:
     with pytest.raises(ValueError, match="duration"):
@@ -250,6 +256,12 @@ def test_validate_summary_rejects_unknown_input_representation() -> None:
 def test_validate_summary_requires_nonempty_hostname_machine_metadata(machine: object) -> None:
     with pytest.raises(ValueError, match="machine"):
         validate_summary(replace(summary(), machine=machine))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("params", [{"set": {1, 2}}, {"bytes": b"x"}, {1: "non-string-key"}])
+def test_validate_summary_rejects_non_json_like_effective_params(params: object) -> None:
+    with pytest.raises(ValueError, match="JSON-like|effective_params"):
+        validate_summary(replace(summary(), effective_params=params))  # type: ignore[arg-type]
 
 
 def test_summary_requires_raw_repetition_ids() -> None:

@@ -573,16 +573,27 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
 
 
 def _validate_finite_values(value: object, name: str) -> None:
-    """Reject NaN/Infinity anywhere in effective parameter values."""
+    """Validate JSON-like effective parameter values and finite numbers."""
 
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{name} must be finite")
+    if value is None or isinstance(value, (bool, str)):
+        return
+    if _is_int(value):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+        return
     if isinstance(value, Mapping):
         for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{name} mapping keys must be strings")
             _validate_finite_values(child, f"{name}[{key!r}]")
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         for index, child in enumerate(value):
             _validate_finite_values(child, f"{name}[{index}]")
+        return
+    raise ValueError(f"{name} must contain only JSON-like values")
 
 
 def _decode_records(text: str) -> list[Mapping[str, object]]:

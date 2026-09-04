@@ -116,6 +116,31 @@ def _allowed_keys(values: Sequence[str] | None) -> frozenset[str]:
     return keys
 
 
+def _normalize_summary_input(value: object, label: str) -> tuple[tuple[object, ...], list[str]]:
+    """Turn an outer cohort argument into a safe tuple or an explicit reason."""
+
+    if value is None or isinstance(value, (str, bytes, Mapping, BenchmarkSummaryV1)):
+        return (), [f"{label} must be a sequence of summaries"]
+    try:
+        return tuple(value), []  # type: ignore[arg-type]
+    except TypeError as exc:
+        return (), [f"{label} must be a sequence of summaries: {exc}"]
+
+
+def _normalize_targets(value: object) -> tuple[set[str] | None, str | None]:
+    if value is None:
+        return None, None
+    if isinstance(value, (str, bytes, Mapping)):
+        return None, "target_scenarios must be a sequence of nonempty strings"
+    try:
+        targets = tuple(value)  # type: ignore[arg-type]
+    except TypeError as exc:
+        return None, f"target_scenarios must be a sequence of nonempty strings: {exc}"
+    if any(not isinstance(item, str) or not item.strip() for item in targets):
+        return None, "target_scenarios must be a sequence of nonempty strings"
+    return set(targets), None
+
+
 def _parameter_reason(
     candidate: BenchmarkSummaryV1,
     reference: BenchmarkSummaryV1,
@@ -195,31 +220,77 @@ def _insufficient(claim: str, reasons: Sequence[str], evidence: Mapping[str, obj
 
 
 def _validate_gate_inputs(
-    current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1],
+    current: object, baseline: object,
     minimum_repetitions: int, allowed_param_differences: Sequence[str],
-) -> tuple[frozenset[str], list[str]]:
+) -> tuple[frozenset[str], list[str], tuple[object, ...], tuple[object, ...]]:
     if minimum_repetitions <= 0:
         raise ValueError("minimum_repetitions must be positive")
     allowed = _allowed_keys(allowed_param_differences)
-    reasons: list[str] = []
+    current_items, current_reasons = _normalize_summary_input(current, "current")
+    baseline_items, baseline_reasons = _normalize_summary_input(baseline, "baseline")
+    reasons: list[str] = current_reasons + baseline_reasons
     for side, summaries in (("current", current), ("baseline", baseline)):
-        for index, summary in enumerate(summaries):
+        items = current_items if side == "current" else baseline_items
+        for index, summary in enumerate(items):
             try:
                 validate_summary(summary)
             except (TypeError, ValueError) as exc:
                 reasons.append(f"invalid {side} summary at index {index}: {exc}")
     if reasons:
-        return allowed, reasons
+        return allowed, reasons, current_items, baseline_items
     try:
-        current_runs = {item.run_id for item in current}
-        baseline_runs = {item.run_id for item in baseline}
+        current_runs = {item.run_id for item in current_items}
+        baseline_runs = {item.run_id for item in baseline_items}
     except (AttributeError, TypeError) as exc:
-        return allowed, [f"invalid summary provenance: {exc}"]
+        return allowed, [f"invalid summary provenance: {exc}"], current_items, baseline_items
     if len(current_runs) != 1:
         reasons.append(f"current cohort must contain exactly one run_id, found {sorted(current_runs)!r}")
     if len(baseline_runs) != 1:
         reasons.append(f"baseline cohort must contain exactly one run_id, found {sorted(baseline_runs)!r}")
-    return allowed, reasons
+    return allowed, reasons, current_items, baseline_items
+
+
+def _candidate_gate_inputs(
+    current: object, baseline: object, minimum_repetitions: int,
+    allowed_param_differences: Sequence[str],
+) -> tuple[frozenset[str], list[str], tuple[object, ...], tuple[object, ...], bool]:
+    """Safely isolate AlloyGBM rows for catastrophe detection."""
+
+    if minimum_repetitions <= 0:
+        raise ValueError("minimum_repetitions must be positive")
+    allowed = _allowed_keys(allowed_param_differences)
+    current_items, current_outer_reasons = _normalize_summary_input(current, "current")
+    baseline_items, baseline_outer_reasons = _normalize_summary_input(baseline, "baseline")
+    reasons = current_outer_reasons + baseline_outer_reasons
+    candidates: list[list[BenchmarkSummaryV1]] = [[], []]
+    for side_index, items in enumerate((current_items, baseline_items)):
+        side = "current" if side_index == 0 else "baseline"
+        for index, item in enumerate(items):
+            if not isinstance(item, BenchmarkSummaryV1):
+                # An unidentifiable malformed row cannot be known to be the
+                # candidate; retain it as evidence without blocking AlloyGBM.
+                reasons.append(f"invalid {side} non-candidate summary at index {index}")
+                continue
+            try:
+                validate_summary(item)
+            except (TypeError, ValueError) as exc:
+                if item.library == "alloygbm":
+                    reasons.append(f"invalid {side} candidate summary at index {index}: {exc}")
+                else:
+                    reasons.append(f"invalid {side} competitor summary at index {index}: {exc}")
+                continue
+            if item.library == "alloygbm":
+                candidates[side_index].append(item)
+    candidate_allowed, candidate_reasons, candidate_current, candidate_baseline = _validate_gate_inputs(
+        candidates[0], candidates[1], minimum_repetitions, allowed
+    )
+    return (
+        candidate_allowed,
+        reasons + candidate_reasons,
+        candidate_current,
+        candidate_baseline,
+        bool(candidate_reasons),
+    )
 
 
 def _compatibility_reasons(
@@ -321,11 +392,13 @@ def evaluate_speed(
     target_scenarios: Sequence[str] | None = None, minimum_repetitions: int = 5,
     allowed_param_differences: Sequence[str] = (),
 ) -> GateResult:
-    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
+    allowed, cohort_reasons, current, baseline = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
     if cohort_reasons:
         return _insufficient("speed", cohort_reasons, allowed=allowed)
-    if target_scenarios is not None:
-        wanted = set(target_scenarios)
+    wanted, target_reason = _normalize_targets(target_scenarios)
+    if target_reason is not None:
+        return _insufficient("speed", [target_reason], allowed=allowed)
+    if wanted is not None:
         missing_current = wanted - {item.scenario for item in current}
         missing_baseline = wanted - {item.scenario for item in baseline}
         missing = sorted(missing_current | missing_baseline)
@@ -365,11 +438,13 @@ def evaluate_quality(
     target_scenarios: Sequence[str] | None = None, quality_first: bool = False,
     minimum_repetitions: int = 5, allowed_param_differences: Sequence[str] = (),
 ) -> GateResult:
-    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
+    allowed, cohort_reasons, current, baseline = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
     if cohort_reasons:
         return _insufficient("quality", cohort_reasons, allowed=allowed)
-    if target_scenarios is not None:
-        wanted = set(target_scenarios)
+    wanted, target_reason = _normalize_targets(target_scenarios)
+    if target_reason is not None:
+        return _insufficient("quality", [target_reason], allowed=allowed)
+    if wanted is not None:
         missing_current = wanted - {item.scenario for item in current}
         missing_baseline = wanted - {item.scenario for item in baseline}
         missing = sorted(missing_current | missing_baseline)
@@ -415,7 +490,10 @@ def evaluate_quality(
 def normalized_ranks(summaries: Sequence[BenchmarkSummaryV1]) -> dict[str, float]:
     """Return each library's median normalized rank over comparable slices."""
 
-    for summary in summaries:
+    items, outer_reasons = _normalize_summary_input(summaries, "summaries")
+    if outer_reasons:
+        return {}
+    for summary in items:
         try:
             validate_summary(summary)
         except (TypeError, ValueError):
@@ -425,10 +503,10 @@ def normalized_ranks(summaries: Sequence[BenchmarkSummaryV1]) -> dict[str, float
         # both durable machine and effective-parameter metadata.
         if summary.machine is None or summary.effective_params is None:
             return {}
-    if len({summary.run_id for summary in summaries}) > 1:
+    if len({summary.run_id for summary in items}) > 1:
         return {}
     slices: dict[tuple[object, ...], list[BenchmarkSummaryV1]] = {}
-    for item in summaries:
+    for item in items:
         slices.setdefault(_slice_key(item), []).append(item)
     per_library: dict[str, list[float]] = {}
     for population in slices.values():
@@ -463,8 +541,10 @@ def catastrophic_regressions(
     current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1], *, minimum_repetitions: int = 5,
     allowed_param_differences: Sequence[str] = (),
 ) -> list[GateResult]:
-    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
-    if cohort_reasons:
+    allowed, cohort_reasons, current, baseline, invalid_candidate_cohort = _candidate_gate_inputs(
+        current, baseline, minimum_repetitions, allowed_param_differences
+    )
+    if invalid_candidate_cohort:
         return [_insufficient("catastrophic-regression", cohort_reasons, allowed=allowed)]
     pairs, reasons = _pairs(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
     if not pairs:
@@ -488,9 +568,7 @@ def evaluate_default_policy(
     current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1], *,
     minimum_repetitions: int = 5, allowed_param_differences: Sequence[str] = (),
 ) -> GateResult:
-    allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
-    if cohort_reasons:
-        return _insufficient("default-policy", cohort_reasons, allowed=allowed)
+    allowed = _allowed_keys(allowed_param_differences)
     catastrophe = catastrophic_regressions(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
     if any(result.status == "reject" for result in catastrophe):
         return GateResult(
@@ -499,6 +577,11 @@ def evaluate_default_policy(
         )
     if any(result.status == "insufficient-data" for result in catastrophe):
         return _insufficient("default-policy", [reason for item in catastrophe for reason in item.reasons], allowed=allowed)
+    allowed, cohort_reasons, current, baseline = _validate_gate_inputs(
+        current, baseline, minimum_repetitions, allowed_param_differences
+    )
+    if cohort_reasons:
+        return _insufficient("default-policy", cohort_reasons, allowed=allowed)
     compatibility = _compatibility_reasons(current, baseline, allowed_param_differences=allowed) + _rank_context_reasons(
         current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed
     )

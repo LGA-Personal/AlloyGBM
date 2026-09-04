@@ -387,6 +387,71 @@ def test_default_policy_preserves_catastrophe_with_another_missing_or_invalid_ca
     assert result.status == "reject"
 
 
+def test_default_policy_isolates_catastrophe_from_malformed_competitor() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_default_policy([current, None], [baseline, {}]).status == "reject"
+
+
+def test_default_policy_isolates_catastrophe_from_competitor_run_id() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    current_competitor = aggregate_records(records("other-run", "lightgbm", fit=1.0, metric=1.0))[0]
+    baseline_competitor = aggregate_records(records("other-base", "lightgbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_default_policy(
+        [current, current_competitor], [baseline, baseline_competitor]
+    ).status == "reject"
+
+
+def test_default_policy_isolates_catastrophe_from_malformed_competitor_params() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    bad_current = replace(
+        aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0],
+        effective_params={"bad": {1, 2}},
+    )
+    assert evaluate_default_policy([current, bad_current], [baseline]).status == "reject"
+
+
+@pytest.mark.parametrize("outer", [None, 1, {}, "summary"])
+def test_gate_apis_return_insufficient_for_invalid_outer_summary_inputs(outer: object) -> None:
+    valid = aggregate_records(records("run", "alloygbm", fit=1.0, metric=1.0))[0]
+    for gate in (evaluate_speed, evaluate_quality, evaluate_default_policy):
+        assert gate(outer, [valid]).status == "insufficient-data"  # type: ignore[arg-type]
+        assert gate([valid], outer).status == "insufficient-data"  # type: ignore[arg-type]
+    assert catastrophic_regressions(outer, [valid])[0].status == "insufficient-data"  # type: ignore[arg-type]
+    assert evaluate_catastrophic_regression(outer, [valid]).status == "insufficient-data"  # type: ignore[arg-type]
+    assert normalized_ranks(outer) == {}  # type: ignore[arg-type]
+
+
+def test_gate_apis_return_insufficient_for_single_summary_outer_input() -> None:
+    valid = aggregate_records(records("run", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_speed(valid, [valid]).status == "insufficient-data"
+    assert catastrophic_regressions([valid], valid)[0].status == "insufficient-data"
+    assert normalized_ranks(valid) == {}
+
+
+@pytest.mark.parametrize("target", ["dense_regression", 1, {}, ["dense_regression", "  "], [None]])
+def test_speed_and_quality_reject_invalid_target_scenarios(target: object) -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_speed([current], [baseline], target_scenarios=target).status == "insufficient-data"  # type: ignore[arg-type]
+    assert evaluate_quality([current], [baseline], target_scenarios=target).status == "insufficient-data"  # type: ignore[arg-type]
+
+
+def test_json_like_parameter_validation_rejects_set_values_in_records_and_summaries() -> None:
+    with pytest.raises(ValueError, match="JSON-like|effective_params"):
+        from benchmarks.competitiveness.schema import validate_record
+        validate_record(record(effective_params={"bad": {1, 2}}))
+    summary = aggregate_records(records("run", "alloygbm", fit=1.0, metric=1.0))[0]
+    malformed = replace(summary, effective_params={"bad": {1, 2}})
+    with pytest.raises(ValueError, match="JSON-like|effective_params"):
+        from benchmarks.competitiveness.schema import validate_summary
+        validate_summary(malformed)
+    baseline = aggregate_records(records("base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_speed([malformed], [baseline]).status == "insufficient-data"
+
+
 def test_gate_result_is_serializable() -> None:
     result = GateResult("speed", "defer", ("missed threshold",), {"slice": {"improvement": 0.05}})
     assert json.loads(result.to_json())["status"] == "defer"
