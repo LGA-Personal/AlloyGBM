@@ -175,13 +175,16 @@ def _pairs(
     baseline_by_key: dict[tuple[object, ...], BenchmarkSummaryV1] = {}
     reasons: list[str] = []
     for label, items, target in (("current", current, current_by_key), ("baseline", baseline, baseline_by_key)):
+        duplicate_keys: set[tuple[object, ...]] = set()
         for item in items:
             if item.library != candidate_library:
                 continue
             key = _slice_key(item)
             if key in target:
                 reasons.append(f"duplicate {label} summary slice/provenance: {key!r}")
-            else:
+                target.pop(key, None)
+                duplicate_keys.add(key)
+            elif key not in duplicate_keys:
                 target[key] = item
     keys = sorted(set(current_by_key) | set(baseline_by_key), key=str)
     pairs: list[tuple[BenchmarkSummaryV1, BenchmarkSummaryV1]] = []
@@ -550,11 +553,9 @@ def catastrophic_regressions(
     current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1], *, minimum_repetitions: int = 5,
     allowed_param_differences: Sequence[str] = (),
 ) -> list[GateResult]:
-    allowed, isolation_reasons, current, baseline, invalid_candidate_cohort = _candidate_gate_inputs(
+    allowed, isolation_reasons, current, baseline, _invalid_candidate_cohort = _candidate_gate_inputs(
         current, baseline, minimum_repetitions, allowed_param_differences
     )
-    if invalid_candidate_cohort:
-        return [_insufficient("catastrophic-regression", isolation_reasons, allowed=allowed)]
     pairs, pair_reasons = _pairs(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
     reasons = isolation_reasons + pair_reasons
     if not pairs:

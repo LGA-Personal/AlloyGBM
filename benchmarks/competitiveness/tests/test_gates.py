@@ -541,6 +541,57 @@ def test_catastrophic_passes_clean_paired_competitors_without_catastrophe() -> N
     assert catastrophic_regressions(current, baseline)[0].status == "pass"
 
 
+def test_catastrophic_mixed_current_runs_keep_valid_catastrophe_and_reject_noncat_is_insufficient() -> None:
+    current = [
+        aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1, scenario="cat"))[0],
+        aggregate_records(records("run-other", "alloygbm", fit=1.0, metric=1.0, scenario="plain"))[0],
+    ]
+    baseline = [
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="cat"))[0],
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="plain"))[0],
+    ]
+    results = catastrophic_regressions(current, baseline)
+    assert results[0].status == "reject"
+    assert any("run_id" in reason for result in results for reason in result.reasons)
+    noncat = catastrophic_regressions(
+        [replace(item, fit_median_seconds=1.0, metric_median=1.0) for item in current], baseline
+    )
+    assert noncat[0].status == "insufficient-data"
+
+
+def test_catastrophic_mixed_baseline_runs_keep_valid_catastrophe_and_reject_noncat_is_insufficient() -> None:
+    current = [
+        aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1, scenario="cat"))[0],
+        aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0, scenario="plain"))[0],
+    ]
+    baseline = [
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="cat"))[0],
+        aggregate_records(records("run-other-base", "alloygbm", fit=1.0, metric=1.0, scenario="plain"))[0],
+    ]
+    results = catastrophic_regressions(current, baseline)
+    assert results[0].status == "reject"
+    assert any("run_id" in reason for result in results for reason in result.reasons)
+    noncat = catastrophic_regressions(
+        [replace(item, fit_median_seconds=1.0, metric_median=1.0) for item in current], baseline
+    )
+    assert noncat[0].status == "insufficient-data"
+
+
+def test_catastrophic_duplicate_slice_is_unusable_regardless_order_but_other_slice_rejects() -> None:
+    duplicate_first = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1, scenario="dup"))[0]
+    duplicate_second = aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0, scenario="dup"))[0]
+    catastrophe = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1, scenario="cat"))[0]
+    baseline = [
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="dup"))[0],
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="cat"))[0],
+    ]
+    for ordered in ([duplicate_first, duplicate_second, catastrophe], [duplicate_second, duplicate_first, catastrophe]):
+        results = catastrophic_regressions(ordered, baseline)
+        assert results[0].status == "reject"
+        assert all("dup|threads=1" not in result.evidence for result in results)
+        assert any("duplicate" in reason for result in results[1:] for reason in result.reasons)
+
+
 def test_gate_result_is_serializable() -> None:
     result = GateResult("speed", "defer", ("missed threshold",), {"slice": {"improvement": 0.05}})
     assert json.loads(result.to_json())["status"] == "defer"
