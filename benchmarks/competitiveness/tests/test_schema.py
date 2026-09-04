@@ -61,7 +61,7 @@ def record(**changes: object) -> BenchmarkRecordV1:
         "metric_name": "rmse",
         "metric_value": 0.5,
         "rounds_completed": 4,
-        "machine": {"platform": "darwin", "arch": "arm64"},
+        "machine": {"hostname": "host-a", "platform": "darwin", "arch": "arm64"},
         "profile": profile(),
     }
     values.update(changes)
@@ -151,6 +151,15 @@ def test_validate_record_rejects_blank_task() -> None:
         validate_record(replace(record(), task="  "))
 
 
+@pytest.mark.parametrize(
+    "machine",
+    [{}, {"platform": "darwin"}, {"hostname": "  "}, {"hostname": "host", "platform": ""}, {1: "host"}],
+)
+def test_validate_record_requires_nonempty_hostname_machine_metadata(machine: object) -> None:
+    with pytest.raises(ValueError, match="machine"):
+        validate_record(replace(record(), machine=machine))  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("field", ["preprocessing_seconds", "fit_seconds", "predict_seconds"])
 def test_validate_record_rejects_nonpositive_durations(field: str) -> None:
     with pytest.raises(ValueError, match="duration"):
@@ -232,6 +241,15 @@ def test_validate_summary_rejects_blank_task() -> None:
 def test_validate_summary_rejects_unknown_input_representation() -> None:
     with pytest.raises(ValueError, match="input_representation"):
         validate_summary(replace(summary(), input_representation="unknown"))
+
+
+@pytest.mark.parametrize(
+    "machine",
+    [{}, {"platform": "darwin"}, {"hostname": "  "}, {"hostname": "host", "platform": ""}, {1: "host"}],
+)
+def test_validate_summary_requires_nonempty_hostname_machine_metadata(machine: object) -> None:
+    with pytest.raises(ValueError, match="machine"):
+        validate_summary(replace(summary(), machine=machine))  # type: ignore[arg-type]
 
 
 def test_summary_requires_raw_repetition_ids() -> None:

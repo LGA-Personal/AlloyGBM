@@ -14,6 +14,7 @@ from benchmarks.competitiveness.gates import (
     normalized_ranks,
     catastrophic_regressions,
     evaluate_catastrophic_regression,
+    evaluate_claim,
 )
 from benchmarks.competitiveness.schema import BenchmarkRecordV1, SCHEMA_VERSION
 from benchmarks.competitiveness.schema import BenchmarkSummaryV1
@@ -327,6 +328,63 @@ def test_catastrophic_public_result_records_allowed_keys_at_top_level() -> None:
     baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
     result = evaluate_catastrophic_regression([current], [baseline], allowed_param_differences=["depth"])
     assert result.to_dict()["evidence"]["allowed_param_differences"] == ["depth"]
+
+
+@pytest.mark.parametrize("bad_summary", [None, {}, object()])
+@pytest.mark.parametrize("claim", ["speed", "quality", "default-policy"])
+def test_gate_claims_return_insufficient_for_malformed_summary_inputs(bad_summary: object, claim: str) -> None:
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    result = evaluate_claim(claim, [bad_summary], [baseline])  # type: ignore[list-item]
+    assert result.status == "insufficient-data"
+
+
+def test_public_catastrophic_gate_wrappers_return_insufficient_for_malformed_summary() -> None:
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    for bad_summary in (None, {}, replace(baseline, run_id=123), replace(baseline, run_id=["unhashable"])):
+        results = catastrophic_regressions([bad_summary], [baseline])  # type: ignore[list-item]
+        assert results[0].status == "insufficient-data"
+        collapsed = evaluate_catastrophic_regression([bad_summary], [baseline])  # type: ignore[list-item]
+        assert collapsed.status == "insufficient-data"
+
+
+@pytest.mark.parametrize("gate", [evaluate_speed, evaluate_quality, evaluate_default_policy])
+def test_direct_public_gates_return_insufficient_for_invalid_summary_fields(gate) -> None:
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    malformed = replace(baseline, run_id=["unhashable"])
+    assert gate([malformed], [baseline]).status == "insufficient-data"
+
+
+def test_default_policy_rejects_catastrophe_when_competitor_context_is_missing_or_mismatched() -> None:
+    current_alloy = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1))[0]
+    baseline_alloy = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    current_light = aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0]
+    mismatched_baseline_light = aggregate_records(
+        records("run-base", "lightgbm", fit=1.0, metric=1.0, machine={"hostname": "other"})
+    )[0]
+    assert evaluate_default_policy([current_alloy], [baseline_alloy]).status == "reject"
+    assert evaluate_default_policy(
+        [current_alloy, current_light], [baseline_alloy, mismatched_baseline_light]
+    ).status == "reject"
+
+
+def test_default_policy_preserves_catastrophe_with_another_missing_or_invalid_candidate_slice() -> None:
+    current_catastrophe = aggregate_records(
+        records("run-current", "alloygbm", fit=2.1, metric=1.1, scenario="catastrophe")
+    )[0]
+    baseline_catastrophe = aggregate_records(
+        records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="catastrophe")
+    )[0]
+    current_invalid = replace(
+        aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0, scenario="invalid"))[0],
+        machine=None,
+    )
+    baseline_invalid = aggregate_records(
+        records("run-base", "alloygbm", fit=1.0, metric=1.0, scenario="invalid")
+    )[0]
+    result = evaluate_default_policy(
+        [current_catastrophe, current_invalid], [baseline_catastrophe, baseline_invalid]
+    )
+    assert result.status == "reject"
 
 
 def test_gate_result_is_serializable() -> None:

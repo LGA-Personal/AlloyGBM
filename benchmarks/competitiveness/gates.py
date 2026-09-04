@@ -208,8 +208,13 @@ def _validate_gate_inputs(
                 validate_summary(summary)
             except (TypeError, ValueError) as exc:
                 reasons.append(f"invalid {side} summary at index {index}: {exc}")
-    current_runs = {item.run_id for item in current}
-    baseline_runs = {item.run_id for item in baseline}
+    if reasons:
+        return allowed, reasons
+    try:
+        current_runs = {item.run_id for item in current}
+        baseline_runs = {item.run_id for item in baseline}
+    except (AttributeError, TypeError) as exc:
+        return allowed, [f"invalid summary provenance: {exc}"]
     if len(current_runs) != 1:
         reasons.append(f"current cohort must contain exactly one run_id, found {sorted(current_runs)!r}")
     if len(baseline_runs) != 1:
@@ -461,11 +466,7 @@ def catastrophic_regressions(
     allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
     if cohort_reasons:
         return [_insufficient("catastrophic-regression", cohort_reasons, allowed=allowed)]
-    compatibility = _compatibility_reasons(current, baseline, allowed_param_differences=allowed)
     pairs, reasons = _pairs(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
-    reasons = compatibility + reasons
-    if reasons and pairs:
-        return [_insufficient("catastrophic-regression", reasons, allowed=allowed)]
     if not pairs:
         return [_insufficient("catastrophic-regression", reasons, allowed=allowed)]
     results: list[GateResult] = []
@@ -478,6 +479,8 @@ def catastrophic_regressions(
         status = "reject" if _strictly_greater(metric_regression, 0.05) or _strictly_greater(fit_ratio, 2.0) else "pass"
         reason = (f"catastrophic regression on {candidate.scenario}",) if status == "reject" else ()
         results.append(GateResult("catastrophic-regression", status, reason, {"allowed_param_differences": sorted(allowed), f"{candidate.scenario}|threads={candidate.threads}": {"metric_regression": metric_regression, "fit_ratio": fit_ratio}}))
+    if reasons:
+        results.append(_insufficient("catastrophic-regression", reasons, allowed=allowed))
     return results
 
 
@@ -488,16 +491,19 @@ def evaluate_default_policy(
     allowed, cohort_reasons = _validate_gate_inputs(current, baseline, minimum_repetitions, allowed_param_differences)
     if cohort_reasons:
         return _insufficient("default-policy", cohort_reasons, allowed=allowed)
+    catastrophe = catastrophic_regressions(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
+    if any(result.status == "reject" for result in catastrophe):
+        return GateResult(
+            "default-policy", "reject", ("catastrophic regression in a protected fixture",),
+            {"allowed_param_differences": sorted(allowed), "catastrophic": [item.to_dict() for item in catastrophe]},
+        )
+    if any(result.status == "insufficient-data" for result in catastrophe):
+        return _insufficient("default-policy", [reason for item in catastrophe for reason in item.reasons], allowed=allowed)
     compatibility = _compatibility_reasons(current, baseline, allowed_param_differences=allowed) + _rank_context_reasons(
         current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed
     )
     if compatibility:
         return _insufficient("default-policy", compatibility, allowed=allowed)
-    catastrophe = catastrophic_regressions(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
-    if any(result.status == "reject" for result in catastrophe):
-        return GateResult("default-policy", "reject", ("catastrophic regression in a protected fixture",), {"catastrophic": [item.to_dict() for item in catastrophe]})
-    if any(result.status == "insufficient-data" for result in catastrophe):
-        return _insufficient("default-policy", [reason for item in catastrophe for reason in item.reasons], allowed=allowed)
     current_rank = normalized_ranks(current)
     baseline_rank = normalized_ranks(baseline)
     if "alloygbm" not in current_rank or "alloygbm" not in baseline_rank:
@@ -529,10 +535,10 @@ def evaluate_catastrophic_regression(
 
     results = catastrophic_regressions(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed_param_differences)
     allowed = _allowed_keys(allowed_param_differences)
-    if any(item.status == "insufficient-data" for item in results):
-        return _insufficient("catastrophic-regression", [reason for item in results for reason in item.reasons], allowed=allowed)
     if any(item.status == "reject" for item in results):
         return GateResult("catastrophic-regression", "reject", tuple(reason for item in results for reason in item.reasons), {"allowed_param_differences": sorted(allowed), "fixtures": [item.to_dict() for item in results]})
+    if any(item.status == "insufficient-data" for item in results):
+        return _insufficient("catastrophic-regression", [reason for item in results for reason in item.reasons], allowed=allowed)
     return GateResult("catastrophic-regression", "pass", (), {"allowed_param_differences": sorted(allowed), "fixtures": [item.to_dict() for item in results]})
 
 

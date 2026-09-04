@@ -76,6 +76,22 @@ def _nonempty_string(value: object, name: str) -> None:
         raise ValueError(f"{name} must be a nonempty string")
 
 
+def _validate_machine_metadata(value: object, name: str, *, allow_none: bool = False) -> None:
+    if allow_none and value is None:
+        return
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(f"{name} must be a nonempty mapping")
+    if not all(
+        isinstance(key, str) and bool(key.strip())
+        and isinstance(item, str) and bool(item.strip())
+        for key, item in value.items()
+    ):
+        raise ValueError(f"{name} keys and values must be nonempty strings")
+    hostname = value.get("hostname")
+    if not isinstance(hostname, str) or not hostname.strip():
+        raise ValueError(f"{name} must contain a nonempty hostname")
+
+
 def _deep_freeze(value: object) -> object:
     """Copy JSON-like containers into immutable equivalents."""
 
@@ -468,10 +484,7 @@ def validate_record(record: BenchmarkRecordV1) -> None:
     _positive_int(record.rounds_completed, "rounds_completed")
     if record.git_sha is not None:
         _nonempty_string(record.git_sha, "git_sha")
-    if not isinstance(record.machine, Mapping) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in record.machine.items()
-    ):
-        raise ValueError("machine must map strings to strings")
+    _validate_machine_metadata(record.machine, "machine")
     if record.profile is not None:
         validate_profile(record.profile)
 
@@ -545,12 +558,7 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
         if not isinstance(summary.effective_params, Mapping):
             raise ValueError("effective_params must be a mapping or null")
         _validate_finite_values(summary.effective_params, "effective_params")
-    if summary.machine is not None:
-        if not isinstance(summary.machine, Mapping) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in summary.machine.items()
-        ):
-            raise ValueError("machine must map strings to strings or be null")
+    _validate_machine_metadata(summary.machine, "machine", allow_none=True)
     if summary.raw_line_numbers is not None:
         if not isinstance(summary.raw_line_numbers, Sequence) or isinstance(
             summary.raw_line_numbers, (str, bytes)
