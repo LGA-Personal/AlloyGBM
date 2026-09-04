@@ -351,6 +351,12 @@ class RunMetadataV1:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> RunMetadataV1:
+        libraries_value = value["libraries"]
+        scenarios_value = value["scenarios"]
+        if not isinstance(libraries_value, Sequence) or isinstance(libraries_value, (str, bytes)):
+            raise ValueError("libraries must be a sequence")
+        if not isinstance(scenarios_value, Sequence) or isinstance(scenarios_value, (str, bytes)):
+            raise ValueError("scenarios must be a sequence")
         metadata = cls(
             schema=value["schema"],  # type: ignore[arg-type]
             run_id=value["run_id"],  # type: ignore[arg-type]
@@ -361,8 +367,8 @@ class RunMetadataV1:
             manifest_sha256=value["manifest_sha256"],  # type: ignore[arg-type]
             manifest_identifier=value["manifest_identifier"],  # type: ignore[arg-type]
             manifest_path=value["manifest_path"],  # type: ignore[arg-type]
-            libraries=tuple(value["libraries"]),  # type: ignore[arg-type]
-            scenarios=tuple(value["scenarios"]),  # type: ignore[arg-type]
+            libraries=tuple(libraries_value),  # type: ignore[arg-type]
+            scenarios=tuple(scenarios_value),  # type: ignore[arg-type]
             seed=value["seed"],  # type: ignore[arg-type]
             threads=value["threads"],  # type: ignore[arg-type]
             repetitions=value["repetitions"],  # type: ignore[arg-type]
@@ -683,10 +689,16 @@ def validate_run_metadata(metadata: RunMetadataV1) -> None:
         value = getattr(metadata, field)
         if value is not None:
             _nonempty_string(value, field)
+            if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+                raise ValueError(f"{field} must be a full lowercase git SHA")
     if not metadata.libraries or not all(isinstance(value, str) and value.strip() for value in metadata.libraries):
         raise ValueError("libraries must be a nonempty sequence of strings")
     if not metadata.scenarios or not all(isinstance(value, str) and value.strip() for value in metadata.scenarios):
         raise ValueError("scenarios must be a nonempty sequence of strings")
+    if len(set(metadata.libraries)) != len(metadata.libraries):
+        raise ValueError("libraries must be unique")
+    if len(set(metadata.scenarios)) != len(metadata.scenarios):
+        raise ValueError("scenarios must be unique")
     _nonnegative_int(metadata.seed, "seed")
     _positive_int(metadata.threads, "threads")
     _positive_int(metadata.repetitions, "repetitions")

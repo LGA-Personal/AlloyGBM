@@ -35,6 +35,12 @@ provenance anchor, not a CI timing gate. CI runs the Alloy-only smoke command
 with one repetition; scheduled/manual comparator runs are observational and
 upload their raw and summarized artifacts.
 
+The exact published dense-deep cross-check uses the separate
+`published_v1_crosscheck.yaml` fixture (500,000×40, seed 20260902) so its
+generator remains distinct from the future `deep_scaling.yaml` nightly matrix.
+Its committed raw, summary, and metadata artifacts are alongside the smoke
+baseline and are the numerical comparison anchor for the deep-scaling report.
+
 ## Scenario Overview
 
 | Scenario | Task | Source | Rows | Features | Notes |

@@ -146,6 +146,28 @@ def test_deep_scaling_fixture_identity_is_runnable_and_published_fixture_is_dist
     assert published_case.dataset_sha256 != small_cases[0].dataset_sha256
 
 
+def test_published_crosscheck_artifacts_bind_to_exact_five_row_capture() -> None:
+    raw_path = BASELINES / "adfa2c8-published-v1-crosscheck.jsonl"
+    summary_path = BASELINES / "adfa2c8-published-v1-crosscheck.summary.json"
+    metadata_path = BASELINES / "adfa2c8-published-v1-crosscheck.run-metadata.json"
+    records = load_records(raw_path)
+    metadata = load_run_metadata(metadata_path)
+    assert len(records) == 5
+    assert {record.library for record in records} == {"alloygbm"}
+    assert {record.git_sha for record in records} == {"adfa2c8e593cea68b124e7975f3b4fd9f862a148"}
+    assert metadata.run_id == records[0].run_id
+    assert metadata.harness_git_sha == "88f754c9f3f2d17d8e929842923d6a3760ebbc09"
+    assert metadata.manifest_identifier.endswith("published_v1_crosscheck.yaml")
+    assert metadata.raw_sha256 == hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    payload = json.loads(summary_path.read_text())
+    assert payload["status"] == "insufficient-data"
+    assert len(payload["summaries"]) == 1
+    summary = BenchmarkSummaryV1.from_json(json.dumps(payload["summaries"][0], sort_keys=True))
+    assert summary.raw_repetition_ids == (0, 1, 2, 3, 4)
+    assert summary.raw_line_numbers == (1, 2, 3, 4, 5)
+    assert [record.metric_value for record in records] == [0.16377460956573486] * 5
+
+
 def test_alloy_only_smoke_command_emits_six_records_without_peers(tmp_path: Path) -> None:
     output = tmp_path / "smoke"
     env = os.environ.copy()
