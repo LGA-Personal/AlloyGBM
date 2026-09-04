@@ -12,6 +12,8 @@ from benchmarks.competitiveness.schema import INPUT_REPRESENTATIONS, ProfileReco
 from benchmarks.competitiveness.datasets import build_dataset_cases, fingerprint_case
 from benchmarks.competitiveness.run import (
     _record_from_measurement,
+    _profile_from_stderr,
+    _subprocess_adapter,
     _subprocess_measurement,
     load_manifest,
     run_benchmark,
@@ -398,14 +400,50 @@ def test_warmup_profile_is_not_persisted(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert calls == [True, True]
 
 
-def test_profile_allows_honest_early_termination_but_rejects_impossible_rounds() -> None:
-    early = _measurement_payload(profile=_profile_payload(rounds=1), rounds_completed=1)
+def test_profile_allows_joint_warm_start_rounds_below_total_completed() -> None:
+    early = _measurement_payload(profile=_profile_payload(rounds=1), rounds_completed=3)
     record = _record_from_measurement(early, "run", 0, 7, 1, None,
                                       expected_scenario="dense_regression", expected_task="regression",
                                       expected_metric="rmse", requested_library="alloygbm")
     assert record.profile is not None and record.profile.rounds == 1
-    with pytest.raises(ValueError, match="fewer than completed"):
-        _record_from_measurement(_measurement_payload(profile=_profile_payload(rounds=1), rounds_completed=2), "run", 0, 7, 1, None)
+
+
+def test_profile_rounds_above_manifest_cap_are_rejected(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    tiny_manifest(manifest)
+    with pytest.raises(RuntimeError, match="exceeds configured"):
+        _profile_from_stderr(
+            "[alloygbm profile json] " + json.dumps(_profile_payload(rows=16, rounds=3)),
+            required=True,
+            manifest=manifest,
+            scenario="dense_regression",
+            threads=1,
+        )
+
+
+def test_legacy_subprocess_adapter_clears_inherited_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    tiny_manifest(manifest)
+    case = build_dataset_cases([load_manifest(manifest)["scenarios"][0]], seed=7)[0]
+    captured: dict[str, str] = {}
+    class Completed:
+        returncode = 0
+        stderr = ""
+        stdout = json.dumps({
+            "predictions": np.zeros(case.y_test.shape).tolist(),
+            "preprocessing_seconds": 0.01, "fit_seconds": 0.01,
+            "predict_seconds": 0.01, "peak_rss_bytes": 123,
+            "library": "alloygbm", "library_version": "1",
+            "effective_params": {}, "input_representation": "dense",
+            "rounds_completed": 2,
+        })
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs["env"])
+        return Completed()
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setenv("ALLOYGBM_PROFILE", "json")
+    _subprocess_adapter(manifest, case, "alloygbm", 7, 1)
+    assert "ALLOYGBM_PROFILE" not in captured
 
 
 def test_real_joint_alloy_smoke_emits_one_structured_profile(tmp_path: Path) -> None:

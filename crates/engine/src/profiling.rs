@@ -28,6 +28,8 @@ pub(crate) fn parse_profile_mode(value: Option<&str>) -> ProfileMode {
 }
 
 fn profile_mode() -> ProfileMode {
+    // Mode selection is intentionally cached for the process lifetime. The
+    // benchmark runner therefore launches one subprocess per profiled fit.
     static MODE: OnceLock<ProfileMode> = OnceLock::new();
     *MODE.get_or_init(|| parse_profile_mode(std::env::var("ALLOYGBM_PROFILE").ok().as_deref()))
 }
@@ -95,8 +97,12 @@ pub(crate) struct RoundProfile {
 
 impl Default for RoundProfile {
     fn default() -> Self {
+        let mode = profile_mode();
+        if mode != ProfileMode::Disabled {
+            clear_tree_counters();
+        }
         Self {
-            mode: profile_mode(),
+            mode,
             totals: [Duration::ZERO; 8],
             rounds: 0,
             started: None,
@@ -111,6 +117,9 @@ impl RoundProfile {
 
     #[cfg(test)]
     fn with_mode(mode: ProfileMode) -> Self {
+        if mode != ProfileMode::Disabled {
+            clear_tree_counters();
+        }
         Self {
             mode,
             totals: [Duration::ZERO; 8],
@@ -296,6 +305,12 @@ fn drain_tree_counters() -> BTreeMap<String, u64> {
     ])
 }
 
+fn clear_tree_counters() {
+    HISTOGRAM_NS.swap(0, Ordering::Relaxed);
+    SPLIT_FIND_NS.swap(0, Ordering::Relaxed);
+    PARTITION_NS.swap(0, Ordering::Relaxed);
+}
+
 fn report_tree_stages(values: &BTreeMap<String, u64>) {
     let total: u64 = values.values().copied().fold(0, u64::saturating_add);
     if total == 0 {
@@ -382,10 +397,10 @@ mod tests {
     #[test]
     fn snapshot_drains_tree_counters_between_fits() {
         let _guard = PROFILE_TEST_LOCK.lock().unwrap();
+        let profile = RoundProfile::with_mode(ProfileMode::Json);
         HISTOGRAM_NS.store(7, Ordering::Relaxed);
         SPLIT_FIND_NS.store(11, Ordering::Relaxed);
         PARTITION_NS.store(13, Ordering::Relaxed);
-        let profile = RoundProfile::with_mode(ProfileMode::Json);
         let first = profile.snapshot(1, 1, 1);
         assert_eq!(first.tree_stage_ns["histogram_build"], 7);
         assert_eq!(first.tree_stage_ns["split_find"], 11);
@@ -394,5 +409,21 @@ mod tests {
         assert_eq!(second.tree_stage_ns["histogram_build"], 0);
         assert_eq!(second.tree_stage_ns["split_find"], 0);
         assert_eq!(second.tree_stage_ns["partition"], 0);
+    }
+
+    #[test]
+    fn enabled_profile_discards_counters_left_by_failed_fit() {
+        let _guard = PROFILE_TEST_LOCK.lock().unwrap();
+        HISTOGRAM_NS.store(90, Ordering::Relaxed);
+        SPLIT_FIND_NS.store(80, Ordering::Relaxed);
+        PARTITION_NS.store(70, Ordering::Relaxed);
+        let profile = RoundProfile::with_mode(ProfileMode::Json);
+        HISTOGRAM_NS.fetch_add(7, Ordering::Relaxed);
+        SPLIT_FIND_NS.fetch_add(5, Ordering::Relaxed);
+        PARTITION_NS.fetch_add(3, Ordering::Relaxed);
+        let snapshot = profile.snapshot(1, 1, 1);
+        assert_eq!(snapshot.tree_stage_ns["histogram_build"], 7);
+        assert_eq!(snapshot.tree_stage_ns["split_find"], 5);
+        assert_eq!(snapshot.tree_stage_ns["partition"], 3);
     }
 }

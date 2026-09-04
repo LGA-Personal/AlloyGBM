@@ -235,6 +235,7 @@ def _subprocess_adapter(manifest: str | Path, case: DatasetCase, library: str, s
     env = os.environ.copy()
     for variable in THREAD_ENVIRONMENT:
         env[variable] = str(threads)
+    env.pop("ALLOYGBM_PROFILE", None)
     command = [sys.executable, "-m", "benchmarks.competitiveness.run", "--worker", "--manifest", str(manifest), "--scenario", case.name, "--library", library, "--seed", str(seed), "--threads", str(threads)]
     completed = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
     if completed.returncode:
@@ -322,11 +323,6 @@ def _subprocess_measurement(
         threads=threads,
     )
     if profile is not None:
-        completed_rounds = int(value["rounds_completed"])
-        if profile.rounds < completed_rounds:
-            raise RuntimeError(
-                f"profile rounds {profile.rounds} are fewer than completed rounds {completed_rounds}"
-            )
         value["profile"] = profile
     return value
 
@@ -350,10 +346,6 @@ def _record_from_measurement(value: Mapping[str, object], run_id: str, repetitio
     profile = profile_value if isinstance(profile_value, ProfileRecordV1) else ProfileRecordV1.from_dict(profile_value) if profile_value is not None else None
     if profile is not None and profile.threads != threads:
         raise ValueError(f"worker profile threads {profile.threads} do not match requested {threads}")
-    if profile is not None and profile.rounds < int(value["rounds_completed"]):
-        raise ValueError(
-            f"worker profile rounds {profile.rounds} are fewer than completed rounds {value['rounds_completed']}"
-        )
     record = BenchmarkRecordV1(
         schema=SCHEMA_VERSION, run_id=run_id, repetition=repetition,
         dataset_sha256=str(value["dataset_sha256"]), scenario=str(value["scenario"]),
