@@ -415,6 +415,11 @@ def normalized_ranks(summaries: Sequence[BenchmarkSummaryV1]) -> dict[str, float
             validate_summary(summary)
         except (TypeError, ValueError):
             return {}
+        # Legacy summaries may decode with null provenance, but rank
+        # comparisons cannot establish a trustworthy execution context without
+        # both durable machine and effective-parameter metadata.
+        if summary.machine is None or summary.effective_params is None:
+            return {}
     if len({summary.run_id for summary in summaries}) > 1:
         return {}
     slices: dict[tuple[object, ...], list[BenchmarkSummaryV1]] = {}
@@ -422,8 +427,13 @@ def normalized_ranks(summaries: Sequence[BenchmarkSummaryV1]) -> dict[str, float
         slices.setdefault(_slice_key(item), []).append(item)
     per_library: dict[str, list[float]] = {}
     for population in slices.values():
-        if len({item.library for item in population}) < 2 or len({item.library for item in population}) != len(population):
-            continue
+        libraries = {item.library for item in population}
+        if len(libraries) < 2 or len(libraries) != len(population):
+            return {}
+        # Every library in a ranked slice must have run on the same machine;
+        # this is a fairness invariant, not a current-vs-baseline check.
+        if len({_canonical(item.machine) for item in population}) != 1:
+            return {}
         direction = METRIC_DIRECTIONS[population[0].metric_name]
         ordered = sorted(population, key=lambda item: item.metric_median, reverse=direction == "maximize")
         ranks: dict[str, float] = {}

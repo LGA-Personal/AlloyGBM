@@ -204,7 +204,9 @@ def _cli(argv: Sequence[str] | None = None) -> int:
         quality_first=args.quality_first,
         allowed_param_differences=args.allow_param_difference,
     ) if args.claim else None
-    status = gate.status if gate is not None else "insufficient-data" if not args.baseline else "pass"
+    # A baseline without a claim is input for summary generation only; no
+    # comparison was evaluated, so it must never be reported as a pass.
+    status = gate.status if gate is not None else "insufficient-data"
     payload: dict[str, object] = {
         "schema": SCHEMA_VERSION,
         "status": status,

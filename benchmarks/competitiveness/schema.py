@@ -558,6 +558,8 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
             raise ValueError("raw_line_numbers must be a sequence or null")
         if len(summary.raw_line_numbers) != len(summary.raw_repetition_ids):
             raise ValueError("raw_line_numbers must align with raw_repetition_ids")
+        if len(set(summary.raw_line_numbers)) != len(summary.raw_line_numbers):
+            raise ValueError("raw_line_numbers must be unique")
         for line in summary.raw_line_numbers:
             _positive_int(line, "raw_line_numbers entry")
 

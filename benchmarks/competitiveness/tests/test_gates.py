@@ -222,6 +222,35 @@ def test_gates_validate_duplicate_summary_repetition_provenance_and_ranks_return
     assert normalized_ranks([malformed]) == {}
 
 
+def test_duplicate_raw_source_lines_are_invalid_for_gates_and_ranks() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    malformed = replace(current, raw_line_numbers=(1, 1, 2, 3, 4))
+    assert evaluate_speed([malformed], [baseline]).status == "insufficient-data"
+    assert catastrophic_regressions([malformed], [baseline])[0].status == "insufficient-data"
+    assert normalized_ranks([malformed]) == {}
+
+
+def test_normalized_ranks_requires_durable_provenance_and_shared_machine() -> None:
+    alloy = aggregate_records(records("run", "alloygbm", fit=1.0, metric=1.0))[0]
+    light = aggregate_records(records("run", "lightgbm", fit=1.0, metric=2.0))[0]
+    assert normalized_ranks([replace(alloy, machine=None), light]) == {}
+    assert normalized_ranks([replace(alloy, effective_params=None), light]) == {}
+    assert normalized_ranks([alloy, replace(light, machine={"hostname": "other"})]) == {}
+
+
+def test_cli_baseline_without_claim_reports_insufficient_data(tmp_path: Path) -> None:
+    from benchmarks.competitiveness.summarize import _cli
+    raw = tmp_path / "raw.jsonl"
+    baseline = tmp_path / "baseline.jsonl"
+    output = tmp_path / "summary.json"
+    rows = records("run-current", "alloygbm", fit=1.0, metric=1.0)
+    raw.write_text("\n".join(item.to_json() for item in rows) + "\n")
+    baseline.write_text("\n".join(item.to_json() for item in rows) + "\n")
+    assert _cli([str(raw), "--baseline", str(baseline), "--json-output", str(output)]) == 0
+    assert json.loads(output.read_text())["status"] == "insufficient-data"
+
+
 def test_hand_built_summary_missing_provenance_is_insufficient() -> None:
     current = BenchmarkSummaryV1.from_dict(aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0].to_dict())
     baseline = replace(current, run_id="run-base", fit_median_seconds=1.0, machine=None)
