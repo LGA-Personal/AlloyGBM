@@ -1,0 +1,207 @@
+"""Tests for the versioned competitiveness benchmark result contract."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
+
+import pytest
+
+from benchmarks.competitiveness.schema import (
+    METRIC_DIRECTIONS,
+    SCHEMA_VERSION,
+    BenchmarkRecordV1,
+    BenchmarkSummaryV1,
+    ProfileRecordV1,
+    load_records,
+    validate_record,
+    validate_summary,
+)
+
+
+def profile() -> ProfileRecordV1:
+    return ProfileRecordV1(
+        rows=128,
+        features=8,
+        rounds=4,
+        threads=2,
+        loop_wall_ns=10_000,
+        stage_ns={"gradients": 100, "tree_build": 9_000},
+        tree_stage_ns={"histogram_build": 4_000, "split_find": 1_000},
+    )
+
+
+def record(**changes: object) -> BenchmarkRecordV1:
+    values: dict[str, object] = {
+        "schema": SCHEMA_VERSION,
+        "run_id": "run-1",
+        "repetition": 0,
+        "dataset_sha256": "a" * 64,
+        "scenario": "dense_regression",
+        "library": "alloygbm",
+        "library_version": "1.0.0",
+        "git_sha": None,
+        "seed": 20260904,
+        "threads": 2,
+        "effective_params": {"n_estimators": 4, "max_depth": 6},
+        "input_representation": "dense",
+        "preprocessing_seconds": 0.001,
+        "fit_seconds": 0.1,
+        "predict_seconds": 0.01,
+        "peak_rss_bytes": 100_000,
+        "metric_name": "rmse",
+        "metric_value": 0.5,
+        "rounds_completed": 4,
+        "machine": {"platform": "darwin", "arch": "arm64"},
+        "profile": profile(),
+    }
+    values.update(changes)
+    return BenchmarkRecordV1(**values)  # type: ignore[arg-type]
+
+
+def summary(**changes: object) -> BenchmarkSummaryV1:
+    values: dict[str, object] = {
+        "schema": SCHEMA_VERSION,
+        "run_id": "run-1",
+        "scenario": "dense_regression",
+        "library": "alloygbm",
+        "library_version": "1.0.0",
+        "dataset_sha256": "a" * 64,
+        "input_representation": "dense",
+        "metric_name": "rmse",
+        "metric_median": 0.5,
+        "metric_mad": 0.01,
+        "preprocessing_median_seconds": 0.001,
+        "preprocessing_mad_seconds": 0.0001,
+        "fit_median_seconds": 0.1,
+        "fit_mad_seconds": 0.01,
+        "predict_median_seconds": 0.01,
+        "predict_mad_seconds": 0.001,
+        "peak_rss_median_bytes": 100_000,
+        "peak_rss_mad_bytes": 1_000,
+        "raw_repetition_ids": (0, 1, 2, 3, 4),
+    }
+    values.update(changes)
+    return BenchmarkSummaryV1(**values)  # type: ignore[arg-type]
+
+
+def test_metric_registry_has_the_versioned_directions() -> None:
+    assert METRIC_DIRECTIONS == {
+        "rmse": "minimize",
+        "mae": "minimize",
+        "log_loss": "minimize",
+        "error_rate": "minimize",
+        "r2": "maximize",
+        "accuracy": "maximize",
+        "roc_auc": "maximize",
+        "ndcg_at_10": "maximize",
+    }
+
+
+def test_record_round_trips_with_explicit_json_and_is_frozen() -> None:
+    original = record()
+    decoded = BenchmarkRecordV1.from_json(original.to_json())
+    assert decoded == original
+    assert json.loads(original.to_json())["profile"]["stage_ns"]["gradients"] == 100
+    with pytest.raises(FrozenInstanceError):
+        original.fit_seconds = 2.0  # type: ignore[misc]
+
+
+def test_validate_record_rejects_missing_dataset_fingerprint() -> None:
+    with pytest.raises(ValueError, match="dataset_sha256"):
+        validate_record(replace(record(), dataset_sha256=""))
+
+
+@pytest.mark.parametrize("field", ["preprocessing_seconds", "fit_seconds", "predict_seconds"])
+def test_validate_record_rejects_nonpositive_durations(field: str) -> None:
+    with pytest.raises(ValueError, match="duration"):
+        validate_record(replace(record(), **{field: 0.0}))
+
+
+def test_validate_record_rejects_unknown_metric() -> None:
+    with pytest.raises(ValueError, match="unknown metric"):
+        validate_record(replace(record(), metric_name="made_up"))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_validate_record_rejects_nonfinite_numbers(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        validate_record(replace(record(), metric_value=value))
+
+
+def test_load_records_rejects_mismatched_library_versions(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                json.loads(record().to_json()),
+                json.loads(replace(record(), repetition=1, library_version="1.1.0").to_json()),
+            )
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="library_version"):
+        load_records(path)
+
+
+def test_load_records_rejects_duplicate_repetition_keys(tmp_path: Path) -> None:
+    path = tmp_path / "records.json"
+    path.write_text(json.dumps([json.loads(record().to_json()), json.loads(record().to_json())]))
+    with pytest.raises(ValueError, match="duplicate"):
+        load_records(path)
+
+
+def test_summary_requires_raw_repetition_ids() -> None:
+    with pytest.raises(ValueError, match="raw_repetition_ids"):
+        validate_summary(replace(summary(), raw_repetition_ids=()))
+
+
+def test_summary_round_trip_preserves_repetition_ids() -> None:
+    original = summary()
+    decoded = BenchmarkSummaryV1.from_json(original.to_json())
+    assert decoded == original
+    assert decoded.raw_repetition_ids == (0, 1, 2, 3, 4)
+
+
+def test_profile_stage_maps_reject_unknown_labels() -> None:
+    bad = replace(profile(), stage_ns={"not_a_stage": 1})
+    with pytest.raises(ValueError, match="stage"):
+        validate_record(replace(record(), profile=bad))
+
+
+def test_smoke_manifest_is_deterministic_and_complete() -> None:
+    import yaml
+
+    manifest_path = Path(__file__).parents[1] / "manifests" / "pr_smoke.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    assert manifest["schema"] == SCHEMA_VERSION
+    assert manifest["seed"] == 20260904
+    assert manifest["warmup_repetitions"] == 1
+    assert manifest["timed_repetitions"] == 5
+    assert {scenario["name"] for scenario in manifest["scenarios"]} == {
+        "dense_regression",
+        "binary",
+        "grouped_ranking",
+        "native_categorical",
+        "csr_sparse",
+        "joint_multi_output",
+    }
+    by_name = {scenario["name"]: scenario for scenario in manifest["scenarios"]}
+    assert (by_name["dense_regression"]["rows"], by_name["dense_regression"]["features"]) == (
+        4096,
+        40,
+    )
+    assert by_name["binary"]["metric"] == "log_loss"
+    assert (by_name["grouped_ranking"]["features"], by_name["grouped_ranking"]["groups"]) == (
+        30,
+        128,
+    )
+    assert by_name["native_categorical"]["categorical_cardinalities"] == [16, 256]
+    assert (by_name["csr_sparse"]["features"], by_name["csr_sparse"]["density"]) == (1000, 0.01)
+    assert by_name["joint_multi_output"]["outputs"] == 8
+    assert all(
+        scenario["rounds"] == 40 and scenario["depth"] == 6
+        for scenario in manifest["scenarios"]
+    )
