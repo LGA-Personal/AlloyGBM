@@ -14,7 +14,6 @@ from .schema import (
     validate_record,
     validate_summary,
 )
-
 __all__ = [
     "METRIC_DIRECTIONS",
     "INPUT_REPRESENTATIONS",
@@ -28,4 +27,22 @@ __all__ = [
     "validate_profile",
     "validate_record",
     "validate_summary",
+    "GateResult",
+    "aggregate_records",
+    "median_mad",
+    "render_markdown",
+    "summarize_file",
+    "summarize_records",
 ]
+
+
+def __getattr__(name: str):
+    """Load Task 4 helpers lazily so ``python -m ...summarize`` stays quiet."""
+
+    if name == "GateResult":
+        from .gates import GateResult
+        return GateResult
+    if name in {"aggregate_records", "median_mad", "render_markdown", "summarize_file", "summarize_records"}:
+        from . import summarize
+        return getattr(summarize, name)
+    raise AttributeError(name)
