@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 from .schema import BenchmarkSummaryV1, METRIC_DIRECTIONS
@@ -20,6 +21,22 @@ def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(child) for key, child in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(child) for child in value)
+    return value
+
+
+def _thaw(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(child) for child in value]
+    return value
+
+
 @dataclass(frozen=True)
 class GateResult:
     claim_type: str
@@ -30,8 +47,8 @@ class GateResult:
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
             raise ValueError(f"unknown gate status: {self.status!r}")
-        if self.evidence is None:
-            object.__setattr__(self, "evidence", {})
+        object.__setattr__(self, "reasons", tuple(self.reasons))
+        object.__setattr__(self, "evidence", _freeze(self.evidence or {}))
 
     @property
     def claim(self) -> str:
@@ -43,7 +60,7 @@ class GateResult:
             "claim": self.claim_type,
             "status": self.status,
             "reasons": list(self.reasons),
-            "evidence": dict(self.evidence),
+            "evidence": _thaw(self.evidence),
         }
 
     def to_json(self) -> str:
