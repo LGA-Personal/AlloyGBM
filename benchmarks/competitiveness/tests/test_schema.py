@@ -39,6 +39,7 @@ def record(**changes: object) -> BenchmarkRecordV1:
         "repetition": 0,
         "dataset_sha256": "a" * 64,
         "scenario": "dense_regression",
+        "task": "regression",
         "library": "alloygbm",
         "library_version": "1.0.0",
         "git_sha": None,
@@ -69,6 +70,7 @@ def summary(**changes: object) -> BenchmarkSummaryV1:
         "schema": SCHEMA_VERSION,
         "run_id": "run-1",
         "scenario": "dense_regression",
+        "task": "regression",
         "library": "alloygbm",
         "library_version": "1.0.0",
         "threads": 2,
@@ -108,6 +110,7 @@ def test_record_round_trips_with_explicit_json_and_is_frozen() -> None:
     original = record()
     decoded = BenchmarkRecordV1.from_json(original.to_json())
     assert decoded == original
+    assert decoded.task == "regression"
     assert json.loads(original.to_json())["profile"]["stage_ns"]["gradients"] == 100
     with pytest.raises(FrozenInstanceError):
         original.fit_seconds = 2.0  # type: ignore[misc]
@@ -138,6 +141,11 @@ def test_single_record_jsonl_loads_successfully(tmp_path: Path) -> None:
 def test_validate_record_rejects_missing_dataset_fingerprint() -> None:
     with pytest.raises(ValueError, match="dataset_sha256"):
         validate_record(replace(record(), dataset_sha256=""))
+
+
+def test_validate_record_rejects_blank_task() -> None:
+    with pytest.raises(ValueError, match="task"):
+        validate_record(replace(record(), task="  "))
 
 
 @pytest.mark.parametrize("field", ["preprocessing_seconds", "fit_seconds", "predict_seconds"])
@@ -202,7 +210,20 @@ def test_summary_threads_are_grouping_keys() -> None:
     four = summary(threads=4)
     assert one != four
     assert "threads" in one.grouping_keys
+    assert "task" in one.grouping_keys
     assert one.to_dict()["threads"] == 1
+
+
+def test_summary_round_trip_preserves_task() -> None:
+    original = summary(task="ranking")
+    decoded = BenchmarkSummaryV1.from_json(original.to_json())
+    assert decoded.task == "ranking"
+    assert decoded == original
+
+
+def test_validate_summary_rejects_blank_task() -> None:
+    with pytest.raises(ValueError, match="task"):
+        validate_summary(replace(summary(), task=""))
 
 
 def test_summary_requires_raw_repetition_ids() -> None:

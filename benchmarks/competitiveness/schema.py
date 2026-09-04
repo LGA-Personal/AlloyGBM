@@ -174,6 +174,7 @@ class BenchmarkRecordV1:
     repetition: int
     dataset_sha256: str
     scenario: str
+    task: str
     library: str
     library_version: str
     git_sha: str | None
@@ -202,6 +203,7 @@ class BenchmarkRecordV1:
             "repetition": self.repetition,
             "dataset_sha256": self.dataset_sha256,
             "scenario": self.scenario,
+            "task": self.task,
             "library": self.library,
             "library_version": self.library_version,
             "git_sha": self.git_sha,
@@ -234,6 +236,7 @@ class BenchmarkRecordV1:
             repetition=value["repetition"],  # type: ignore[arg-type]
             dataset_sha256=value["dataset_sha256"],  # type: ignore[arg-type]
             scenario=value["scenario"],  # type: ignore[arg-type]
+            task=value["task"],  # type: ignore[arg-type]
             library=value["library"],  # type: ignore[arg-type]
             library_version=value["library_version"],  # type: ignore[arg-type]
             git_sha=value.get("git_sha"),  # type: ignore[arg-type]
@@ -273,6 +276,7 @@ class BenchmarkSummaryV1:
     schema: SchemaVersion
     run_id: str
     scenario: str
+    task: str
     library: str
     library_version: str
     threads: int
@@ -302,6 +306,7 @@ class BenchmarkSummaryV1:
         return (
             "run_id",
             "scenario",
+            "task",
             "library",
             "library_version",
             "threads",
@@ -315,6 +320,7 @@ class BenchmarkSummaryV1:
             "schema": self.schema,
             "run_id": self.run_id,
             "scenario": self.scenario,
+            "task": self.task,
             "library": self.library,
             "library_version": self.library_version,
             "threads": self.threads,
@@ -345,6 +351,7 @@ class BenchmarkSummaryV1:
             schema=value["schema"],  # type: ignore[arg-type]
             run_id=value["run_id"],  # type: ignore[arg-type]
             scenario=value["scenario"],  # type: ignore[arg-type]
+            task=value["task"],  # type: ignore[arg-type]
             library=value["library"],  # type: ignore[arg-type]
             library_version=value["library_version"],  # type: ignore[arg-type]
             threads=value["threads"],  # type: ignore[arg-type]
@@ -394,7 +401,7 @@ def validate_record(record: BenchmarkRecordV1) -> None:
         raise ValueError("record must be a BenchmarkRecordV1")
     if record.schema != SCHEMA_VERSION:
         raise ValueError(f"unsupported schema: {record.schema!r}")
-    for field in ("run_id", "scenario", "library", "library_version"):
+    for field in ("run_id", "scenario", "task", "library", "library_version"):
         _nonempty_string(getattr(record, field), field)
     if (
         not isinstance(record.dataset_sha256, str)
@@ -445,6 +452,7 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
     for field in (
         "run_id",
         "scenario",
+        "task",
         "library",
         "library_version",
         "input_representation",
