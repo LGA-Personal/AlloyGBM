@@ -222,6 +222,7 @@ def _insufficient(claim: str, reasons: Sequence[str], evidence: Mapping[str, obj
 def _validate_gate_inputs(
     current: object, baseline: object,
     minimum_repetitions: int, allowed_param_differences: Sequence[str],
+    *, require_durable_provenance: bool = True,
 ) -> tuple[frozenset[str], list[str], tuple[object, ...], tuple[object, ...]]:
     if minimum_repetitions <= 0:
         raise ValueError("minimum_repetitions must be positive")
@@ -236,6 +237,11 @@ def _validate_gate_inputs(
                 validate_summary(summary)
             except (TypeError, ValueError) as exc:
                 reasons.append(f"invalid {side} summary at index {index}: {exc}")
+                continue
+            if require_durable_provenance and summary.machine is None:
+                reasons.append(f"missing machine provenance for {side} summary at index {index}")
+            if require_durable_provenance and summary.effective_params is None:
+                reasons.append(f"missing effective parameter provenance for {side} summary at index {index}")
     if reasons:
         return allowed, reasons, current_items, baseline_items
     try:
@@ -281,8 +287,11 @@ def _candidate_gate_inputs(
                 continue
             if item.library == "alloygbm":
                 candidates[side_index].append(item)
+            elif item.machine is None or item.effective_params is None:
+                reasons.append(f"missing durable provenance for {side} competitor summary at index {index}")
     candidate_allowed, candidate_reasons, candidate_current, candidate_baseline = _validate_gate_inputs(
-        candidates[0], candidates[1], minimum_repetitions, allowed
+        candidates[0], candidates[1], minimum_repetitions, allowed,
+        require_durable_provenance=False,
     )
     return (
         candidate_allowed,
@@ -541,12 +550,13 @@ def catastrophic_regressions(
     current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1], *, minimum_repetitions: int = 5,
     allowed_param_differences: Sequence[str] = (),
 ) -> list[GateResult]:
-    allowed, cohort_reasons, current, baseline, invalid_candidate_cohort = _candidate_gate_inputs(
+    allowed, isolation_reasons, current, baseline, invalid_candidate_cohort = _candidate_gate_inputs(
         current, baseline, minimum_repetitions, allowed_param_differences
     )
     if invalid_candidate_cohort:
-        return [_insufficient("catastrophic-regression", cohort_reasons, allowed=allowed)]
-    pairs, reasons = _pairs(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
+        return [_insufficient("catastrophic-regression", isolation_reasons, allowed=allowed)]
+    pairs, pair_reasons = _pairs(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
+    reasons = isolation_reasons + pair_reasons
     if not pairs:
         return [_insufficient("catastrophic-regression", reasons, allowed=allowed)]
     results: list[GateResult] = []
@@ -559,6 +569,8 @@ def catastrophic_regressions(
         status = "reject" if _strictly_greater(metric_regression, 0.05) or _strictly_greater(fit_ratio, 2.0) else "pass"
         reason = (f"catastrophic regression on {candidate.scenario}",) if status == "reject" else ()
         results.append(GateResult("catastrophic-regression", status, reason, {"allowed_param_differences": sorted(allowed), f"{candidate.scenario}|threads={candidate.threads}": {"metric_regression": metric_regression, "fit_ratio": fit_ratio}}))
+    if reasons and not any(result.status == "reject" for result in results):
+        return [_insufficient("catastrophic-regression", reasons, allowed=allowed)]
     if reasons:
         results.append(_insufficient("catastrophic-regression", reasons, allowed=allowed))
     return results

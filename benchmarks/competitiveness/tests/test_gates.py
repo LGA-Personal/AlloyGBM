@@ -452,6 +452,46 @@ def test_json_like_parameter_validation_rejects_set_values_in_records_and_summar
     assert evaluate_speed([malformed], [baseline]).status == "insufficient-data"
 
 
+@pytest.mark.parametrize("gate", [evaluate_speed, evaluate_quality, evaluate_default_policy])
+def test_whole_cohort_gates_reject_unpaired_missing_provenance_competitor(gate) -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0]
+    competitor = replace(
+        aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0],
+        machine=None,
+        effective_params=None,
+    )
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert gate([current, competitor], [baseline]).status == "insufficient-data"
+
+
+def test_catastrophic_wrappers_require_missing_competitor_provenance_without_catastrophe() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0]
+    competitor = replace(
+        aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0],
+        machine=None,
+        effective_params=None,
+    )
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    results = catastrophic_regressions([current, competitor], [baseline])
+    assert results[0].status == "insufficient-data"
+    assert evaluate_catastrophic_regression([current, competitor], [baseline]).status == "insufficient-data"
+
+
+def test_catastrophic_wrappers_preserve_reject_with_missing_competitor_provenance() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1))[0]
+    competitor = replace(
+        aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0],
+        machine=None,
+        effective_params=None,
+    )
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    results = catastrophic_regressions([current, competitor], [baseline])
+    assert results[0].status == "reject"
+    assert any(result.status == "insufficient-data" for result in results[1:])
+    assert evaluate_catastrophic_regression([current, competitor], [baseline]).status == "reject"
+    assert evaluate_default_policy([current, competitor], [baseline]).status == "reject"
+
+
 def test_gate_result_is_serializable() -> None:
     result = GateResult("speed", "defer", ("missed threshold",), {"slice": {"improvement": 0.05}})
     assert json.loads(result.to_json())["status"] == "defer"
