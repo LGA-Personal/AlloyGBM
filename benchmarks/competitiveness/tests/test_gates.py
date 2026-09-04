@@ -492,6 +492,55 @@ def test_catastrophic_wrappers_preserve_reject_with_missing_competitor_provenanc
     assert evaluate_default_policy([current, competitor], [baseline]).status == "reject"
 
 
+def test_catastrophic_rejects_unpaired_competitor_from_other_run_without_catastrophe() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0]
+    competitor = aggregate_records(records("other-run", "lightgbm", fit=1.0, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert catastrophic_regressions([current, competitor], [baseline])[0].status == "insufficient-data"
+    assert evaluate_catastrophic_regression([current, competitor], [baseline]).status == "insufficient-data"
+
+
+def test_catastrophic_rejects_unpaired_competitor_from_other_run_with_catastrophe() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1))[0]
+    competitor = aggregate_records(records("other-run", "lightgbm", fit=1.0, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    results = catastrophic_regressions([current, competitor], [baseline])
+    assert results[0].status == "reject"
+    assert any(item.status == "insufficient-data" for item in results[1:])
+    assert evaluate_catastrophic_regression([current, competitor], [baseline]).status == "reject"
+
+
+def test_catastrophic_rejects_same_run_unpaired_competitor_without_catastrophe() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0]
+    competitor = aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert catastrophic_regressions([current, competitor], [baseline])[0].status == "insufficient-data"
+
+
+def test_catastrophic_rejects_paired_competitor_mismatch_without_catastrophe() -> None:
+    current = [
+        aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0],
+        aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0],
+    ]
+    baseline = [
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0],
+        aggregate_records(records("run-base", "lightgbm", fit=1.0, metric=1.0, machine={"hostname": "other"}))[0],
+    ]
+    assert catastrophic_regressions(current, baseline)[0].status == "insufficient-data"
+
+
+def test_catastrophic_passes_clean_paired_competitors_without_catastrophe() -> None:
+    current = [
+        aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0],
+        aggregate_records(records("run-current", "lightgbm", fit=1.0, metric=1.0))[0],
+    ]
+    baseline = [
+        aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0],
+        aggregate_records(records("run-base", "lightgbm", fit=1.0, metric=1.0))[0],
+    ]
+    assert catastrophic_regressions(current, baseline)[0].status == "pass"
+
+
 def test_gate_result_is_serializable() -> None:
     result = GateResult("speed", "defer", ("missed threshold",), {"slice": {"improvement": 0.05}})
     assert json.loads(result.to_json())["status"] == "defer"

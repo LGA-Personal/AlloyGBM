@@ -264,38 +264,38 @@ def _candidate_gate_inputs(
 
     if minimum_repetitions <= 0:
         raise ValueError("minimum_repetitions must be positive")
-    allowed = _allowed_keys(allowed_param_differences)
-    current_items, current_outer_reasons = _normalize_summary_input(current, "current")
-    baseline_items, baseline_outer_reasons = _normalize_summary_input(baseline, "baseline")
-    reasons = current_outer_reasons + baseline_outer_reasons
+    allowed, context_reasons, current_items, baseline_items = _validate_gate_inputs(
+        current, baseline, minimum_repetitions, allowed_param_differences
+    )
+    if not context_reasons:
+        context_reasons = _compatibility_reasons(
+            current_items, baseline_items, allowed_param_differences=allowed
+        ) + _rank_context_reasons(
+            current_items, baseline_items,
+            minimum_repetitions=minimum_repetitions,
+            allowed_param_differences=allowed,
+        )
     candidates: list[list[BenchmarkSummaryV1]] = [[], []]
     for side_index, items in enumerate((current_items, baseline_items)):
         side = "current" if side_index == 0 else "baseline"
         for index, item in enumerate(items):
             if not isinstance(item, BenchmarkSummaryV1):
                 # An unidentifiable malformed row cannot be known to be the
-                # candidate; retain it as evidence without blocking AlloyGBM.
-                reasons.append(f"invalid {side} non-candidate summary at index {index}")
+                # candidate; the whole-cohort validation already records it.
                 continue
             try:
                 validate_summary(item)
             except (TypeError, ValueError) as exc:
-                if item.library == "alloygbm":
-                    reasons.append(f"invalid {side} candidate summary at index {index}: {exc}")
-                else:
-                    reasons.append(f"invalid {side} competitor summary at index {index}: {exc}")
                 continue
             if item.library == "alloygbm":
                 candidates[side_index].append(item)
-            elif item.machine is None or item.effective_params is None:
-                reasons.append(f"missing durable provenance for {side} competitor summary at index {index}")
     candidate_allowed, candidate_reasons, candidate_current, candidate_baseline = _validate_gate_inputs(
         candidates[0], candidates[1], minimum_repetitions, allowed,
         require_durable_provenance=False,
     )
     return (
         candidate_allowed,
-        reasons + candidate_reasons,
+        context_reasons + candidate_reasons,
         candidate_current,
         candidate_baseline,
         bool(candidate_reasons),
