@@ -44,7 +44,11 @@ def record(**changes: object) -> BenchmarkRecordV1:
         "git_sha": None,
         "seed": 20260904,
         "threads": 2,
-        "effective_params": {"n_estimators": 4, "max_depth": 6},
+        "effective_params": {
+            "n_estimators": 4,
+            "max_depth": 6,
+            "nested": {"search": [1, {"value": "kept"}]},
+        },
         "input_representation": "dense",
         "preprocessing_seconds": 0.001,
         "fit_seconds": 0.1,
@@ -67,6 +71,7 @@ def summary(**changes: object) -> BenchmarkSummaryV1:
         "scenario": "dense_regression",
         "library": "alloygbm",
         "library_version": "1.0.0",
+        "threads": 2,
         "dataset_sha256": "a" * 64,
         "input_representation": "dense",
         "metric_name": "rmse",
@@ -106,6 +111,28 @@ def test_record_round_trips_with_explicit_json_and_is_frozen() -> None:
     assert json.loads(original.to_json())["profile"]["stage_ns"]["gradients"] == 100
     with pytest.raises(FrozenInstanceError):
         original.fit_seconds = 2.0  # type: ignore[misc]
+
+
+def test_record_nested_values_are_defensively_frozen() -> None:
+    original = record()
+    with pytest.raises(TypeError):
+        original.effective_params["new"] = 1  # type: ignore[index]
+    with pytest.raises(TypeError):
+        original.effective_params["nested"]["search"] = ()  # type: ignore[index]
+    with pytest.raises(TypeError):
+        original.effective_params["nested"]["search"][1]["value"] = "changed"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        original.machine["platform"] = "linux"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        original.profile.stage_ns["gradients"] = 200  # type: ignore[union-attr,index]
+    with pytest.raises(TypeError):
+        original.profile.tree_stage_ns["split_find"] = 200  # type: ignore[union-attr,index]
+
+
+def test_single_record_jsonl_loads_successfully(tmp_path: Path) -> None:
+    path = tmp_path / "one-record.jsonl"
+    path.write_text(record().to_json() + "\n")
+    assert load_records(path) == [record()]
 
 
 def test_validate_record_rejects_missing_dataset_fingerprint() -> None:
@@ -153,6 +180,31 @@ def test_load_records_rejects_duplicate_repetition_keys(tmp_path: Path) -> None:
         load_records(path)
 
 
+def test_same_repetition_at_different_thread_counts_is_distinct(tmp_path: Path) -> None:
+    path = tmp_path / "thread-sweep.jsonl"
+    path.write_text(
+        "\n".join(
+            replace(record(), threads=threads).to_json() for threads in (1, 4)
+        )
+        + "\n"
+    )
+    assert [item.threads for item in load_records(path)] == [1, 4]
+
+
+@pytest.mark.parametrize("fingerprint", ["", "a" * 63, "A" * 64, "g" * 64])
+def test_validate_record_requires_lowercase_sha256_fingerprint(fingerprint: str) -> None:
+    with pytest.raises(ValueError, match="dataset_sha256"):
+        validate_record(replace(record(), dataset_sha256=fingerprint))
+
+
+def test_summary_threads_are_grouping_keys() -> None:
+    one = summary(threads=1)
+    four = summary(threads=4)
+    assert one != four
+    assert "threads" in one.grouping_keys
+    assert one.to_dict()["threads"] == 1
+
+
 def test_summary_requires_raw_repetition_ids() -> None:
     with pytest.raises(ValueError, match="raw_repetition_ids"):
         validate_summary(replace(summary(), raw_repetition_ids=()))
@@ -180,28 +232,69 @@ def test_smoke_manifest_is_deterministic_and_complete() -> None:
     assert manifest["seed"] == 20260904
     assert manifest["warmup_repetitions"] == 1
     assert manifest["timed_repetitions"] == 5
-    assert {scenario["name"] for scenario in manifest["scenarios"]} == {
-        "dense_regression",
-        "binary",
-        "grouped_ranking",
-        "native_categorical",
-        "csr_sparse",
-        "joint_multi_output",
-    }
-    by_name = {scenario["name"]: scenario for scenario in manifest["scenarios"]}
-    assert (by_name["dense_regression"]["rows"], by_name["dense_regression"]["features"]) == (
-        4096,
-        40,
-    )
-    assert by_name["binary"]["metric"] == "log_loss"
-    assert (by_name["grouped_ranking"]["features"], by_name["grouped_ranking"]["groups"]) == (
-        30,
-        128,
-    )
-    assert by_name["native_categorical"]["categorical_cardinalities"] == [16, 256]
-    assert (by_name["csr_sparse"]["features"], by_name["csr_sparse"]["density"]) == (1000, 0.01)
-    assert by_name["joint_multi_output"]["outputs"] == 8
-    assert all(
-        scenario["rounds"] == 40 and scenario["depth"] == 6
-        for scenario in manifest["scenarios"]
-    )
+    assert manifest["scenarios"] == [
+        {
+            "name": "dense_regression",
+            "task": "regression",
+            "rows": 4096,
+            "features": 40,
+            "rounds": 40,
+            "depth": 6,
+            "metric": "rmse",
+            "input_representation": "dense",
+        },
+        {
+            "name": "binary",
+            "task": "binary_classification",
+            "rows": 4096,
+            "features": 40,
+            "rounds": 40,
+            "depth": 6,
+            "metric": "log_loss",
+            "input_representation": "dense",
+        },
+        {
+            "name": "grouped_ranking",
+            "task": "ranking",
+            "rows": 4096,
+            "features": 30,
+            "groups": 128,
+            "rounds": 40,
+            "depth": 6,
+            "metric": "ndcg_at_10",
+            "input_representation": "dense",
+        },
+        {
+            "name": "native_categorical",
+            "task": "binary_classification",
+            "rows": 4096,
+            "numeric_features": 20,
+            "categorical_cardinalities": [16, 256],
+            "rounds": 40,
+            "depth": 6,
+            "metric": "log_loss",
+            "input_representation": "native_categorical",
+        },
+        {
+            "name": "csr_sparse",
+            "task": "regression",
+            "rows": 4096,
+            "features": 1000,
+            "density": 0.01,
+            "rounds": 40,
+            "depth": 6,
+            "metric": "rmse",
+            "input_representation": "csr",
+        },
+        {
+            "name": "joint_multi_output",
+            "task": "multi_output_regression",
+            "rows": 4096,
+            "features": 30,
+            "outputs": 8,
+            "rounds": 40,
+            "depth": 6,
+            "metric": "rmse",
+            "input_representation": "dense",
+        },
+    ]

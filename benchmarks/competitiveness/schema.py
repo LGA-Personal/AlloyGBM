@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+import re
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, Mapping, Sequence
 
 SCHEMA_VERSION = "alloygbm-competitiveness/v1"
@@ -73,6 +75,32 @@ def _nonempty_string(value: object, name: str) -> None:
         raise ValueError(f"{name} must be a nonempty string")
 
 
+def _deep_freeze(value: object) -> object:
+    """Copy JSON-like containers into immutable equivalents."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _deep_freeze(child) for key, child in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(child) for child in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_deep_freeze(child) for child in value)
+    return value
+
+
+def _deep_thaw(value: object) -> object:
+    """Convert frozen containers back to JSON-compatible containers."""
+
+    if isinstance(value, Mapping):
+        return {key: _deep_thaw(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_deep_thaw(child) for child in value]
+    if isinstance(value, frozenset):
+        return [_deep_thaw(child) for child in value]
+    return value
+
+
 def _validate_ns_map(
     values: Mapping[str, object], name: str, labels: frozenset[str]
 ) -> None:
@@ -96,6 +124,10 @@ class ProfileRecordV1:
     loop_wall_ns: int
     stage_ns: dict[str, int]
     tree_stage_ns: dict[str, int]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "stage_ns", _deep_freeze(self.stage_ns))
+        object.__setattr__(self, "tree_stage_ns", _deep_freeze(self.tree_stage_ns))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -159,12 +191,34 @@ class BenchmarkRecordV1:
     machine: dict[str, str]
     profile: ProfileRecordV1 | None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "effective_params", _deep_freeze(self.effective_params))
+        object.__setattr__(self, "machine", _deep_freeze(self.machine))
+
     def to_dict(self) -> dict[str, object]:
-        result = asdict(self)
-        # asdict already recursively converts the nested dataclass, but this
-        # explicit conversion documents that profile is part of the wire API.
-        result["profile"] = self.profile.to_dict() if self.profile is not None else None
-        return result
+        return {
+            "schema": self.schema,
+            "run_id": self.run_id,
+            "repetition": self.repetition,
+            "dataset_sha256": self.dataset_sha256,
+            "scenario": self.scenario,
+            "library": self.library,
+            "library_version": self.library_version,
+            "git_sha": self.git_sha,
+            "seed": self.seed,
+            "threads": self.threads,
+            "effective_params": _deep_thaw(self.effective_params),
+            "input_representation": self.input_representation,
+            "preprocessing_seconds": self.preprocessing_seconds,
+            "fit_seconds": self.fit_seconds,
+            "predict_seconds": self.predict_seconds,
+            "peak_rss_bytes": self.peak_rss_bytes,
+            "metric_name": self.metric_name,
+            "metric_value": self.metric_value,
+            "rounds_completed": self.rounds_completed,
+            "machine": _deep_thaw(self.machine),
+            "profile": self.profile.to_dict() if self.profile is not None else None,
+        }
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), allow_nan=False, sort_keys=True)
@@ -221,6 +275,7 @@ class BenchmarkSummaryV1:
     scenario: str
     library: str
     library_version: str
+    threads: int
     dataset_sha256: str
     input_representation: str
     metric_name: str
@@ -237,6 +292,9 @@ class BenchmarkSummaryV1:
     raw_repetition_ids: tuple[int, ...] = ()
     metric_direction: str | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "raw_repetition_ids", tuple(self.raw_repetition_ids))
+
     @property
     def grouping_keys(self) -> tuple[str, ...]:
         """Names identifying the population summarized by this row."""
@@ -246,13 +304,35 @@ class BenchmarkSummaryV1:
             "scenario",
             "library",
             "library_version",
+            "threads",
             "dataset_sha256",
             "input_representation",
             "metric_name",
         )
 
     def to_dict(self) -> dict[str, object]:
-        result = asdict(self)
+        result = {
+            "schema": self.schema,
+            "run_id": self.run_id,
+            "scenario": self.scenario,
+            "library": self.library,
+            "library_version": self.library_version,
+            "threads": self.threads,
+            "dataset_sha256": self.dataset_sha256,
+            "input_representation": self.input_representation,
+            "metric_name": self.metric_name,
+            "metric_median": self.metric_median,
+            "metric_mad": self.metric_mad,
+            "preprocessing_median_seconds": self.preprocessing_median_seconds,
+            "preprocessing_mad_seconds": self.preprocessing_mad_seconds,
+            "fit_median_seconds": self.fit_median_seconds,
+            "fit_mad_seconds": self.fit_mad_seconds,
+            "predict_median_seconds": self.predict_median_seconds,
+            "predict_mad_seconds": self.predict_mad_seconds,
+            "peak_rss_median_bytes": self.peak_rss_median_bytes,
+            "peak_rss_mad_bytes": self.peak_rss_mad_bytes,
+            "metric_direction": self.metric_direction,
+        }
         result["raw_repetition_ids"] = list(self.raw_repetition_ids)
         return result
 
@@ -267,6 +347,7 @@ class BenchmarkSummaryV1:
             scenario=value["scenario"],  # type: ignore[arg-type]
             library=value["library"],  # type: ignore[arg-type]
             library_version=value["library_version"],  # type: ignore[arg-type]
+            threads=value["threads"],  # type: ignore[arg-type]
             dataset_sha256=value["dataset_sha256"],  # type: ignore[arg-type]
             input_representation=value["input_representation"],  # type: ignore[arg-type]
             metric_name=value["metric_name"],  # type: ignore[arg-type]
@@ -313,8 +394,13 @@ def validate_record(record: BenchmarkRecordV1) -> None:
         raise ValueError("record must be a BenchmarkRecordV1")
     if record.schema != SCHEMA_VERSION:
         raise ValueError(f"unsupported schema: {record.schema!r}")
-    for field in ("run_id", "dataset_sha256", "scenario", "library", "library_version"):
+    for field in ("run_id", "scenario", "library", "library_version"):
         _nonempty_string(getattr(record, field), field)
+    if (
+        not isinstance(record.dataset_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", record.dataset_sha256) is None
+    ):
+        raise ValueError("dataset_sha256 must be exactly 64 lowercase hexadecimal characters")
     _nonnegative_int(record.repetition, "repetition")
     _nonnegative_int(record.seed, "seed")
     _positive_int(record.threads, "threads")
@@ -358,13 +444,18 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
         raise ValueError(f"unsupported schema: {summary.schema!r}")
     for field in (
         "run_id",
-        "dataset_sha256",
         "scenario",
         "library",
         "library_version",
         "input_representation",
     ):
         _nonempty_string(getattr(summary, field), field)
+    if (
+        not isinstance(summary.dataset_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", summary.dataset_sha256) is None
+    ):
+        raise ValueError("dataset_sha256 must be exactly 64 lowercase hexadecimal characters")
+    _positive_int(summary.threads, "threads")
     if summary.metric_name not in METRIC_DIRECTIONS:
         raise ValueError(f"unknown metric: {summary.metric_name!r}")
     if (
@@ -433,6 +524,8 @@ def _decode_records(text: str) -> list[Mapping[str, object]]:
         if decoded is not None:
             if isinstance(decoded, Mapping) and "records" in decoded:
                 decoded = decoded["records"]
+            elif isinstance(decoded, Mapping):
+                return [decoded]
             if not isinstance(decoded, list):
                 raise ValueError("records JSON must contain an array")
             return decoded
@@ -457,7 +550,7 @@ def load_records(path: str | Path) -> list[BenchmarkRecordV1]:
     for item in records:
         validate_record(item)
     versions: dict[tuple[str, str], str] = {}
-    keys: set[tuple[str, str, str, int]] = set()
+    keys: set[tuple[str, str, str, int, int]] = set()
     for item in records:
         version_key = (item.run_id, item.library)
         previous = versions.setdefault(version_key, item.library_version)
@@ -466,7 +559,13 @@ def load_records(path: str | Path) -> list[BenchmarkRecordV1]:
                 "mismatched library_version for "
                 f"run_id={item.run_id!r}, library={item.library!r}"
             )
-        duplicate_key = (item.run_id, item.library, item.scenario, item.repetition)
+        duplicate_key = (
+            item.run_id,
+            item.library,
+            item.scenario,
+            item.threads,
+            item.repetition,
+        )
         if duplicate_key in keys:
             raise ValueError(f"duplicate record key: {duplicate_key!r}")
         keys.add(duplicate_key)
