@@ -303,9 +303,22 @@ class BenchmarkSummaryV1:
     peak_rss_mad_bytes: float
     raw_repetition_ids: tuple[int, ...] = ()
     metric_direction: str | None = None
+    # These fields were added in Task 4 so summaries remain safely comparable
+    # after being written to and loaded from JSON. ``None`` is retained as a
+    # compatibility representation for hand-authored legacy summaries; gate
+    # APIs treat missing provenance as insufficient-data.
+    effective_params: dict[str, object] | None = None
+    machine: dict[str, str] | None = None
+    raw_line_numbers: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw_repetition_ids", tuple(self.raw_repetition_ids))
+        if self.effective_params is not None:
+            object.__setattr__(self, "effective_params", _deep_freeze(self.effective_params))
+        if self.machine is not None:
+            object.__setattr__(self, "machine", _deep_freeze(self.machine))
+        if self.raw_line_numbers is not None:
+            object.__setattr__(self, "raw_line_numbers", tuple(self.raw_line_numbers))
 
     @property
     def grouping_keys(self) -> tuple[str, ...]:
@@ -346,6 +359,13 @@ class BenchmarkSummaryV1:
             "peak_rss_median_bytes": self.peak_rss_median_bytes,
             "peak_rss_mad_bytes": self.peak_rss_mad_bytes,
             "metric_direction": self.metric_direction,
+            "effective_params": (
+                _deep_thaw(self.effective_params) if self.effective_params is not None else None
+            ),
+            "machine": _deep_thaw(self.machine) if self.machine is not None else None,
+            "raw_line_numbers": (
+                list(self.raw_line_numbers) if self.raw_line_numbers is not None else None
+            ),
         }
         result["raw_repetition_ids"] = list(self.raw_repetition_ids)
         return result
@@ -378,6 +398,17 @@ class BenchmarkSummaryV1:
             peak_rss_mad_bytes=value["peak_rss_mad_bytes"],  # type: ignore[arg-type]
             raw_repetition_ids=tuple(value.get("raw_repetition_ids", ())),  # type: ignore[arg-type]
             metric_direction=value.get("metric_direction"),  # type: ignore[arg-type]
+            effective_params=(
+                dict(value["effective_params"])
+                if value.get("effective_params") is not None
+                else None
+            ),  # type: ignore[arg-type]
+            machine=(dict(value["machine"]) if value.get("machine") is not None else None),  # type: ignore[arg-type]
+            raw_line_numbers=(
+                tuple(value["raw_line_numbers"])
+                if value.get("raw_line_numbers") is not None
+                else None
+            ),  # type: ignore[arg-type]
         )
 
     @classmethod
@@ -510,6 +541,25 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
         raise ValueError("raw_repetition_ids must be unique")
     for repetition in summary.raw_repetition_ids:
         _nonnegative_int(repetition, "raw_repetition_ids entry")
+    if summary.effective_params is not None:
+        if not isinstance(summary.effective_params, Mapping):
+            raise ValueError("effective_params must be a mapping or null")
+        _validate_finite_values(summary.effective_params, "effective_params")
+    if summary.machine is not None:
+        if not isinstance(summary.machine, Mapping) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in summary.machine.items()
+        ):
+            raise ValueError("machine must map strings to strings or be null")
+    if summary.raw_line_numbers is not None:
+        if not isinstance(summary.raw_line_numbers, Sequence) or isinstance(
+            summary.raw_line_numbers, (str, bytes)
+        ):
+            raise ValueError("raw_line_numbers must be a sequence or null")
+        if len(summary.raw_line_numbers) != len(summary.raw_repetition_ids):
+            raise ValueError("raw_line_numbers must align with raw_repetition_ids")
+        for line in summary.raw_line_numbers:
+            _positive_int(line, "raw_line_numbers entry")
 
 
 def _validate_finite_values(value: object, name: str) -> None:

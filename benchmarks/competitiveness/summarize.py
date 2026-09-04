@@ -45,27 +45,20 @@ def _group_key(record: BenchmarkRecordV1) -> tuple[object, ...]:
     ))
 
 
-def _attach_metadata(summary: BenchmarkSummaryV1, records: Sequence[BenchmarkRecordV1]) -> BenchmarkSummaryV1:
-    # The v1 summary contract intentionally has no effective_params or machine
-    # columns. Keep these provenance values available to gate evaluation while
-    # leaving the serialized contract stable.
-    object.__setattr__(summary, "_effective_params", _canonical(records[0].effective_params))
-    object.__setattr__(summary, "_machine", _canonical(records[0].machine))
-    object.__setattr__(summary, "_raw_lines", {item.repetition: index + 1 for index, item in enumerate(records)})
-    return summary
-
-
 def aggregate_records(
-    records: Sequence[BenchmarkRecordV1], *, minimum_repetitions: int = 1
+    records: Sequence[BenchmarkRecordV1], *, minimum_repetitions: int = 1,
+    raw_line_numbers: Sequence[int | None] | None = None,
 ) -> list[BenchmarkSummaryV1]:
     """Validate and aggregate records by the schema's grouping keys."""
 
     if minimum_repetitions <= 0:
         raise ValueError("minimum_repetitions must be positive")
+    if raw_line_numbers is not None and len(raw_line_numbers) != len(records):
+        raise ValueError("raw_line_numbers must align with records")
     groups: dict[tuple[object, ...], list[BenchmarkRecordV1]] = {}
     seen: set[tuple[object, ...]] = set()
     versions: dict[tuple[str, str], str] = {}
-    for record in records:
+    for index, record in enumerate(records):
         validate_record(record)
         version_key = (record.run_id, record.library)
         previous_version = versions.setdefault(version_key, record.library_version)
@@ -81,6 +74,11 @@ def aggregate_records(
             raise ValueError(f"duplicate raw repetition provenance: {key!r}")
         seen.add(key)
         groups.setdefault(_group_key(record), []).append(record)
+    for key, population in groups.items():
+        if len({item.repetition for item in population}) < minimum_repetitions:
+            raise ValueError(
+                f"summary group {key!r} has fewer than {minimum_repetitions} distinct repetitions"
+            )
 
     summaries: list[BenchmarkSummaryV1] = []
     for key, population in sorted(groups.items(), key=lambda item: tuple(str(v) for v in item[0])):
@@ -98,6 +96,14 @@ def aggregate_records(
         pred_median, pred_mad = median_mad(item.predict_seconds for item in population)
         rss_median, rss_mad = median_mad(item.peak_rss_bytes for item in population)
         first = population[0]
+        source_lines = None
+        if raw_line_numbers is not None:
+            source_lines = tuple(
+                raw_line_numbers[records.index(item)]  # type: ignore[arg-type]
+                for item in sorted(population, key=lambda value: value.repetition)
+            )
+            if any(line is None for line in source_lines):
+                source_lines = None
         summary = BenchmarkSummaryV1(
             schema=SCHEMA_VERSION,
             run_id=first.run_id,
@@ -121,15 +127,27 @@ def aggregate_records(
             peak_rss_mad_bytes=rss_mad,
             raw_repetition_ids=tuple(sorted(item.repetition for item in population)),
             metric_direction=METRIC_DIRECTIONS[first.metric_name],
+            effective_params=dict(first.effective_params),
+            machine=dict(first.machine),
+            raw_line_numbers=source_lines,  # type: ignore[arg-type]
         )
         validate_summary(summary)
-        _attach_metadata(summary, population)
         summaries.append(summary)
     return summaries
 
 
 def summarize_file(path: str | Path, *, minimum_repetitions: int = 1) -> list[BenchmarkSummaryV1]:
-    return aggregate_records(load_records(path), minimum_repetitions=minimum_repetitions)
+    source = Path(path)
+    records = load_records(source)
+    text = source.read_text()
+    stripped = text.lstrip()
+    line_numbers: list[int | None] | None = None
+    nonempty_lines = [line_number for line_number, line in enumerate(text.splitlines(), 1) if line.strip()]
+    if stripped and not stripped.startswith("[") and len(nonempty_lines) == len(records):
+        line_numbers = nonempty_lines
+    return aggregate_records(
+        records, minimum_repetitions=minimum_repetitions, raw_line_numbers=line_numbers
+    )
 
 
 # Descriptive alias used by callers that already have records in memory.
@@ -148,9 +166,10 @@ def render_markdown(
         "|---|---|---:|---:|---:|---:|---|",
     ]
     for item in summaries:
-        line_by_repetition = getattr(item, "_raw_lines", {})
+        line_by_repetition = dict(zip(item.raw_repetition_ids, item.raw_line_numbers or ()))
         raw_ids = ", ".join(
-            f"[{rep}]({raw_label}#L{line_by_repetition.get(rep, rep + 1)})"
+            f"[{rep}]({raw_label}#L{line_by_repetition[rep]})"
+            if rep in line_by_repetition else f"[{rep}]({raw_label})"
             for rep in item.raw_repetition_ids
         )
         lines.append(
@@ -175,6 +194,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--markdown-output")
     parser.add_argument("--claim", choices=("speed", "quality", "default-policy"))
     parser.add_argument("--quality-first", action="store_true")
+    parser.add_argument("--allow-param-difference", action="append", default=[], metavar="KEY")
     args = parser.parse_args(argv)
     current = summarize_file(args.raw, minimum_repetitions=1)
     baseline = summarize_file(args.baseline, minimum_repetitions=1) if args.baseline else []
@@ -182,6 +202,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     gate = evaluate_claim(
         args.claim, current, baseline, minimum_repetitions=args.minimum_repetitions,
         quality_first=args.quality_first,
+        allowed_param_differences=args.allow_param_difference,
     ) if args.claim else None
     status = gate.status if gate is not None else "insufficient-data" if not args.baseline else "pass"
     payload: dict[str, object] = {
