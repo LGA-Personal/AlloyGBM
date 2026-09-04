@@ -216,6 +216,7 @@ def _write_run_metadata(
         repetitions=repetitions,
         warmups=warmups,
         smoke=smoke,
+        profile_alloy=profile_alloy,
         raw_sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest(),
         raw_record_count=len(load_records(raw_path)),
         created_at_utc=datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(),
