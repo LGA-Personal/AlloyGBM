@@ -11,6 +11,7 @@ from benchmarks.competitiveness.adapters import AdapterResult, _prepare_input
 from benchmarks.competitiveness.schema import INPUT_REPRESENTATIONS, validate_record
 from benchmarks.competitiveness.datasets import build_dataset_cases, fingerprint_case
 from benchmarks.competitiveness.run import (
+    _record_from_measurement,
     _subprocess_measurement,
     load_manifest,
     run_benchmark,
@@ -175,6 +176,8 @@ def test_prepared_categorical_columns_keep_native_dtype_and_training_levels(libr
     assert representation == "native_categorical"
     assert str(train.iloc[:, 20].dtype) == "category"
     assert str(test.iloc[:, 20].dtype) == "category"
+    assert train.iloc[:, 20].cat.categories.dtype.kind in "iu"
+    assert train.iloc[:, 20].cat.categories.equals(test.iloc[:, 20].cat.categories)
     assert fit_kwargs == {}
 
 
@@ -238,10 +241,32 @@ def test_binary_fixture_requires_both_classes_in_each_split() -> None:
 
 
 def test_native_multioutput_adapters_use_supported_vector_objectives() -> None:
-    import inspect
-    from benchmarks.competitiveness import adapters
-    assert 'multi_strategy="multi_output_tree"' in inspect.getsource(adapters._fit_xgboost)
-    assert 'loss_function="MultiRMSE"' in inspect.getsource(adapters._fit_catboost)
+    xgb_case = {"name": "joint_multi_output", "task": "multi_output_regression", "rows": 100,
+                "features": 5, "outputs": 2, "rounds": 2, "depth": 2,
+                "metric": "rmse", "input_representation": "dense"}
+    case = build_dataset_cases([xgb_case], seed=7)[0]
+    xgb = pytest.importorskip("xgboost")
+    xgb_result = __import__("benchmarks.competitiveness.adapters", fromlist=["load_adapters"]).load_adapters(["xgboost"])["xgboost"].fit_predict(case, 7, 1)
+    assert xgb_result.predictions.shape == case.y_test.shape
+    assert xgb_result.effective_params["multi_output_strategy"] == "multi_output_tree"
+    assert xgb_result.effective_params["objective"] == "reg:squarederror"
+    cat = pytest.importorskip("catboost")
+    cat_result = __import__("benchmarks.competitiveness.adapters", fromlist=["load_adapters"]).load_adapters(["catboost"])["catboost"].fit_predict(case, 7, 1)
+    assert cat_result.predictions.shape == case.y_test.shape
+    assert cat_result.effective_params["multi_output_strategy"] == "native_multi_rmse"
+    assert cat_result.effective_params["objective"] == "MultiRMSE"
+
+
+def test_xgboost_native_categorical_fit_accepts_integer_category_ids() -> None:
+    pytest.importorskip("xgboost")
+    spec = {"name": "native_categorical", "task": "binary_classification", "rows": 100,
+            "numeric_features": 20, "categorical_cardinalities": [3, 4], "rounds": 2,
+            "depth": 2, "metric": "log_loss", "input_representation": "native_categorical"}
+    case = build_dataset_cases([spec], seed=7)[0]
+    from benchmarks.competitiveness.adapters import load_adapters
+    result = load_adapters(["xgboost"])["xgboost"].fit_predict(case, 7, 1)
+    assert result.input_representation == "native_categorical"
+    assert result.predictions.shape == case.y_test.shape
 
 
 def test_missing_optional_dependency_is_library_named(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,7 +292,6 @@ def test_worker_environment_contains_all_thread_controls(monkeypatch: pytest.Mon
         captured.update(kwargs["env"])
         return Completed()
     monkeypatch.setattr(subprocess, "run", fake_run)
-    from benchmarks.competitiveness.run import _subprocess_adapter
     spec = {"name": "dense_regression", "task": "regression", "rows": 20, "features": 4, "rounds": 2, "depth": 2, "metric": "rmse", "input_representation": "dense"}
     case = build_dataset_cases([spec], 7)[0]
     _subprocess_measurement("manifest.yaml", "dense_regression", "lightgbm", 7, 3)
@@ -283,3 +307,42 @@ def test_subprocess_orchestration_does_not_build_parent_fixtures(monkeypatch: py
     monkeypatch.setattr(runner, "_subprocess_measurement", lambda *args, **kwargs: payload)
     path = runner.run_subprocess_benchmark(manifest, tmp_path / "out", libraries=["alloygbm"], repetitions=1, warmups=0, smoke=True)
     assert len(load_records(path / "raw.jsonl")) == 1
+
+
+def _measurement_payload(**changes):
+    value = {"dataset_sha256": "a" * 64, "scenario": "dense_regression", "task": "regression", "metric_name": "rmse", "metric_value": 1.0, "preprocessing_seconds": 0.01, "fit_seconds": 0.02, "predict_seconds": 0.01, "peak_rss_bytes": 123, "library": "alloygbm", "library_version": "1", "effective_params": {"topology": "levelwise", "objective": "squared_error"}, "input_representation": "dense", "rounds_completed": 2}
+    value.update(changes)
+    return value
+
+
+@pytest.mark.parametrize("changes, message", [
+    ({"scenario": "binary"}, "scenario"),
+    ({"library": "xgboost"}, "library"),
+    ({"task": "binary_classification"}, "task"),
+    ({"metric_name": "log_loss"}, "metric"),
+])
+def test_compact_worker_identity_is_checked_before_record(tmp_path: Path, changes, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        _record_from_measurement(_measurement_payload(**changes), "run", 0, 7, 1, None, expected_scenario="dense_regression", expected_task="regression", expected_metric="rmse", requested_library="alloygbm")
+
+
+def test_compact_worker_identity_valid_payload_passes() -> None:
+    record = _record_from_measurement(_measurement_payload(), "run", 0, 7, 1, None, expected_scenario="dense_regression", expected_task="regression", expected_metric="rmse", requested_library="alloygbm")
+    assert record.scenario == "dense_regression"
+
+
+def test_compact_worker_rejects_non_mapping_payload() -> None:
+    with pytest.raises(ValueError, match="mapping"):
+        _record_from_measurement([], "run", 0, 7, 1, None)  # type: ignore[arg-type]
+
+
+def test_mismatched_later_measurement_is_not_appended(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    tiny_manifest(manifest)
+    import benchmarks.competitiveness.run as runner
+    payloads = iter([_measurement_payload(), _measurement_payload(scenario="binary")])
+    monkeypatch.setattr(runner, "_subprocess_measurement", lambda *args, **kwargs: next(payloads))
+    with pytest.raises(ValueError, match="scenario"):
+        runner.run_subprocess_benchmark(manifest, tmp_path / "out", libraries=["alloygbm"], repetitions=2, warmups=0, smoke=True)
+    raw = next((tmp_path / "out").glob("*/raw.jsonl"))
+    assert len(raw.read_text().splitlines()) == 1

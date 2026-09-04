@@ -262,7 +262,19 @@ def _subprocess_measurement(manifest: str | Path, scenario: str, library: str, s
     return value
 
 
-def _record_from_measurement(value: Mapping[str, object], run_id: str, repetition: int, seed: int, threads: int, git_sha: str | None) -> BenchmarkRecordV1:
+def _record_from_measurement(value: Mapping[str, object], run_id: str, repetition: int, seed: int, threads: int, git_sha: str | None, *, expected_scenario: str | None = None, expected_task: str | None = None, expected_metric: str | None = None, requested_library: str | None = None) -> BenchmarkRecordV1:
+    if not isinstance(value, Mapping):
+        raise ValueError("worker measurement payload must be a mapping")
+    required = {"dataset_sha256", "scenario", "task", "metric_name", "metric_value", "preprocessing_seconds", "fit_seconds", "predict_seconds", "peak_rss_bytes", "library", "library_version", "effective_params", "input_representation", "rounds_completed"}
+    missing = required - set(value)
+    if missing:
+        raise ValueError(f"worker measurement payload missing fields: {sorted(missing)}")
+    if not isinstance(value["effective_params"], Mapping):
+        raise ValueError("worker measurement effective_params must be a mapping")
+    checks = (("scenario", expected_scenario), ("task", expected_task), ("metric_name", expected_metric), ("library", requested_library))
+    for field, expected in checks:
+        if expected is not None and value.get(field) != expected:
+            raise ValueError(f"worker payload {field} does not match requested value {expected!r}")
     record = BenchmarkRecordV1(
         schema=SCHEMA_VERSION, run_id=run_id, repetition=repetition,
         dataset_sha256=str(value["dataset_sha256"]), scenario=str(value["scenario"]),
@@ -289,6 +301,7 @@ def run_subprocess_benchmark(
     config = load_manifest(manifest)
     specs = [item for item in config["scenarios"] if isinstance(item, Mapping)]  # type: ignore[index]
     names = [str(item["name"]) for item in specs]
+    spec_by_name = {str(item["name"]): item for item in specs}
     selected_names = [scenario] if scenario else names
     selected_libraries = list(libraries or DEFAULT_LIBRARIES)
     validate_options(selected_names, selected_libraries, threads=threads, repetitions=repetitions, warmups=warmups, smoke=smoke, known_scenarios=names)
@@ -309,7 +322,8 @@ def run_subprocess_benchmark(
                     _subprocess_measurement(manifest, name, library, seed, threads)
                 for repetition in range(timed):
                     value = _subprocess_measurement(manifest, name, library, seed, threads)
-                    output.write(_record_from_measurement(value, run_id, repetition, seed, threads, git_sha).to_json() + "\n")
+                    spec = spec_by_name[name]
+                    output.write(_record_from_measurement(value, run_id, repetition, seed, threads, git_sha, expected_scenario=name, expected_task=str(spec["task"]), expected_metric=str(spec["metric"]), requested_library=library).to_json() + "\n")
     load_records(run_path / "raw.jsonl")
     return run_path
 

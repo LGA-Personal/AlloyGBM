@@ -96,9 +96,16 @@ def _prepare_input(case: DatasetCase, library: str):
         X_train = pd.DataFrame(np.asarray(X_train).copy())
         X_test = pd.DataFrame(np.asarray(X_test).copy())
         for index in case.categorical_feature_indices:
-            categories = np.unique(np.asarray(X_train.iloc[:, index]))
-            X_train[index] = pd.Series(pd.Categorical(X_train.iloc[:, index], categories=categories), index=X_train.index)
-            X_test[index] = pd.Series(pd.Categorical(X_test.iloc[:, index], categories=categories), index=X_test.index)
+            levels = np.unique(np.asarray(X_train.iloc[:, index]))
+            # XGBoost rejects floating-point category labels.  Encode levels
+            # as integer IDs derived only from training values; unseen test
+            # values become missing categorical values.
+            level_to_id = {value: position for position, value in enumerate(levels.tolist())}
+            train_ids = np.asarray([level_to_id[value] for value in np.asarray(X_train.iloc[:, index])], dtype=np.int32)
+            test_ids = np.asarray([level_to_id.get(value, -1) for value in np.asarray(X_test.iloc[:, index])], dtype=np.int32)
+            category_ids = np.arange(len(levels), dtype=np.int32)
+            X_train[index] = pd.Series(pd.Categorical(train_ids, categories=category_ids), index=X_train.index)
+            X_test[index] = pd.Series(pd.Categorical(test_ids, categories=category_ids), index=X_test.index)
     elif case.categorical_feature_indices and library == "catboost":
         import pandas as pd
         X_train = pd.DataFrame(np.asarray(X_train).copy())

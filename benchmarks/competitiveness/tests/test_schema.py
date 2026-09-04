@@ -226,6 +226,11 @@ def test_validate_summary_rejects_blank_task() -> None:
         validate_summary(replace(summary(), task=""))
 
 
+def test_validate_summary_rejects_unknown_input_representation() -> None:
+    with pytest.raises(ValueError, match="input_representation"):
+        validate_summary(replace(summary(), input_representation="unknown"))
+
+
 def test_summary_requires_raw_repetition_ids() -> None:
     with pytest.raises(ValueError, match="raw_repetition_ids"):
         validate_summary(replace(summary(), raw_repetition_ids=()))
