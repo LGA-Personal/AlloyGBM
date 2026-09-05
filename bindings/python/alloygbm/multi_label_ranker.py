@@ -933,9 +933,9 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 str(kw["dart_sample_type"]) if "dart_sample_type" in kw else None
             ),
             dart_skip_drop=(
-                float(kw["dart_skip_drop"])
-                if "dart_skip_drop" in kw
-                else (0.5 if str(kw.get("boosting_mode", "standard")) == "dart" else None)
+                float(kw.get("dart_skip_drop", 0.5))
+                if str(kw.get("boosting_mode", "standard")) == "dart"
+                else None
             ),
             # v0.10.3: joint warm-start.
             init_artifact_bytes=init_artifact,

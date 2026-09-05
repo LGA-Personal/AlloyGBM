@@ -235,6 +235,12 @@ pub trait BackendOps: Sync {
     /// Given a `LinearHistogramBundle` for a node and the winning split parameters,
     /// solve for the optimal `LinearLeaf` for each child.
     ///
+    /// This histogram-only API has no raw row values with which to verify a
+    /// finite output ceiling. Implementations must therefore return `None`
+    /// when `_max_abs_leaf_value` is finite; the row-aware partition and
+    /// shortlisted APIs perform the supported capped solve. `INFINITY` is
+    /// reserved for uncapped histogram-oracle use.
+    ///
     /// Returns `Some((left_leaf, right_leaf))` on success, or `None` if the feature
     /// is not found in the bundle or the matrix is singular (causing a fallback to
     /// scalar leaves).

@@ -617,6 +617,12 @@ impl BackendOps for CpuBackend {
         feature_scaler: &LinearFeatureScaler,
         max_abs_leaf_value: f32,
     ) -> Option<(LinearLeaf, LinearLeaf)> {
+        // This legacy histogram-only API has no raw rows for an exact output
+        // ceiling check. Let the row-aware partition/shortlisted paths handle
+        // every finite cap; retain infinity for histogram-oracle callers.
+        if max_abs_leaf_value.is_finite() {
+            return None;
+        }
         let d = linear_histograms.num_regressors;
         if d == 0 {
             return None;

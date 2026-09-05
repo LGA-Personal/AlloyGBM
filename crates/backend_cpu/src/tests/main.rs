@@ -482,6 +482,25 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
             f32::INFINITY,
         )
         .expect("owned leaves solve");
+    // This histogram-only API has no raw rows for an exact output check. A
+    // finite cap must therefore conservatively fall back; infinity remains
+    // available for this histogram oracle path.
+    assert!(
+        backend
+            .compute_linear_leaf_pair(
+                &owned,
+                oracle_split.feature_index,
+                oracle_split.threshold_bin as usize,
+                oracle_split.default_left,
+                options.missing_bin_index,
+                0.1,
+                context.l2_lambda,
+                &scaler,
+                0.5,
+            )
+            .is_none(),
+        "histogram-only PL solving must reject finite caps without row data"
+    );
 
     let prepared = backend
         .evaluate_shortlisted_linear_feature(
