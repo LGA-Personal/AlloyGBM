@@ -1,0 +1,79 @@
+{
+  "claim": null,
+  "schema": "alloygbm-competitiveness/v1",
+  "status": "insufficient-data",
+  "summaries": [
+    {
+      "dataset_sha256": "07ca9628c1b36ffc1da5c633157f7955adb91faecc80aebd0a279cd32c56e202",
+      "effective_params": {
+        "categorical_handling": "none",
+        "col_subsample": 0.8,
+        "continuous_binning_max_bins": 256,
+        "deterministic": true,
+        "learning_rate": 0.05,
+        "max_depth": 8,
+        "multi_output_strategy": "single_target",
+        "objective": "squared_error",
+        "resolved_training_policy": {
+          "auto_split_l2_applied": false,
+          "col_subsample": 0.800000011920929,
+          "effective_round_cap": 200,
+          "effective_split_l2": 0.0,
+          "min_rows_per_leaf": 16,
+          "min_split_gain": 9.999999747378752e-05,
+          "requested_mode": "auto",
+          "requested_rounds": 200,
+          "row_subsample": 0.800000011920929
+        },
+        "rounds": 200,
+        "row_subsample": 0.8,
+        "seed": 20260902,
+        "sparse_fallback": "none",
+        "threads": 1,
+        "topology": "levelwise"
+      },
+      "fit_mad_seconds": 0.12002716599999985,
+      "fit_median_seconds": 15.968552791,
+      "input_representation": "dense",
+      "library": "alloygbm",
+      "library_version": "1.0.0",
+      "machine": {
+        "architecture": "arm64",
+        "hostname": "Logans-MacBook-Air-4.local",
+        "logical_cpu_count": "10",
+        "platform": "darwin",
+        "python_version": "3.13.5"
+      },
+      "metric_direction": "minimize",
+      "metric_mad": 0.0,
+      "metric_median": 0.16377460956573486,
+      "metric_name": "rmse",
+      "peak_rss_mad_bytes": 147456.0,
+      "peak_rss_median_bytes": 721027072.0,
+      "predict_mad_seconds": 0.005739625000000026,
+      "predict_median_seconds": 0.996846792,
+      "preprocessing_mad_seconds": 4.199999999999998e-08,
+      "preprocessing_median_seconds": 1.375e-06,
+      "profiled": false,
+      "raw_line_numbers": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "raw_repetition_ids": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "run_id": "fe7f20f0-d68b-48c2-ad25-8e35131dcb8b",
+      "scenario": "published_tall_r200_d8",
+      "schema": "alloygbm-competitiveness/v1",
+      "task": "regression",
+      "threads": 1
+    }
+  ]
+}

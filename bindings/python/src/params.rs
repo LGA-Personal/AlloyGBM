@@ -186,6 +186,7 @@ pub(crate) fn parse_boosting_mode(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    dart_skip_drop: Option<f32>,
 ) -> PyResult<BoostingMode> {
     match boosting_mode {
         "standard" => Ok(alloygbm_core::BoostingMode::Standard),
@@ -226,11 +227,18 @@ pub(crate) fn parse_boosting_mode(
                     )));
                 }
             };
+            let skip_drop = dart_skip_drop.unwrap_or(0.0);
+            if !skip_drop.is_finite() || !(0.0..=1.0).contains(&skip_drop) {
+                return Err(PyValueError::new_err(
+                    "dart_skip_drop must be in [0.0, 1.0]",
+                ));
+            }
             Ok(alloygbm_core::BoostingMode::Dart {
                 drop_rate,
                 max_drop,
                 normalize_type,
                 sample_type,
+                skip_drop,
             })
         }
         other => Err(PyValueError::new_err(format!(

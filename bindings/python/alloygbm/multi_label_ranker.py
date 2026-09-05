@@ -25,7 +25,11 @@ from typing import Any
 
 import numpy as np
 
-from .ranker import GBMRanker
+from .ranker import (
+    DEFAULT_LAMBDARANK_NORMALIZE,
+    DEFAULT_LAMBDARANK_TRUNCATION_LEVEL,
+    GBMRanker,
+)
 from ._regressor._core import _validate_n_jobs
 from ._regressor._quantization import _QuantizationMixin
 from ._regressor._shap import _ShapMixin
@@ -446,6 +450,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "dart_max_drop",
         "dart_normalize_type",
         "dart_sample_type",
+        "dart_skip_drop",
         # v0.10.4: MorphBoost on joint trainer. `training_mode="morph"`
         # activates the MorphBoost split-gain blend + LR schedule + leaf
         # shrinkage + depth penalty. Other values ("auto", "manual") are
@@ -845,13 +850,18 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             ic_list: list[list[int]] = []
         else:
             ic_list = [[int(x) for x in group] for group in ic_raw]
+        # Mirror GBMRanker's default so joint and independent modes truncate
+        # identically when the caller does not specify a level.
         joint_lambdarank_truncation_level = (
             GBMRanker._validate_lambdarank_truncation_level(
-                kw.get("lambdarank_truncation_level")
+                kw.get(
+                    "lambdarank_truncation_level",
+                    DEFAULT_LAMBDARANK_TRUNCATION_LEVEL,
+                )
             )
         )
         joint_lambdarank_normalize = GBMRanker._validate_lambdarank_normalize(
-            kw.get("lambdarank_normalize", False)
+            kw.get("lambdarank_normalize", DEFAULT_LAMBDARANK_NORMALIZE)
         )
         (
             artifact,
@@ -869,7 +879,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             group_arr,
             # Defaults below match GBMRegressor / GBMRanker's public
             # Python defaults (NOT the engine's TrainParams::default()).
-            int(kw.get("n_estimators", 6)),
+            int(kw.get("n_estimators", 100)),
             float(kw.get("learning_rate", 0.1)),
             int(kw.get("seed", 0)),
             int(kw.get("max_depth", 6)),
@@ -921,6 +931,11 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             ),
             dart_sample_type=(
                 str(kw["dart_sample_type"]) if "dart_sample_type" in kw else None
+            ),
+            dart_skip_drop=(
+                float(kw.get("dart_skip_drop", 0.5))
+                if str(kw.get("boosting_mode", "standard")) == "dart"
+                else None
             ),
             # v0.10.3: joint warm-start.
             init_artifact_bytes=init_artifact,
@@ -985,7 +1000,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 raise RuntimeError(
                     "multi_label_mode='joint' produced an empty ensemble: "
                     "no valid split candidate was found in any of "
-                    f"n_estimators={kw.get('n_estimators', 6)} rounds. "
+                    f"n_estimators={kw.get('n_estimators', 100)} rounds. "
                     "Try lowering `min_data_in_leaf` (currently "
                     f"{int(kw.get('min_data_in_leaf', 1))}), increasing "
                     "the training row count, or using "

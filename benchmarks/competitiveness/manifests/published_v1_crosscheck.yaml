@@ -1,0 +1,14 @@
+schema: alloygbm-competitiveness/v1
+seed: 20260902
+warmup_repetitions: 1
+timed_repetitions: 5
+scenarios:
+  - name: published_tall_r200_d8
+    fixture: published_deep_scaling_v1
+    task: regression
+    rows: 500000
+    features: 40
+    rounds: 200
+    depth: 8
+    metric: rmse
+    input_representation: dense

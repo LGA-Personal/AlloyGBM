@@ -2,6 +2,45 @@
 
 This directory organizes benchmark dataset preparation and cross-library model comparison for AlloyGBM.
 
+### Manifest-driven competitiveness runner
+
+The reproducible competitiveness fixtures and raw repetition contract live in
+`benchmarks/competitiveness`. The runner performs no downloads and writes
+validated records to a fresh UUID directory for every invocation:
+
+```bash
+python -m benchmarks.competitiveness.run \
+  --manifest benchmarks/competitiveness/manifests/pr_smoke.yaml \
+  --output-dir /tmp/alloygbm-competitiveness \
+  --scenario dense_regression --libraries alloygbm \
+  --threads 1 --repetitions 1 --warmups 0 --smoke
+```
+
+Comparison runs default to AlloyGBM, LightGBM, XGBoost, and CatBoost and
+require at least three timed repetitions. `--smoke` only permits a shorter
+repetition count; it does not change fixture dimensions or model parameters.
+Optional competitor dependencies are imported lazily and missing dependencies
+are errors for normal comparison runs. Validate emitted data with
+`benchmarks.competitiveness.schema.load_records`.
+
+The pinned pre-optimization six-scenario capture is committed at
+[`benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.jsonl`](competitiveness/baselines/adfa2c8-pr-smoke.jsonl),
+with its median/MAD summary at
+[`benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.summary.json`](competitiveness/baselines/adfa2c8-pr-smoke.summary.json).
+Its [run metadata sidecar](competitiveness/baselines/adfa2c8-pr-smoke.run-metadata.json)
+binds the raw records to the measured library commit, harness revision, and
+manifest checksum.
+It contains 120 raw records (four libraries, five repetitions) and is a
+provenance anchor, not a CI timing gate. CI runs the Alloy-only smoke command
+with one repetition; scheduled/manual comparator runs are observational and
+upload their raw and summarized artifacts.
+
+The exact published dense-deep cross-check uses the separate
+`published_v1_crosscheck.yaml` fixture (500,000×40, seed 20260902) so its
+generator remains distinct from the future `deep_scaling.yaml` nightly matrix.
+Its committed raw, summary, and metadata artifacts are alongside the smoke
+baseline and are the numerical comparison anchor for the deep-scaling report.
+
 ## Scenario Overview
 
 | Scenario | Task | Source | Rows | Features | Notes |
@@ -76,6 +115,36 @@ The runner registers the following model arms by default per task type:
 The two `*_linear` arms apply `lambda_l2=0.01` by default
 (tunable via `--alloy-linear-lambda-l2`), as recommended for weight stability
 under the closed-form ridge solve.
+
+### Fairness and thread budget
+
+`--threads N` applies one compute budget to **every** library through its own
+knob (AlloyGBM/LightGBM/XGBoost `n_jobs`, CatBoost `thread_count`), and pins
+`OMP_NUM_THREADS` and the BLAS thread variables to match so no runtime quietly
+takes more. The legacy comparison scripts accept `--threads 0` to use all
+logical CPUs; the manifest-driven `benchmarks.competitiveness.run` requires a
+positive thread count. Every run records the budget, host, and library versions
+in its JSON output under `params.environment`, and
+the matched-hyperparameter settings under `params.fairness`.
+
+Two LightGBM-specific corrections are applied automatically, without which the
+"identical hyperparameters" claim would be false: `subsample_freq=1` (LightGBM
+ignores `subsample` otherwise) and `num_leaves = 2 ** max_depth` (its default
+of 31 caps trees below the depth-wise peers).
+
+**Run the curated suite single-threaded.** At its dataset sizes (142-40,000
+rows) forcing all cores measures thread-spawn overhead, not throughput:
+LightGBM and XGBoost are *slower* multi-threaded than single-threaded below
+roughly 40,000 rows. For the realistic multi-threaded picture use
+`benchmarks/scale_comparison.py`, which runs 200k- and 1M-row datasets across
+thread budgets.
+
+```bash
+python3 benchmarks/run_model_comparison.py --threads 1                    # curated suite
+python3 benchmarks/scale_comparison.py --rows 200000 1000000 --threads 1 10
+```
+
+Published v1.0.0 results: [`docs/benchmarks/v1.0.0_comparison.md`](../docs/benchmarks/v1.0.0_comparison.md).
 
 Use `--models` to filter which arms run. Example: just MorphBoost vs peers:
 

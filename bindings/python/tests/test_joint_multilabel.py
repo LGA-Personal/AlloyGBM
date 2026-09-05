@@ -5,6 +5,8 @@ v0.10.0 shipped the Rust joint trainer (`fit_joint_multi_output`) and the
 routed every fit to the independent-per-label fallback.  v0.10.1 wires
 `multi_label_mode='joint'` through to the joint trainer.
 """
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -108,10 +110,13 @@ def test_joint_mode_lambdarank_truncation_level_changes_ndcg_fit():
 def test_joint_mode_lambdarank_normalize_changes_ndcg_fit():
     X, y, group = _toy_ranking(n_queries=10, items_per_query=6, n_labels=2, seed=31)
 
+    # `lambdarank_normalize` defaults to True since v1.0.0, so the
+    # unnormalized arm opts out explicitly.
     unnormalized = MultiLabelGBMRanker(
         n_estimators=5,
         multi_label_mode="joint",
         ranking_objective="rank:ndcg",
+        lambdarank_normalize=False,
         seed=31,
     )
     normalized = MultiLabelGBMRanker(
@@ -537,6 +542,72 @@ def test_joint_mode_accepts_dart():
     preds = m.predict(X)
     assert preds.shape == (n, 2)
     assert np.isfinite(preds).all()
+
+
+@pytest.mark.parametrize("explicit", [None, 0.23])
+def test_joint_dart_forwards_dart_skip_drop(monkeypatch, explicit):
+    import alloygbm._alloygbm as native
+
+    captured = {}
+
+    def fake_train(*args, **kwargs):
+        captured.update(kwargs)
+        return b"fake-artifact", [0.0, 0.0], 1, 1, SimpleNamespace()
+
+    class FakeHandle:
+        def __init__(self, artifact, baselines, feature_count):
+            del artifact, baselines, feature_count
+
+    monkeypatch.setattr(native, "train_joint_multi_label_ranker", fake_train)
+    monkeypatch.setattr(native, "JointPredictorHandle", FakeHandle)
+
+    kwargs = {
+        "n_estimators": 1,
+        "multi_label_mode": "joint",
+        "boosting_mode": "dart",
+    }
+    if explicit is not None:
+        kwargs["dart_skip_drop"] = explicit
+    model = MultiLabelGBMRanker(**kwargs)
+    assert "dart_skip_drop" in model._JOINT_SUPPORTED_KWARGS
+    model.fit(
+        np.asarray([[0.0], [1.0]], dtype=np.float32),
+        np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+        group=[2],
+    )
+
+    assert captured["dart_skip_drop"] == (0.5 if explicit is None else explicit)
+
+
+def test_joint_standard_does_not_forward_dart_skip_drop(monkeypatch):
+    import alloygbm._alloygbm as native
+
+    captured = {}
+
+    def fake_train(*args, **kwargs):
+        captured.update(kwargs)
+        return b"fake-artifact", [0.0, 0.0], 1, 1, SimpleNamespace()
+
+    class FakeHandle:
+        def __init__(self, artifact, baselines, feature_count):
+            del artifact, baselines, feature_count
+
+    monkeypatch.setattr(native, "train_joint_multi_label_ranker", fake_train)
+    monkeypatch.setattr(native, "JointPredictorHandle", FakeHandle)
+
+    model = MultiLabelGBMRanker(
+        n_estimators=1,
+        multi_label_mode="joint",
+        boosting_mode="standard",
+        dart_skip_drop=0.23,
+    )
+    model.fit(
+        np.asarray([[0.0], [1.0]], dtype=np.float32),
+        np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+        group=[2],
+    )
+
+    assert captured["dart_skip_drop"] is None
 
 
 def test_independent_multilabel_dart_omission_inherits_ranker_default():

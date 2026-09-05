@@ -291,7 +291,7 @@ fn shortlist_standard_respects_k_weighting_and_production_winner() {
 #[test]
 fn shortlist_standard_handles_zero_exhaustive_ties_and_parallel_features() {
     let backend = CpuBackend;
-    for feature_count in [4, CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD] {
+    for feature_count in [4, 32] {
         let histograms = shortlist_standard_fixture(feature_count);
         let options = SplitSelectionOptions {
             missing_bin_index: 2,
@@ -445,6 +445,7 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
     let context = LinearContext {
         regressor_features: regressors.clone(),
         l2_lambda: 1.0,
+        max_abs_leaf_value: f32::INFINITY,
     };
     let options = SplitSelectionOptions {
         l2_lambda: 1.0,
@@ -478,8 +479,28 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
             0.1,
             context.l2_lambda,
             &scaler,
+            f32::INFINITY,
         )
         .expect("owned leaves solve");
+    // This histogram-only API has no raw rows for an exact output check. A
+    // finite cap must therefore conservatively fall back; infinity remains
+    // available for this histogram oracle path.
+    assert!(
+        backend
+            .compute_linear_leaf_pair(
+                &owned,
+                oracle_split.feature_index,
+                oracle_split.threshold_bin as usize,
+                oracle_split.default_left,
+                options.missing_bin_index,
+                0.1,
+                context.l2_lambda,
+                &scaler,
+                0.5,
+            )
+            .is_none(),
+        "histogram-only PL solving must reject finite caps without row data"
+    );
 
     let prepared = backend
         .evaluate_shortlisted_linear_feature(
@@ -498,6 +519,63 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
     assert_eq!((prepared.left_leaf, prepared.right_leaf), oracle_leaves);
 }
 
+#[test]
+fn shortlisted_linear_feature_rejects_row_over_output_ceiling() {
+    let backend = CpuBackend;
+    let binned = BinnedMatrix::new(3, 1, 1, vec![0_u8, 0, 1]).expect("valid bins");
+    let gradients = vec![
+        GradientPair {
+            grad: 1.0e-6,
+            hess: 1.0e-6,
+        },
+        GradientPair {
+            grad: -1.0e-6,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 0.0,
+            hess: 1.0,
+        },
+    ];
+    let node = NodeSlice::new(0, vec![0, 1, 2]).expect("valid node");
+    let raw = vec![1000.0_f32, 0.0, 0.0];
+    let options = SplitSelectionOptions {
+        l2_lambda: 0.0,
+        min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
+        missing_bin_index: binned.missing_bin() as usize,
+        ..SplitSelectionOptions::default()
+    };
+    let context = LinearContext {
+        regressor_features: vec![0],
+        l2_lambda: 0.0,
+        max_abs_leaf_value: 0.5,
+    };
+
+    let prepared = backend
+        .evaluate_shortlisted_linear_feature(
+            &binned,
+            &gradients,
+            &node,
+            0,
+            &context,
+            &LinearFeatureScaler::identity(1),
+            &raw,
+            3,
+            1,
+            options,
+            1.0,
+            0.0,
+            None,
+        )
+        .expect("shortlisted evaluation succeeds");
+
+    assert!(
+        prepared.is_none(),
+        "shortlisted PL candidates must reject an actual row output above the cap"
+    );
+}
+
 fn legacy_parallel_partition_with_stats(
     binned_matrix: &BinnedMatrix,
     gradients: &[GradientPair],
@@ -506,7 +584,7 @@ fn legacy_parallel_partition_with_stats(
 ) -> (PartitionResult, NodeStats, NodeStats) {
     type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32, f32, f32);
 
-    let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
+    let chunk_size = crate::PARTITION_STATS_CHUNK_ROWS;
     let chunk_results: Vec<ChunkResult> = node
         .row_indices
         .par_chunks(chunk_size)
@@ -1584,19 +1662,36 @@ fn owned_partition_matches_parallel_chunk_statistic_order() {
     let node = NodeSlice::new(0, (0..ROWS as u32).collect()).expect("node");
     let split = split_candidate(0, 0, false, false, None);
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .expect("test pool")
-        .install(|| {
-            assert_eq!(rayon::current_num_threads(), 4);
-            let expected = legacy_parallel_partition_with_stats(&matrix, &gradients, &node, &split);
-            let actual = backend
-                .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
-                .expect("owned partition");
+    // The gradients above span 1e20 and 1.0 with alternating signs, so any
+    // change in reduction order shows up immediately in the summed node
+    // statistics. Partitioning must therefore produce bit-identical stats at
+    // every thread count -- AlloyGBM's byte-identical-across-`n_jobs`
+    // guarantee at its most sensitive point.
+    let mut results = Vec::new();
+    for threads in [1, 2, 4, 8] {
+        let node = node.clone();
+        let stats = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test pool")
+            .install(|| {
+                backend
+                    .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+                    .expect("owned partition")
+            });
+        results.push((threads, stats));
+    }
+    let (_, reference) = &results[0];
+    for (threads, actual) in &results[1..] {
+        assert_eq!(
+            actual, reference,
+            "partition statistics changed at {threads} threads"
+        );
+    }
 
-            assert_eq!(actual, expected);
-        });
+    // And it must still match a straightforward fixed-chunk reduction.
+    let expected = legacy_parallel_partition_with_stats(&matrix, &gradients, &node, &split);
+    assert_eq!(&results[0].1, &expected);
 }
 
 #[test]
@@ -2796,7 +2891,6 @@ fn split_scan_nested_rayon_multi_worker_selection_matches_sequential_scalar_orac
         .collect();
     let histograms = HistogramBundle::from_feature_histograms(7, features, true)
         .expect("parallel split fixture");
-    assert!(histograms.feature_count() >= CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD);
     let options = make_options(0.05, 0.1, 0.0, 0.0, 8);
     let expected = histograms
         .features()
@@ -3788,4 +3882,84 @@ fn dro_categorical_production_dispatch_retains_scalar_fallback() {
     let production = production.expect("categorical DRO production dispatch should split");
     assert!(production.is_categorical);
     assert_eq!(scalar.categorical_bitset, production.categorical_bitset);
+}
+
+#[test]
+fn histogram_kernels_index_gathered_gradients_by_position() {
+    // The histogram kernels take gradients already gathered into the node's
+    // row order, so they index by position in `row_indices` rather than by
+    // row. The fixture uses a scattered row list: with a contiguous `0..n`
+    // node -- which every other kernel test here uses -- position and row
+    // index coincide and a kernel that confused them would still pass.
+    let row_count = 16usize;
+    let feature_count = 3usize;
+    let max_bin = 3u16;
+    let bins = (0..row_count * feature_count)
+        .map(|cell| ((cell * 7 + cell / 3) % (max_bin as usize + 1)) as u8)
+        .collect::<Vec<_>>();
+    let matrix =
+        BinnedMatrix::new(row_count, feature_count, max_bin, bins).expect("binned matrix is valid");
+    let gradients = (0..row_count)
+        .map(|row| {
+            GradientPair::new(row as f32 * 1.5 - 4.0, 1.0 + row as f32 * 0.25)
+                .expect("gradient pair is finite")
+        })
+        .collect::<Vec<_>>();
+    let node = NodeSlice::new(0, vec![1, 4, 7, 11, 13]).expect("node indices are valid");
+    assert!(
+        node.row_indices
+            .iter()
+            .enumerate()
+            .any(|(position, &row)| position as u32 != row),
+        "fixture must use rows whose positions differ from their indices"
+    );
+
+    let bin_count = max_bin as usize + 1;
+    let node_gradients = CpuBackend::gather_node_gradients(&gradients, &node.row_indices);
+
+    let mut gathered_arena = HistogramArena::new(feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true>(
+        &matrix,
+        &node_gradients,
+        &node,
+        0,
+        feature_count,
+        &mut gathered_arena,
+    );
+    let gathered = gathered_arena.to_bundle(0, 0).expect("gathered bundle");
+
+    // Reference: the row-indexed oracle kernel, which looks up `gradients[row]`
+    // directly and so is independent of the gather.
+    let mut reference_arena = HistogramArena::new(feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_row_first(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        feature_count,
+        &mut reference_arena,
+    );
+    let reference = reference_arena.to_bundle(0, 0).expect("reference bundle");
+    assert_eq!(
+        gathered, reference,
+        "gathering gradients into node order must not change the histogram"
+    );
+
+    // Confirm the fixture is sharp enough to detect the mix-up it guards
+    // against: feeding the row-indexed array to a position-indexing kernel
+    // must produce a different histogram.
+    let mut mismatched_arena = HistogramArena::new(feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true>(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        feature_count,
+        &mut mismatched_arena,
+    );
+    let mismatched = mismatched_arena.to_bundle(0, 0).expect("mismatched bundle");
+    assert_ne!(
+        mismatched, reference,
+        "fixture cannot distinguish position indexing from row indexing"
+    );
 }

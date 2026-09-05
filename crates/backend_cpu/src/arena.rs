@@ -12,6 +12,22 @@ pub(crate) enum HistogramKernelPath {
     ArenaRowFirstUnrolled,
 }
 
+/// One bin's running totals, held interleaved.
+///
+/// The arena keeps its histograms as separate grad / hess / grad_sq / count
+/// arrays, which is the layout the split scanners read. Accumulating rows
+/// straight into those means every row update writes three or four *distinct*
+/// cache lines. Rows go into this interleaved scratch instead -- one line per
+/// update -- and are folded into the arena once per feature, which costs
+/// O(bins) rather than O(rows).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct BinAccumulator {
+    pub(crate) grad: f32,
+    pub(crate) hess: f32,
+    pub(crate) grad_sq: f32,
+    pub(crate) count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HistogramArena {
     pub(crate) bin_count: usize,
@@ -19,6 +35,11 @@ pub(crate) struct HistogramArena {
     pub(crate) hess_sums: Vec<f32>,
     pub(crate) grad_sq_sums: Option<Vec<f32>>,
     pub(crate) counts: Vec<u32>,
+    /// Per-feature interleaved accumulation scratch, `bin_count` long.
+    ///
+    /// Lives on the arena so it is reused for the life of the thread rather
+    /// than reallocated for every tile.
+    pub(crate) scratch: Vec<BinAccumulator>,
 }
 
 impl HistogramArena {
@@ -30,6 +51,7 @@ impl HistogramArena {
             hess_sums: vec![0.0; flat_len],
             grad_sq_sums: include_grad_sq.then(|| vec![0.0; flat_len]),
             counts: vec![0; flat_len],
+            scratch: vec![BinAccumulator::default(); bin_count],
         }
     }
 
@@ -63,6 +85,9 @@ impl HistogramArena {
             (None, true) => self.grad_sq_sums = Some(vec![0.0; flat_len]),
             (Some(_), false) => self.grad_sq_sums = None,
             (None, false) => {}
+        }
+        if self.scratch.len() != bin_count {
+            self.scratch.resize(bin_count, BinAccumulator::default());
         }
         self.reset();
     }

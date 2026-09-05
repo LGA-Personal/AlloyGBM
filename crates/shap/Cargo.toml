@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 alloygbm-core = { path = "../core" }
 alloygbm-engine = { path = "../engine" }
+rayon = "1.11"
 
 [dev-dependencies]
 alloygbm-predictor = { path = "../predictor" }

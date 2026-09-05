@@ -325,4 +325,5 @@ pub(crate) fn additivity_tolerance(predicted: f32) -> f32 {
     ADDITIVITY_ATOL + ADDITIVITY_RTOL * predicted.abs()
 }
 
+#[cfg(test)]
 pub(crate) const MAX_EXACT_SPLIT_FEATURES: usize = 25;

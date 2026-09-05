@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use rayon::prelude::*;
+
 use alloygbm_engine::{TrainedModel, TrainedStump};
 
 use crate::binning::BinningContext;
@@ -740,23 +742,28 @@ pub(crate) fn explain_rows_tree_shap(
     let expected_value = expected_value_f64 as f32;
     let use_float_compare = binning.is_some();
 
-    let mut row_contributions = Vec::with_capacity(rows.len());
-    for (row_index, row) in rows.iter().enumerate() {
-        let mut phi = tree_shap_row(&std_trees, row, model.feature_count, use_float_compare);
-        if has_linear {
-            distribute_linear_terms_for_row(model, row, baseline, binning, &mut phi);
-        }
-        let contributions: Vec<f32> = phi.iter().map(|v| *v as f32).collect();
-        verify_additivity(
-            model,
-            row,
-            &contributions,
-            row_index,
-            expected_value,
-            binning,
-        )?;
-        row_contributions.push(contributions);
-    }
+    // Rows are independent given the shared `std_trees`; explain them in
+    // parallel. Ordering is preserved by the indexed collect.
+    let row_contributions = rows
+        .par_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let mut phi = tree_shap_row(&std_trees, row, model.feature_count, use_float_compare);
+            if has_linear {
+                distribute_linear_terms_for_row(model, row, baseline, binning, &mut phi);
+            }
+            let contributions: Vec<f32> = phi.iter().map(|v| *v as f32).collect();
+            verify_additivity(
+                model,
+                row,
+                &contributions,
+                row_index,
+                expected_value,
+                binning,
+            )?;
+            Ok(contributions)
+        })
+        .collect::<ShapResult<Vec<_>>>()?;
 
     Ok(ShapExplanationBatch {
         expected_value,
@@ -841,26 +848,29 @@ pub(crate) fn explain_interactions_from_model(
     let expected_value = expected_value_f64 as f32;
     let use_float_compare = binning.is_some();
 
-    let mut all_matrices = Vec::with_capacity(rows.len());
     let has_linear = model_has_linear_leaves(model);
-    for row in rows {
-        let mut matrix_f64 =
-            tree_shap_interactions_row(&std_trees, row, model.feature_count, use_float_compare);
+    // Rows are independent given the shared `std_trees`; explain them in
+    // parallel. Ordering is preserved by the indexed collect.
+    let all_matrices: Vec<Vec<Vec<f32>>> = rows
+        .par_iter()
+        .map(|row| {
+            let mut matrix_f64 =
+                tree_shap_interactions_row(&std_trees, row, model.feature_count, use_float_compare);
 
-        if has_linear {
-            let mut linear_phi = vec![0.0_f64; model.feature_count];
-            distribute_linear_terms_for_row(model, row, baseline, binning, &mut linear_phi);
-            for i in 0..model.feature_count {
-                matrix_f64[i][i] += linear_phi[i];
+            if has_linear {
+                let mut linear_phi = vec![0.0_f64; model.feature_count];
+                distribute_linear_terms_for_row(model, row, baseline, binning, &mut linear_phi);
+                for i in 0..model.feature_count {
+                    matrix_f64[i][i] += linear_phi[i];
+                }
             }
-        }
 
-        let matrix_f32: Vec<Vec<f32>> = matrix_f64
-            .into_iter()
-            .map(|inner| inner.into_iter().map(|v| v as f32).collect())
-            .collect();
-        all_matrices.push(matrix_f32);
-    }
+            matrix_f64
+                .into_iter()
+                .map(|inner| inner.into_iter().map(|v| v as f32).collect())
+                .collect()
+        })
+        .collect();
 
     Ok(ShapInteractionBatch {
         expected_value,

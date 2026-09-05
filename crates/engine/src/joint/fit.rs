@@ -11,6 +11,7 @@ use alloygbm_core::{
 };
 use rayon::prelude::*;
 
+use crate::profiling::{RoundProfile, Stage as ProfileStage};
 use crate::{TrainedModel, TrainedStump, apply_scaled_prediction_buffer, encode_tree_node_id};
 
 use super::TREE_NODE_STRIDE;
@@ -303,7 +304,8 @@ fn fit_joint_inner(
             max_drop,
             normalize_type,
             sample_type,
-        } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+            skip_drop,
+        } => Some((drop_rate, max_drop, normalize_type, sample_type, skip_drop)),
         _ => None,
     };
     let mut dart_state = crate::DartState::default();
@@ -444,7 +446,13 @@ fn fit_joint_inner(
             _ => None,
         };
 
+    // The joint loop uses the same process-sequential profiler as the
+    // single-output trainer. Snapshotting remains outside the timed regions
+    // and is skipped entirely when profiling is disabled.
+    let mut profile = RoundProfile::new();
+
     for round in 0..n_estimators {
+        profile.note_round();
         // v0.10.3 warm-start: when continuing from a prior fit, all
         // per-round seeds, dropout indices, and `node_id` encodings
         // mix `global_round = round + initial_rounds` so a warm-resumed
@@ -458,7 +466,9 @@ fn fit_joint_inner(
         // fits on residuals of the dropped-out ensemble (mirrors the
         // single-output DART flow at crates/engine/src/lib.rs:4895).
         let dropped_tree_ids: Vec<usize> =
-            if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+            if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) =
+                dart_params
+            {
                 let contribution = dart_contribution.as_mut().ok_or_else(|| {
                     "joint DART contribution buffer was not initialized".to_string()
                 })?;
@@ -476,6 +486,7 @@ fn fit_joint_inner(
                         &dart_state.tree_weights,
                         params.seed,
                         global_round,
+                        skip_drop,
                     );
                     for &tree_id in &drops {
                         let w_old = dart_state.tree_weights[tree_id];
@@ -504,12 +515,14 @@ fn fit_joint_inner(
 
         // Compute per-output gradients on current predictions. Each output's
         // buffer is independent, so parallelize across K.
-        let mut grads_per_output = compute_joint_gradients(
-            &predictions,
-            &effective_targets,
-            per_output_objective,
-            group_id,
-        )?;
+        let mut grads_per_output = profile.time(ProfileStage::Gradients, || {
+            compute_joint_gradients(
+                &predictions,
+                &effective_targets,
+                per_output_objective,
+                group_id,
+            )
+        })?;
 
         // v0.10.6: per_round_gradient — project each per-output gradient
         // buffer through the factor projector. Applied BEFORE row sampling
@@ -560,42 +573,44 @@ fn fit_joint_inner(
         // matching LightGBM's `bagging_fraction` semantics where every
         // row's predictions are updated each round, but the tree itself
         // is fit on the sampled subset.
-        let sampled_rows_opt: Option<Vec<u32>> = if let Some(rows) =
-            select_joint_row_indices_for_round(
+        let sampled_rows_opt: Option<Vec<u32>> = profile.time(ProfileStage::RowSampling, || {
+            if let Some(rows) = select_joint_row_indices_for_round(
                 params.boosting_mode,
                 n_rows,
                 params.seed,
                 global_round as u64,
                 &mut grads_per_output,
             ) {
-            Some(rows)
-        } else if params.row_subsample < 1.0 {
-            let mut rng_state: u64 = params.seed.wrapping_mul(0x9E3779B97F4A7C15)
-                ^ ((global_round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
-            if rng_state == 0 {
-                rng_state = 0xDEADBEEFCAFEBABE;
-            }
-            let rate = params.row_subsample;
-            let mut sampled: Vec<u32> = Vec::with_capacity(n_rows / 2 + 1);
-            for row in 0..n_rows {
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                let u01 = ((rng_state >> 11) & ((1u64 << 24) - 1)) as f32 / ((1u64 << 24) as f32);
-                if u01 < rate {
-                    sampled.push(row as u32);
+                Some(rows)
+            } else if params.row_subsample < 1.0 {
+                let mut rng_state: u64 = params.seed.wrapping_mul(0x9E3779B97F4A7C15)
+                    ^ ((global_round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
+                if rng_state == 0 {
+                    rng_state = 0xDEADBEEFCAFEBABE;
                 }
-            }
-            // Edge case: nothing sampled. Fall back to all-rows for this
-            // round so the trainer doesn't produce a degenerate empty tree.
-            if sampled.is_empty() {
-                None
+                let rate = params.row_subsample;
+                let mut sampled: Vec<u32> = Vec::with_capacity(n_rows / 2 + 1);
+                for row in 0..n_rows {
+                    rng_state ^= rng_state << 13;
+                    rng_state ^= rng_state >> 7;
+                    rng_state ^= rng_state << 17;
+                    let u01 =
+                        ((rng_state >> 11) & ((1u64 << 24) - 1)) as f32 / ((1u64 << 24) as f32);
+                    if u01 < rate {
+                        sampled.push(row as u32);
+                    }
+                }
+                // Edge case: nothing sampled. Fall back to all-rows for this
+                // round so the trainer doesn't produce a degenerate empty tree.
+                if sampled.is_empty() {
+                    None
+                } else {
+                    Some(sampled)
+                }
             } else {
-                Some(sampled)
+                None
             }
-        } else {
-            None
-        };
+        });
         // Gradients pass through unchanged; the trainer indexes them by
         // row id from the (potentially filtered) row_indices list.
         let active_grads: &[Vec<GradientPair>] = grads_per_output.as_slice();
@@ -603,35 +618,38 @@ fn fit_joint_inner(
         // Build one shared tree. Dispatch on tree_growth: leaf-wise uses
         // the priority-queue best-first builder gated by `max_leaves`;
         // level-wise uses the BFS depth-bounded builder.
-        let mut round_result = if params.tree_growth == TreeGrowth::Leaf {
-            let max_leaves = params.max_leaves.ok_or_else(|| {
-                "tree_growth='leaf' requires max_leaves to be set on the joint trainer".to_string()
-            })?;
-            build_joint_round_leafwise(
-                params,
-                binned_matrix,
-                active_grads,
-                n_outputs,
-                max_leaves,
-                categorical_features,
-                global_round,
-                sampled_rows_opt.as_deref(),
-                morph_ctx.as_ref(),
-                factor_exposures,
-            )?
-        } else {
-            build_joint_round_inner(
-                params,
-                binned_matrix,
-                active_grads,
-                n_outputs,
-                categorical_features,
-                global_round,
-                sampled_rows_opt.as_deref(),
-                morph_ctx.as_ref(),
-                factor_exposures,
-            )?
-        };
+        let mut round_result = profile.time(ProfileStage::TreeBuild, || {
+            if params.tree_growth == TreeGrowth::Leaf {
+                let max_leaves = params.max_leaves.ok_or_else(|| {
+                    "tree_growth='leaf' requires max_leaves to be set on the joint trainer"
+                        .to_string()
+                })?;
+                build_joint_round_leafwise(
+                    params,
+                    binned_matrix,
+                    active_grads,
+                    n_outputs,
+                    max_leaves,
+                    categorical_features,
+                    global_round,
+                    sampled_rows_opt.as_deref(),
+                    morph_ctx.as_ref(),
+                    factor_exposures,
+                )
+            } else {
+                build_joint_round_inner(
+                    params,
+                    binned_matrix,
+                    active_grads,
+                    n_outputs,
+                    categorical_features,
+                    global_round,
+                    sampled_rows_opt.as_deref(),
+                    morph_ctx.as_ref(),
+                    factor_exposures,
+                )
+            }
+        })?;
         if round_result.stumps.is_empty() {
             break;
         }
@@ -704,16 +722,18 @@ fn fit_joint_inner(
         // `round_result.stumps` are still pre-encode at this point
         // (local node IDs); the helper extracts local IDs via
         // `node_id % TREE_NODE_STRIDE` which works under both encodings.
-        walk_tree_into_predictions(
-            &round_result.stumps,
-            binned_matrix,
-            feature_count,
-            n_rows,
-            n_outputs,
-            &mut predictions,
-            1.0,
-            1.0,
-        );
+        profile.time(ProfileStage::PredictionUpdate, || {
+            walk_tree_into_predictions(
+                &round_result.stumps,
+                binned_matrix,
+                feature_count,
+                n_rows,
+                n_outputs,
+                &mut predictions,
+                1.0,
+                1.0,
+            );
+        });
 
         // Re-encode node_id to be globally unique across rounds (joint
         // trainer outputs one tree per round; local_node_id stays the
@@ -735,7 +755,7 @@ fn fit_joint_inner(
         // down to `new_w = 1 / (K + 1)`, and re-add each dropped tree
         // at its rescaled weight. Mirrors the single-output DART
         // finalize block in crates/engine/src/lib.rs:5118.
-        if let Some((_, _, normalize_type, _)) = dart_params {
+        if let Some((_, _, normalize_type, _, _)) = dart_params {
             let k = dropped_tree_ids.len() as f32;
             let new_w = 1.0 / (k + 1.0);
             let drop_factor = match normalize_type {
@@ -786,6 +806,11 @@ fn fit_joint_inner(
         }
     }
 
+    // Freeze loop timing before DART stamping, metadata assembly, or model
+    // construction so finalization is excluded from `loop_wall_ns`.
+    let profile_snapshot =
+        profile.snapshot_if_enabled(n_rows, feature_count, rayon::current_num_threads());
+
     // v0.10.3 joint DART: stamp the per-tree `tree_weight` onto every
     // stump in that tree so the artifact's `DartTreeWeights` section
     // round-trips correctly. Mirrors the multiclass DART stamping
@@ -835,6 +860,7 @@ fn fit_joint_inner(
     // so a downstream consumer can decode "total tree count" from a
     // single integer.
     let total_rounds_completed = initial_rounds + rounds_completed;
+    profile.report(profile_snapshot.as_ref());
 
     Ok(JointTrainingSummary {
         baselines,

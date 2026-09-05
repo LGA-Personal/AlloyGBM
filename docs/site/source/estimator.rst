@@ -17,12 +17,19 @@ Core parameters
   - additive update step size
 - ``max_depth: int = 6``
   - maximum tree depth
-- ``n_estimators: int = 6``
+- ``n_estimators: int = 100``
   - requested boosting rounds
 - ``row_subsample: float = 1.0``
   - per-round row sampling fraction; ignored when ``boosting_mode="goss"`` (GOSS uses gradient-based sampling instead).
 - ``col_subsample: float = 1.0``
   - per-round feature sampling fraction
+- ``colsample_bynode: float = 1.0`` -- fraction of features considered as split
+  candidates at each individual tree node, composing multiplicatively with
+  ``col_subsample``'s per-tree sampling and with any ``interaction_constraints``.
+  Must be in ``(0.0, 1.0]``; ``1.0`` is inert. Supported on ``GBMRegressor``,
+  binary ``GBMClassifier``, and ``GBMRanker``. Multiclass ``GBMClassifier`` and
+  ``MultiLabelGBMRanker(multi_label_mode="joint")`` reject a value below ``1.0``
+  rather than silently ignoring it.
 - ``quantile_alpha: float = 0.5``
   - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 
@@ -79,6 +86,13 @@ Boosting mode
   ``"uniform"`` picks each tree independently with probability
   ``dart_drop_rate``.  ``"weighted"`` biases dropout probability
   toward heavier-weight trees.
+- ``dart_skip_drop: float = 0.5`` -- probability that a round performs no
+  dropout at all, rolled once per round independently of the per-tree draws
+  (LightGBM's ``skip_drop``). Letting the ensemble consolidate on some
+  rounds is both faster and usually more accurate; ``0.0`` reproduces
+  always-drop behaviour. Measured on California housing (200 rounds):
+  ``0.0`` gave 1.21 s / RMSE 0.6241 against 0.77 s / RMSE 0.4815 at the
+  ``0.5`` default (LightGBM DART: 1.18 s / RMSE 0.5238).
 
 GOSS and DART are supported on the binary classifier / regression /
 ranking single-output objectives and multiclass classification. For
@@ -222,12 +236,34 @@ per feature, and persisted models retain the native cuts and methods.
 Exact feature bundling
 ----------------------
 
-``feature_bundling="exact"`` can reduce histogram work for dense matrices that
-contain contiguous one-hot or otherwise mutually exclusive sparse numeric
-columns. Bundling is training-only: trees, feature names, importances, SHAP
-arrays, and persisted artifacts continue to use original feature indices.
+``feature_bundling="exact"`` groups mutually exclusive sparse numeric columns
+(contiguous one-hot blocks and the like) into shared storage columns.
+Bundling is training-only: trees, feature names, importances, SHAP arrays, and
+persisted artifacts continue to use original feature indices, and a bundled
+fit produces a **byte-identical artifact** to the same fit with bundling off.
 ``feature_bundling_diagnostics_`` reports activation, original/effective
 feature counts, bundle counts, skipped features, and observed conflicts.
+
+.. important::
+
+   Bundle discovery treats **bin 0** as a feature's "empty" value. Only
+   ``continuous_binning_strategy="linear"`` reliably maps a raw ``0.0`` to
+   bin 0; under the default ``"quantile"`` strategy a sparse column's zeros
+   may land in a higher bin, so every candidate is skipped and training runs
+   unbundled. AlloyGBM emits a ``UserWarning`` naming this cause whenever
+   ``feature_bundling="exact"`` yields no bundles, and
+   ``feature_bundling_diagnostics_["active"]`` stays ``False``.
+
+.. note::
+
+   Bundling currently reduces *storage* and histogram memory traffic, but it
+   does not yet reduce split-search work: per-original-feature histograms are
+   still materialized and scanned, so wall-clock fit time is typically
+   unchanged. Realising EFB's usual speedup requires a bundle-aware split
+   scanner, which would also give up the byte-identical-artifact guarantee
+   above (bundle-level accumulation changes float summation order). Treat
+   this parameter as a storage/compatibility feature rather than a speed
+   knob for now.
 
 The first implementation skips categorical, monotone-constrained,
 interaction-constrained, missing-valued, greater-than-quarter-occupied, and
@@ -522,8 +558,14 @@ MorphBoost (Adaptive Split Criterion)
 GBMRegressor (and the classifier / ranker subclasses) support an opt-in
 MorphBoost training mode. See :doc:`morphboost` for the full guide.
 
-- ``training_mode: str = "auto"`` -- one of ``"auto"`` (default), ``"manual"``,
-  or ``"morph"``.
+- ``training_mode: str = "auto"`` -- split-criterion selector: ``"auto"``
+  (default), ``"manual"``, or ``"morph"``. ``"morph"`` enables the MorphBoost
+  adaptive criterion described below. ``"auto"`` delegates the choice to
+  AlloyGBM and currently resolves to the standard criterion, making it
+  behaviourally identical to ``"manual"`` today; the distinction is that
+  ``"auto"`` may become adaptive in a future release, whereas ``"manual"``
+  is a commitment to the standard criterion. Pin ``"manual"`` if you need
+  the criterion to stay fixed across upgrades.
 - ``morph_rate: float = 0.1`` -- per-iteration leaf shrinkage rate.
 - ``evolution_pressure: float = 0.2`` -- EMA-driven gain shaping strength.
 - ``morph_warmup_iters: int = 5`` -- rounds before the morph blend engages.

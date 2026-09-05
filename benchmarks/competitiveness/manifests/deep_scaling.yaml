@@ -1,0 +1,33 @@
+schema: alloygbm-competitiveness/v1
+seed: 20260904
+warmup_repetitions: 1
+timed_repetitions: 3
+# Thread counts 1, 4, and 10 are runner invocations, not duplicated scenarios.
+scenarios:
+  - {name: dense_r100000_f20_d4, fixture: nightly_dense, task: regression, rows: 100000, features: 20, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f20_d8, fixture: nightly_dense, task: regression, rows: 100000, features: 20, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f20_d12, fixture: nightly_dense, task: regression, rows: 100000, features: 20, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f100_d4, fixture: nightly_dense, task: regression, rows: 100000, features: 100, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f100_d8, fixture: nightly_dense, task: regression, rows: 100000, features: 100, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f100_d12, fixture: nightly_dense, task: regression, rows: 100000, features: 100, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f500_d4, fixture: nightly_dense, task: regression, rows: 100000, features: 500, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f500_d8, fixture: nightly_dense, task: regression, rows: 100000, features: 500, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r100000_f500_d12, fixture: nightly_dense, task: regression, rows: 100000, features: 500, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f20_d4, fixture: nightly_dense, task: regression, rows: 500000, features: 20, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f20_d8, fixture: nightly_dense, task: regression, rows: 500000, features: 20, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f20_d12, fixture: nightly_dense, task: regression, rows: 500000, features: 20, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f100_d4, fixture: nightly_dense, task: regression, rows: 500000, features: 100, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f100_d8, fixture: nightly_dense, task: regression, rows: 500000, features: 100, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f100_d12, fixture: nightly_dense, task: regression, rows: 500000, features: 100, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f500_d4, fixture: nightly_dense, task: regression, rows: 500000, features: 500, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f500_d8, fixture: nightly_dense, task: regression, rows: 500000, features: 500, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r500000_f500_d12, fixture: nightly_dense, task: regression, rows: 500000, features: 500, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f20_d4, fixture: nightly_dense, task: regression, rows: 1000000, features: 20, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f20_d8, fixture: nightly_dense, task: regression, rows: 1000000, features: 20, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f20_d12, fixture: nightly_dense, task: regression, rows: 1000000, features: 20, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f100_d4, fixture: nightly_dense, task: regression, rows: 1000000, features: 100, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f100_d8, fixture: nightly_dense, task: regression, rows: 1000000, features: 100, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f100_d12, fixture: nightly_dense, task: regression, rows: 1000000, features: 100, rounds: 200, depth: 12, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f500_d4, fixture: nightly_dense, task: regression, rows: 1000000, features: 500, rounds: 200, depth: 4, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f500_d8, fixture: nightly_dense, task: regression, rows: 1000000, features: 500, rounds: 200, depth: 8, metric: rmse, input_representation: dense}
+  - {name: dense_r1000000_f500_d12, fixture: nightly_dense, task: regression, rows: 1000000, features: 500, rounds: 200, depth: 12, metric: rmse, input_representation: dense}

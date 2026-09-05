@@ -314,6 +314,7 @@ fn select_node_split<B: BackendOps>(
     feature_scaler: &LinearFeatureScaler,
     parent_leaf_value: f32,
     parent_linear_leaf: Option<&LinearLeaf>,
+    max_abs_leaf_value: f32,
 ) -> EngineResult<Option<SelectedNodeSplit>> {
     let legacy_path = params.leaf_model != LeafModelKind::Linear
         || params.pl_split_candidates == 0
@@ -369,6 +370,7 @@ fn select_node_split<B: BackendOps>(
             let linear_context = LinearContext {
                 regressor_features,
                 l2_lambda: options.l2_lambda,
+                max_abs_leaf_value,
             };
             backend.evaluate_shortlisted_linear_feature(
                 binned_matrix,
@@ -461,6 +463,26 @@ fn propose_level_node<B: BackendOps>(
         &node.row_indices,
     );
     let parent_row_count = node.row_indices.len();
+
+    // A node with fewer than two leaves' worth of rows cannot produce a split
+    // that both children survive, so every candidate it could offer is already
+    // known to be rejected below. Deciding that here skips a full scan of every
+    // feature's bins for the node.
+    //
+    // This matters most exactly where it is cheapest to check: split-finding
+    // cost is `nodes x features x bins` and does not fall with node size, so on
+    // deep trees it is the dominant term -- 62% of a depth-12 fit -- and the
+    // deepest levels are precisely where nodes are too small to split.
+    //
+    // The tree is unchanged: such a node becomes a leaf either way, and for the
+    // same recorded reason.
+    if parent_row_count < context.controls.min_rows_per_leaf.saturating_mul(2) {
+        return Ok(LevelNodeOutcome::rejected(
+            local_node_id,
+            IterationStopReason::LeafRowsBelowThreshold,
+        ));
+    }
+
     let filtered_histograms_storage = filter_histograms_for_node(
         &histograms,
         context.constraint_index,
@@ -489,6 +511,7 @@ fn propose_level_node<B: BackendOps>(
         context.feature_scaler,
         parent_leaf_value,
         parent_linear_leaf.as_ref(),
+        context.controls.max_abs_leaf_value,
     )?
     else {
         return Ok(LevelNodeOutcome::no_split(local_node_id));
@@ -663,6 +686,7 @@ fn propose_level_node<B: BackendOps>(
                     &partition.right_row_indices,
                     scheduled_lr,
                     context.split_options.l2_lambda,
+                    context.controls.max_abs_leaf_value,
                 )
             })
             .map(|(mut left_absolute, mut right_absolute)| {
@@ -895,11 +919,28 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
         }
 
         let parallelize_nodes = should_parallelize_level(&active_nodes, feature_tiles);
-        let histogram_execution = if parallelize_nodes {
-            HistogramExecution::Sequential
-        } else {
-            HistogramExecution::Parallel
-        };
+        // Node-level and tile-level parallelism used to be strictly
+        // either/or, which starved the shallow levels: level-wise growth has
+        // 2 nodes at depth 1, 4 at depth 2, 8 at depth 3, so on a 10-core box
+        // those levels ran 2-, 4-, and 8-wide while tile parallelism sat
+        // switched off -- and each level touches roughly the whole row set, so
+        // they are not cheap levels to under-fill.
+        //
+        // Nest the two only when the node loop cannot fill the pool on its
+        // own. Once there are at least as many nodes as threads the outer
+        // loop already saturates, and adding an inner fork/join there just
+        // buys contention (the same effect that made nested split-finding a
+        // regression). Below that point the inner tile work is a histogram
+        // pass over many rows -- substantial enough to be worth stealing.
+        //
+        // Neither choice affects the trained model: tiles accumulate disjoint
+        // features, so per-feature bin sums are identical either way.
+        let histogram_execution =
+            if parallelize_nodes && active_nodes.len() >= rayon::current_num_threads() {
+                HistogramExecution::Sequential
+            } else {
+                HistogramExecution::Parallel
+            };
         let context = LevelProposalContext {
             backend,
             binned_matrix,
@@ -1184,6 +1225,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         &feature_scaler,
         0.0,
         None,
+        controls.max_abs_leaf_value,
     )?;
 
     let Some(SelectedNodeSplit {
@@ -1404,6 +1446,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                         &partition.right_row_indices,
                         scheduled_lr,
                         split_options.l2_lambda,
+                        controls.max_abs_leaf_value,
                     )
                 })
                 .map(|(mut ll_abs, mut rl_abs)| {
@@ -1643,6 +1686,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 &feature_scaler,
                 smaller_parent_val,
                 smaller_parent_ll.as_ref(),
+                controls.max_abs_leaf_value,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1697,6 +1741,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 &feature_scaler,
                 larger_parent_val,
                 larger_parent_ll.as_ref(),
+                controls.max_abs_leaf_value,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1993,6 +2038,7 @@ mod linear_leaf_path_tests {
             &LinearFeatureScaler::identity(3),
             0.0,
             None,
+            f32::INFINITY,
         )
         .expect("selector succeeds")
         .expect("selector returns a split")

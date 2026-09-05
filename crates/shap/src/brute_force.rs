@@ -7,11 +7,15 @@ use crate::binning::{
     ADDITIVITY_ATOL, ADDITIVITY_RTOL, BinningContext, TREE_NODE_STRIDE, additivity_tolerance,
 };
 use crate::error::{ShapError, ShapResult};
-use crate::linear_leaf::{
-    distribute_linear_terms_for_row, leaf_constant_part, model_has_linear_leaves,
-};
+use crate::linear_leaf::model_has_linear_leaves;
+// The brute-force Shapley implementation is retained only as a parity oracle
+// for the TreeSHAP tests; every production path routes through TreeSHAP.
+#[cfg(test)]
+use crate::linear_leaf::{distribute_linear_terms_for_row, leaf_constant_part};
+#[cfg(test)]
 use crate::types::{ModelStructure, ShapExplanationBatch, build_model_structure};
 
+#[cfg(test)]
 pub(crate) fn explain_rows_brute_force(
     model: &TrainedModel,
     rows: &[Vec<f32>],
@@ -74,6 +78,7 @@ pub(crate) fn explain_rows_brute_force(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn compute_subset_expectations(
     model: &TrainedModel,
     row: &[f32],
@@ -140,6 +145,7 @@ pub(crate) fn stump_goes_left(
     }
 }
 
+#[cfg(test)]
 fn expected_prediction_for_subset(
     model: &TrainedModel,
     row: &[f32],
@@ -163,6 +169,7 @@ fn expected_prediction_for_subset(
     Ok(prediction)
 }
 
+#[cfg(test)]
 fn expected_subtree(
     tree_id: u32,
     local_node_id: u32,
@@ -261,6 +268,7 @@ fn expected_subtree(
     Ok(left_probability * left_expected + right_probability * right_expected)
 }
 
+#[cfg(test)]
 pub(crate) fn shapley_values_for_row_f64(
     model: &TrainedModel,
     _row: &[f32],
@@ -451,6 +459,7 @@ pub(crate) fn local_path_predict(
     prediction
 }
 
+#[cfg(test)]
 pub(crate) fn factorial_table(max_value: usize) -> Vec<f64> {
     let mut factorials = vec![1.0_f64; max_value + 1];
     for value in 1..=max_value {
@@ -463,6 +472,7 @@ pub(crate) fn tree_local_key(tree_id: u32, local_node_id: u32) -> u64 {
     ((tree_id as u64) << 32) | local_node_id as u64
 }
 
+#[cfg(test)]
 fn left_child_local_id(local_node_id: u32) -> ShapResult<u32> {
     local_node_id
         .checked_mul(2)
@@ -470,6 +480,7 @@ fn left_child_local_id(local_node_id: u32) -> ShapResult<u32> {
         .ok_or_else(|| ShapError::ContractViolation("left child node id overflow".to_string()))
 }
 
+#[cfg(test)]
 fn right_child_local_id(local_node_id: u32) -> ShapResult<u32> {
     local_node_id
         .checked_mul(2)

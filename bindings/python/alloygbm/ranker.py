@@ -38,6 +38,16 @@ _OBJECTIVE_NAME_MAP = {
 }
 
 
+# LightGBM's lambdarank_truncation_level default. NDCG is top-heavy, so
+# pairs deep in the ranking contribute little while all-pairs scoring is
+# O(n^2) per query group.
+DEFAULT_LAMBDARANK_TRUNCATION_LEVEL = 30
+
+# LightGBM's `lambdarank_norm` default. Per-query lambda normalization keeps
+# queries with very different document counts contributing comparably.
+DEFAULT_LAMBDARANK_NORMALIZE = True
+
+
 class GBMRanker(_GBMEstimatorCore):
     """Gradient Boosted Decision Tree learning-to-rank estimator.
 
@@ -64,14 +74,34 @@ class GBMRanker(_GBMEstimatorCore):
         Sigmoid sharpness for pairwise ranking-family objectives
         (``"rank:pairwise"``, ``"rank:ndcg"``, and ``"yetirank"``).
         Higher values make pairwise score margins steeper.
-    lambdarank_truncation_level : int | None, default ``None``
+    lambdarank_truncation_level : int | None, default ``30``
         For ``"rank:ndcg"``, restrict pairwise LambdaMART gradients to pairs
-        where at least one document is currently ranked in the top-k positions.
-        ``None`` scores all pairs.
-    lambdarank_normalize : bool, default ``False``
-        For ``"rank:ndcg"``, apply per-query LambdaMART lambda normalization.
-        This can improve behavior on unbalanced query groups. ``False``
-        preserves the original unnormalized objective.
+        where at least one document is currently ranked in the top-k
+        positions. The default matches LightGBM's
+        ``lambdarank_truncation_level``.
+
+        This is a speed/quality trade-off, and which side wins depends on
+        your group sizes. Scoring all pairs (``None``) is ``O(n^2)`` per
+        query group, so it dominates fit time once groups get large, but it
+        also uses more of the ranking signal. On a synthetic benchmark with
+        50 groups of 2,000 documents, ``30`` fit in 2.05 s for NDCG 0.9735
+        while ``None`` took 3.65 s for NDCG 0.9901 (LightGBM's default:
+        0.47 s, NDCG 0.9727).
+
+        Rule of thumb: with small groups (tens of documents, typical of
+        search relevance data) a truncation level at or above the group size
+        is effectively all-pairs and costs nothing, so the default is
+        harmless. With large groups (thousands of documents, typical of
+        financial cross-sections) the default discards most pairs — raise it
+        or pass ``None`` if ranking quality matters more than fit time.
+    lambdarank_normalize : bool, default ``True``
+        For ``"rank:ndcg"``, apply per-query LambdaMART lambda normalization,
+        which keeps queries with very different document counts contributing
+        comparably. Matches LightGBM's ``lambdarank_norm`` default. Measured
+        NDCG@10 improvement on the benchmark suite: 0.6524 to 0.6907 on
+        ``california_ranking`` (uneven groups, median 120 / max 3307 docs) and
+        0.9649 to 0.9697 on uniform 50-document groups. Pass ``False`` for the
+        unnormalized objective.
     """
 
     def __init__(
@@ -79,8 +109,8 @@ class GBMRanker(_GBMEstimatorCore):
         *,
         ranking_objective: str = "rank:ndcg",
         ranking_sigma: float = 1.0,
-        lambdarank_truncation_level: int | None = None,
-        lambdarank_normalize: bool = False,
+        lambdarank_truncation_level: int | None = DEFAULT_LAMBDARANK_TRUNCATION_LEVEL,
+        lambdarank_normalize: bool = DEFAULT_LAMBDARANK_NORMALIZE,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
@@ -119,7 +149,7 @@ class GBMRanker(_GBMEstimatorCore):
         _inspect.Parameter(
             "lambdarank_truncation_level",
             _inspect.Parameter.KEYWORD_ONLY,
-            default=None,
+            default=DEFAULT_LAMBDARANK_TRUNCATION_LEVEL,
             annotation=int | None,
         )
     )
@@ -127,7 +157,7 @@ class GBMRanker(_GBMEstimatorCore):
         _inspect.Parameter(
             "lambdarank_normalize",
             _inspect.Parameter.KEYWORD_ONLY,
-            default=False,
+            default=DEFAULT_LAMBDARANK_NORMALIZE,
             annotation=bool,
         )
     )

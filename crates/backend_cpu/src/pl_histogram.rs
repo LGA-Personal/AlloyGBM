@@ -482,10 +482,12 @@ mod tests {
                 hess_sum: histogram_pair.3,
                 learning_rate: 0.05,
                 l2_lambda: 0.01,
+                max_abs_leaf_value: f32::INFINITY,
             },
             &[0],
             &scaler,
-        );
+        )
+        .expect("bounded leaf");
         let histogram_right = crate::pl::solve_pl_leaf(
             &histogram_pair.4,
             &histogram_pair.5,
@@ -494,10 +496,12 @@ mod tests {
                 hess_sum: histogram_pair.7,
                 learning_rate: 0.05,
                 l2_lambda: 0.01,
+                max_abs_leaf_value: f32::INFINITY,
             },
             &[0],
             &scaler,
-        );
+        )
+        .expect("bounded leaf");
 
         let direct = crate::pl::solve_pl_leaf_pair_from_partitions(
             &binned,
@@ -513,6 +517,7 @@ mod tests {
             &[1, 2, 3],
             0.05,
             0.01,
+            f32::INFINITY,
         )
         .expect("direct partition solve succeeds");
 
@@ -555,10 +560,12 @@ mod tests {
                 hess_sum: histogram_pair.3,
                 learning_rate: 0.05,
                 l2_lambda: 0.01,
+                max_abs_leaf_value: f32::INFINITY,
             },
             &[1],
             &scaler,
-        );
+        )
+        .expect("bounded leaf");
         let histogram_right = crate::pl::solve_pl_leaf(
             &histogram_pair.4,
             &histogram_pair.5,
@@ -567,10 +574,12 @@ mod tests {
                 hess_sum: histogram_pair.7,
                 learning_rate: 0.05,
                 l2_lambda: 0.01,
+                max_abs_leaf_value: f32::INFINITY,
             },
             &[1],
             &scaler,
-        );
+        )
+        .expect("bounded leaf");
 
         let direct = crate::pl::solve_pl_leaf_pair_from_partitions(
             &binned,
@@ -586,6 +595,7 @@ mod tests {
             &[1, 2, 3],
             0.05,
             0.01,
+            f32::INFINITY,
         )
         .expect("direct partition solve succeeds");
 

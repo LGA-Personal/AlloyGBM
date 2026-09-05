@@ -410,3 +410,90 @@ def test_multi_label_fit_is_exact_across_thread_counts(mode):
         targets,
         group=group,
     )
+
+
+def test_large_fit_is_exact_across_thread_counts():
+    """Thread-invariance must hold at scale, not just on toy inputs.
+
+    The other exactness tests in this file use ~1k rows. AlloyGBM's partition
+    statistics are reduced in chunks, and while the chunk *width* was derived
+    from the thread count the reduction order changed with ``n_jobs``. On small
+    inputs the resulting drift stayed below the last mantissa bit of every leaf
+    value, so those tests passed while fits from roughly 200k rows upward
+    produced genuinely different artifacts at different thread counts.
+
+    This case is sized and shaped to expose reduction-order drift: enough rows
+    for many chunks, and a target whose magnitudes span several orders so that
+    reassociating the sums is visible rather than absorbed.
+    """
+    rng = np.random.default_rng(20260831)
+    # 100k rows / 5 rounds is the smallest configuration measured to reproduce
+    # the pre-fix drift; 60k did not, which is why a smaller case would be a
+    # vacuous regression test.
+    rows = 100_000
+    X = rng.normal(size=(rows, 8)).astype(np.float32)
+    signal = 3.0 * X[:, 0] - 2.0 * X[:, 1]
+    # A heavy-tailed target: large values dominate a naive running sum, so any
+    # change in accumulation order shifts the totals.
+    scale = np.where(np.arange(rows) % 997 == 0, 1.0e6, 1.0).astype(np.float32)
+    y = (signal * scale).astype(np.float32)
+
+    artifacts = {}
+    for n_jobs in (1, 2, 5, 8):
+        model = GBMRegressor(
+            n_estimators=5,
+            max_depth=6,
+            learning_rate=0.1,
+            seed=20260831,
+            deterministic=True,
+            n_jobs=n_jobs,
+        ).fit(X, y)
+        artifacts[n_jobs] = bytes(model.artifact_bytes)
+
+    reference = artifacts[1]
+    for n_jobs, artifact in artifacts.items():
+        assert artifact == reference, (
+            f"artifact from n_jobs={n_jobs} differs from the single-threaded fit; "
+            "thread count must never change the trained model"
+        )
+
+
+def test_subsampled_fit_is_exact_across_thread_counts():
+    """Row subsampling must not make the fit thread-dependent.
+
+    With ``row_subsample < 1.0`` the tree builders apply each round only to the
+    sampled rows, and the complement is replayed afterwards to complete the
+    candidate predictions. That replay runs in parallel once the complement is
+    large enough (>= 32,768 rows), so this fixture is sized to cross the
+    threshold -- 300k rows at 0.7 leaves ~90k rows on the parallel path, while
+    the smaller fixtures elsewhere in this file stay on the serial one and
+    would not exercise it.
+
+    The replay is a pure scatter (each row writes only its own slot), so it is
+    expected to be bit-identical however it is divided; this pins that.
+    """
+    rng = np.random.default_rng(20260901)
+    rows = 300_000
+    X = rng.normal(size=(rows, 24)).astype(np.float32)
+    # Heavy-tailed as above, so reordering would surface rather than absorb.
+    scale = np.where(np.arange(rows) % 997 == 0, 1.0e6, 1.0).astype(np.float32)
+    y = (X[:, :4].sum(axis=1) * scale).astype(np.float32)
+
+    artifacts = {}
+    for n_jobs in (1, 2, 4, 8):
+        model = GBMRegressor(
+            n_estimators=8,
+            max_depth=6,
+            row_subsample=0.7,
+            seed=20260901,
+            deterministic=True,
+            n_jobs=n_jobs,
+        ).fit(X, y)
+        artifacts[n_jobs] = bytes(model.artifact_bytes)
+
+    reference = artifacts[1]
+    for n_jobs, artifact in artifacts.items():
+        assert artifact == reference, (
+            f"subsampled artifact from n_jobs={n_jobs} differs from the "
+            "single-threaded fit; complement replay must stay order-independent"
+        )

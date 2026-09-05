@@ -2798,6 +2798,7 @@ mod tests {
                 max_drop: 4,
                 normalize_type: DartNormalize::Tree,
                 sample_type: DartSampleType::Uniform,
+                skip_drop: 0.0,
             },
             ..TrainParams::default()
         };

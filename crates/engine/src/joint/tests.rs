@@ -2285,6 +2285,7 @@ fn joint_dart_produces_non_uniform_tree_weights() {
             max_drop: 5,
             normalize_type: DartNormalize::Tree,
             sample_type: DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -2345,6 +2346,7 @@ fn joint_dart_round_trips_through_predictor() {
             max_drop: 3,
             normalize_type: DartNormalize::Tree,
             sample_type: DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -2404,6 +2406,7 @@ fn joint_dart_aggregate_matches_repeated_walk_oracle_across_multiple_drops() {
             max_drop: 2,
             normalize_type: DartNormalize::Forest,
             sample_type: DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -2430,6 +2433,7 @@ fn joint_dart_aggregate_matches_repeated_walk_oracle_across_multiple_drops() {
             &replayed_weights,
             41,
             round,
+            0.0,
         );
         drops_with_multiple_trees += usize::from(drops.len() >= 2);
         crate::apply_normalization(&mut replayed_weights, &drops, DartNormalize::Forest, round);

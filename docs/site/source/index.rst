@@ -12,12 +12,14 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.12.10`` is a patch optimization release:
-   it avoids full PL histogram construction when solving selected linear
-   child leaves, speeds numeric ``split_penalty`` neutralization with
-   factor prefix sums, adds ``factor_exposure_transform`` preprocessing for
-   fit-time exposures, and exports ``alloygbm.__version__``. No artifact
-   format change. See :doc:`release` for full notes.
+   AlloyGBM ``1.0.0`` is the first stable release. The public Python API,
+   the binary artifact format, and determinism (byte-identical artifacts for
+   a fixed seed, including across ``n_jobs`` thread counts) are now covered
+   by semantic versioning. Four defaults changed at the 1.0 boundary --
+   ``n_estimators`` 6 to 100, ``lambdarank_truncation_level`` ``None`` to
+   30, the new ``dart_skip_drop=0.5``, and unrounded ``predict_proba`` --
+   and three correctness defects were fixed. No artifact format change.
+   See :doc:`release` for full notes.
 
 
 Getting started

@@ -58,9 +58,14 @@ Parameters
 - ``ranking_sigma: float = 1.0`` -- sigmoid sharpness for
   ``"rank:pairwise"``, ``"rank:ndcg"``, and ``"yetirank"``; must be finite
   and greater than zero
-- ``lambdarank_truncation_level: int | None = None`` -- for ``"rank:ndcg"``,
+- ``lambdarank_truncation_level: int | None = 30`` -- for ``"rank:ndcg"``,
   restrict LambdaMART gradients to pairs where at least one document is
-  currently in the top-k positions for its query; ``None`` scores all pairs
+  currently in the top-k positions for its query; ``None`` scores all pairs.
+  The default matches LightGBM. All-pairs is ``O(n^2)`` per query group: on
+  50 groups of 2,000 documents, ``30`` fit in 2.05 s for NDCG 0.9735 versus
+  3.65 s for NDCG 0.9901 at ``None``. With small groups the default is
+  effectively all-pairs; with large groups, raise it or pass ``None`` when
+  quality matters more than fit time
 - ``lambdarank_normalize: bool = False`` -- for ``"rank:ndcg"``, apply
   per-query LambdaMART lambda normalization; ``False`` preserves the original
   unnormalized objective

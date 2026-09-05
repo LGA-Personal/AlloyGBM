@@ -1,0 +1,28 @@
+{
+  "created_at_utc": "2026-09-04T13:06:44+00:00",
+  "git_sha_semantics": "runner working-directory source commit; for AlloyGBM this is the measured library commit",
+  "harness_git_sha": "88f754c9f3f2d17d8e929842923d6a3760ebbc09",
+  "harness_tree_sha256": "5da88f0d4ac58fc089dc26555ddbafc8289eb16271a5f5b1a48da68f5ee70f7e",
+  "harness_source_path": "benchmarks/competitiveness",
+  "libraries": [
+    "alloygbm"
+  ],
+  "manifest_identifier": "benchmarks/competitiveness/manifests/published_v1_crosscheck.yaml",
+  "manifest_path": "benchmarks/competitiveness/manifests/published_v1_crosscheck.yaml",
+  "manifest_sha256": "37200bf8c8496ed48cfdeea415f9bbab1bfcf697806ca7b638341350ce8efa7b",
+  "measured_git_sha": "adfa2c8e593cea68b124e7975f3b4fd9f862a148",
+  "raw_record_count": 5,
+  "raw_sha256": "0e60d25d7b42ca1f977f3a15981e7c5e0812380e65c430f904d15622b2dde065",
+  "repetitions": 5,
+  "run_id": "fe7f20f0-d68b-48c2-ad25-8e35131dcb8b",
+  "scenarios": [
+    "published_tall_r200_d8"
+  ],
+  "schema": "alloygbm-competitiveness/v1",
+  "seed": 20260902,
+  "profile_alloy": false,
+  "smoke": false,
+  "threads": 1,
+  "warmups": 1,
+  "working_directory": "repository-root"
+}

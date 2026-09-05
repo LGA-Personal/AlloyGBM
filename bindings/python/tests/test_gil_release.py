@@ -6,6 +6,19 @@ import numpy as np
 from alloygbm import GBMRegressor
 
 
+# A pure-Python worker thread can only make progress while the GIL is
+# released, so comparing its counter during a native call against its rate
+# during a plain sleep detects a held GIL.
+#
+# The ratio is deliberately loose. Several of the native calls under test
+# (SHAP, prediction, training) run on a Rayon pool that saturates every
+# core, so the worker competes for CPU even though the GIL is free. On a
+# busy or low-core CI runner that legitimately depresses its rate; a held
+# GIL, by contrast, drives progress to ~zero. The threshold separates those
+# two regimes rather than measuring scheduling fairness.
+MIN_WORKER_RATE_FRACTION = 0.05
+
+
 def _worker_progress_during(call):
     ready = threading.Event()
     stop = threading.Event()
@@ -62,7 +75,7 @@ def test_native_predict_numpy_array_releases_gil():
     assert elapsed >= 0.02
     calibration_rate = calibration_progress / calibration_elapsed
     prediction_rate = progress / elapsed
-    assert prediction_rate >= calibration_rate * 0.25
+    assert prediction_rate >= calibration_rate * MIN_WORKER_RATE_FRACTION
 
 
 def test_native_shap_global_importance_releases_gil():
@@ -94,7 +107,7 @@ def test_native_shap_global_importance_releases_gil():
     assert elapsed >= 0.02
     calibration_rate = calibration_progress / calibration_elapsed
     explanation_rate = progress / elapsed
-    assert explanation_rate >= calibration_rate * 0.25
+    assert explanation_rate >= calibration_rate * MIN_WORKER_RATE_FRACTION
 
 
 def test_native_training_without_python_callbacks_releases_gil():
@@ -127,7 +140,7 @@ def test_native_training_without_python_callbacks_releases_gil():
     assert elapsed >= 0.02
     calibration_rate = calibration_progress / calibration_elapsed
     training_rate = progress / elapsed
-    assert training_rate >= calibration_rate * 0.25
+    assert training_rate >= calibration_rate * MIN_WORKER_RATE_FRACTION
 
 
 def test_native_training_with_python_callbacks_releases_gil_between_invocations():

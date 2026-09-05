@@ -19,8 +19,20 @@ next release" list. They do not add net-new user-facing features.
 Minor releases (`0.7.x → 0.8.0`) add net-new features, change defaults, or
 adjust the public API in a backward-compatible way.
 
-Major releases (`0.x → 1.0`) are reserved for compatibility breaks. AlloyGBM
-has not done one yet — when it happens, this guide will get a new section.
+Major releases (`1.0 → 2.0`) are reserved for compatibility breaks: any change
+to the public Python API, the artifact format's readability guarantee, or the
+determinism contract described under "Stability guarantees" below. `1.0.0`
+itself was the first, and carried four deliberate default changes.
+
+For a major release, additionally:
+
+- [ ] Every breaking change gets its own `CHANGELOG.md` bullet under
+      `### Changed (breaking)`, stating the old value, the new value, the
+      measured justification, and the one-line revert.
+- [ ] `README.md` "Stability" section and the `CHANGELOG.md`
+      "Stability guarantees" block agree on exactly what is covered.
+- [ ] Confirm the artifact-compatibility claim by loading an artifact written
+      by the previous release and checking predictions still match.
 
 Write the release type into the PR description. The type determines the
 CHANGELOG style (new section vs. addendum), the announcement copy, and how
@@ -38,9 +50,12 @@ it as the repo grows.
 
 - [ ] `Cargo.toml` — workspace `version = "X.Y.Z"`
 - [ ] `pyproject.toml` — `version = "X.Y.Z"`
-- [ ] `docs/site/source/conf.py` — `version = "X.Y.Z"` (Sphinx site footer)
+- [ ] `docs/site/source/conf.py` — both `release` and `version` (Sphinx footer)
+- [ ] `bindings/python/alloygbm/__init__.py` — `__version__ = "X.Y.Z"`
+- [ ] `bindings/python/tests/test_module_identity.py` — the `__version__`
+      assertion (it pins the value above, so it fails the suite if missed)
 
-These three must match exactly. If they drift, the publish workflow may upload
+These must all match exactly. If they drift, the publish workflow may upload
 a wheel whose internal metadata claims the wrong version.
 
 ### Required content updates (release-blocking)
@@ -61,7 +76,7 @@ a wheel whose internal metadata claims the wrong version.
 Search the repo for the previous version string and review every hit:
 
 ```bash
-git grep -n '0\.7\.0\|v0\.7\.0' \
+git grep -n '1\.0\.0\|v1\.0\.0' \
   -- 'docs/**' 'README.md' 'CLAUDE.md' '*.toml' '*.py' '*.rs'
 ```
 
@@ -137,15 +152,16 @@ git grep -nE \
   -- 'docs/**' README.md CLAUDE.md benchmarks/README.md
 
 # Old version references that should have been bumped or removed.
-git grep -nE 'v?0\.7\.0' \
+git grep -nE 'v?1\.0\.0' \
   -- 'docs/**' README.md CLAUDE.md '*.toml' '*.py' '*.rs' \
-  | grep -v 'archive\|CHANGELOG\|release\.rst\|roadmap/current\.md'
+  | grep -v 'archive\|CHANGELOG\|release\.rst\|roadmap/current\.md\|docs/reviews/\|docs/benchmarks/'
 ```
 
 Both queries should return zero non-historical hits. Historical hits in
 `CHANGELOG.md`, `docs/site/source/release.rst`, `docs/roadmap/current.md`,
-and anything under `docs/archive/` are expected — those are intentionally
-preserved release history.
+and anything under `docs/archive/`, `docs/reviews/`, or `docs/benchmarks/` are
+expected — those are intentionally preserved release history and point-in-time
+evidence reports.
 
 ---
 
@@ -174,6 +190,20 @@ Run the full verification suite from a clean tree. Do not skip any of these.
 .venv/bin/python -c "from alloygbm import GBMRegressor; import numpy as np; rng=np.random.default_rng(0); X=rng.normal(size=(20,3)).astype(np.float32); y=(X[:,0]*X[:,1]).astype(np.float32); m=GBMRegressor(n_estimators=5); m.fit(X,y); print(np.asarray(m.shap_interaction_values(X[:3])).shape)"
 # v0.12.5 PL-leaf SHAP interactions
 .venv/bin/python -c "from alloygbm import GBMRegressor; import numpy as np; rng=np.random.default_rng(11); X=rng.normal(size=(40,3)).astype(np.float32); y=(X[:,0]+0.5*X[:,1]).astype(np.float32); m=GBMRegressor(n_estimators=5, leaf_model='linear', deterministic=True, seed=11); m.fit(X,y); print(np.asarray(m.shap_interaction_values(X[:3])).shape)"
+# v1.0.0 version surface
+.venv/bin/python -c "import alloygbm; print(alloygbm.__version__)"
+# v1.0.0 defaults (n_estimators=100, dart_skip_drop=0.5, lambdarank_truncation_level=30)
+.venv/bin/python -c "from alloygbm import GBMRegressor, GBMRanker; assert GBMRegressor().n_estimators == 100; assert GBMRegressor().dart_skip_drop == 0.5; assert GBMRanker().lambdarank_truncation_level == 30; print('defaults ok')"
+# v1.0.0 thread control and per-node colsample
+.venv/bin/python -c "from alloygbm import GBMRegressor; import numpy as np; rng=np.random.default_rng(0); X=rng.normal(size=(200,6)).astype(np.float32); y=X[:,0].astype(np.float32); a=GBMRegressor(n_estimators=10, seed=1, n_jobs=1).fit(X,y).artifact_bytes; b=GBMRegressor(n_estimators=10, seed=1, n_jobs=4).fit(X,y).artifact_bytes; assert a == b, 'n_jobs must not change results'; print('determinism across n_jobs ok')"
+.venv/bin/python -c "from alloygbm import GBMRegressor; import numpy as np; rng=np.random.default_rng(0); X=rng.normal(size=(200,8)).astype(np.float32); y=X[:,0].astype(np.float32); m=GBMRegressor(n_estimators=10, colsample_bynode=0.5).fit(X,y); print('colsample_bynode:', m.predict(X[:2]))"
+```
+
+Also run both quality gates before tagging:
+
+```bash
+.venv/bin/python benchmarks/mode_quality_gate.py --quick --gate
+.venv/bin/python benchmarks/perf_regression_benchmark.py --quick --gate
 ```
 
 If you added new top-level API in this release, add a one-liner for it here
@@ -290,27 +320,65 @@ deployment matrix users actually have.
 Public-facing benchmark claims live in `README.md` and `docs/user/benchmarks.md`.
 They must stay honest about both strengths and weak spots — never claim
 parity or dominance unless the comparative results actually support it. The
-current public claim (as of v0.7.1):
+current public claim (measured for v1.0.0; full tables in
+`docs/benchmarks/v1.0.0_comparison.md`):
 
-- **Regression:** strongest on `panel_time_series`; strong on
-  `dow_jones_financial`; competitive on `dense_numeric`; trails on
-  `california_housing` and `bike_sharing`.
-- **Classification:** competitive with established libraries on standard
-  datasets (`breast_cancer`, `synthetic_classification`).
-- **Ranking:** competes via native LambdaMART on synthetic ranking scenarios.
+- **Accuracy:** wins 5 of 15 curated scenarios, top-two on 11. Strongest on
+  `histogram_stress`; leads `bike_sharing`, `dow_jones_financial`, and both
+  ranking scenarios; trails on `panel_time_series`, `california_housing`,
+  `breast_cancer`, `adult_income`. Effectively tied with all peers at
+  200k-1M rows.
+- **Fit speed:** the weak axis, and stated as such. LightGBM/XGBoost are
+  ~3-4x faster per core on the curated suite (fixed per-round overhead
+  dominates at those sizes), narrowing to ~1.3x at 200k rows and 1.5-1.8x at
+  1M. Parallel scaling reaches 1.6-1.8x on 10 cores against LightGBM's
+  2.5-2.8x and CatBoost's 4.0-4.2x.
+- **Prediction speed:** competitive; markedly faster than LightGBM
+  single-threaded.
+
+**Fairness is part of the claim.** A benchmark number is only publishable
+alongside an equal thread budget for every library, matched hyperparameters
+(including `subsample_freq=1` and `num_leaves=2**max_depth` for LightGBM,
+without which its bagging is silently disabled and its trees are capped at
+half the peers' capacity), and a recorded environment. The harness enforces
+and records all of this; see `params.fairness` in the JSON output. Do not
+publish a comparison produced without it -- the pre-1.0 harness pinned peers
+to one thread while AlloyGBM used every core, and every speed claim from that
+era was inflated.
 
 Do not broaden these claims unless a new benchmark run materially changes
 the picture. If the picture changes, update both the README and the
 benchmark guide in the same PR.
 
-### Pre-1.0 stability policy
+### Stability guarantees (from v1.0.0)
 
-AlloyGBM is pre-1.0. Backward-incompatible API changes are allowed in minor
-releases but should be called out in `CHANGELOG.md` under a `### Breaking
-Changes` heading. Artifacts written by an older minor are best-effort
-readable by a newer minor — we make a serious effort to back-compat artifact
-sections (e.g. `FeatureBaseline` added in v0.7.1 reads as zero means on
-older artifacts) but do not guarantee it.
+AlloyGBM follows semantic versioning from `1.0.0`. Covered:
+
+- **The public Python API** — `GBMRegressor`, `GBMClassifier`, `GBMRanker`,
+  `MultiLabelGBMRanker`, `alloygbm.evaluation`, `alloygbm.validation`,
+  including constructor parameters, fitted attributes, and method signatures.
+  Breaking changes require a major version.
+- **The binary artifact format** — a `1.x` artifact stays readable by any later
+  `1.x` release. Adding a new optional section is a minor-version change;
+  removing one or changing an existing section's meaning is major.
+- **Determinism** — a fixed `seed` with `deterministic=True` produces
+  byte-identical artifacts across repeated fits and across `n_jobs` thread
+  counts.
+
+Explicitly not covered, and therefore changeable in a minor release:
+
+- The Rust crates. They are internal implementation detail and are not
+  published to crates.io.
+- Exact floating-point model values across releases. Algorithmic fixes and
+  optimizations may shift predictions; quality is guarded by the benchmark
+  gates (`benchmarks/mode_quality_gate.py`,
+  `benchmarks/perf_regression_benchmark.py`) rather than by bit-exact
+  reproduction across versions.
+- Parameters documented as experimental.
+
+A parameter that cannot be honoured on some path must **raise**, never be
+silently ignored — see the `colsample_bynode` multiclass rejection and the
+`feature_bundling` inert-bundling warning for the two precedents.
 
 ---
 

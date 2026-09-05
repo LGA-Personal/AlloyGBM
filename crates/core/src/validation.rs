@@ -707,6 +707,7 @@ mod monotone_linear_tests {
             max_drop: 4,
             normalize_type: crate::DartNormalize::Tree,
             sample_type: crate::DartSampleType::Uniform,
+            skip_drop: 0.0,
         }
     }
 

@@ -21,10 +21,6 @@ on:
 
 permissions:
   contents: read
-  # `actions: write` lets the audit action open / update issues on the
-  # repository describing new advisories — comment out if you don't
-  # want automated issues.
-  issues: write
 
 concurrency:
   group: security-audit-${{ github.ref }}
@@ -36,14 +32,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: rustsec/audit-check@v2.0.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # No ignored advisories.  v0.7.3 cleared RUSTSEC-2025-0020 by
-          # upgrading pyo3 0.23 → 0.24.  Any future RUSTSEC bisection
-          # should be either fixed up front or added back here with a
-          # tracking comment that mirrors the same ignore in
-          # `deny.toml`.
+          toolchain: 1.92.0
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Run cargo audit
+        # No ignored advisories.  v0.7.3 cleared RUSTSEC-2025-0020 by
+        # upgrading pyo3 0.23 → 0.24.  Any future RUSTSEC bisection
+        # should be either fixed up front or added back here with a
+        # tracking comment that mirrors the same ignore in `deny.toml`.
+        run: cargo audit
 
   cargo-deny:
     name: cargo-deny

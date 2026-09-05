@@ -2,7 +2,8 @@
 
 use crate::binning::{ADDITIVITY_ATOL, ADDITIVITY_RTOL, additivity_tolerance};
 use crate::brute_force::{
-    compute_subset_expectations, factorial_table, local_path_predict, shapley_values_for_row_f64,
+    compute_subset_expectations, explain_rows_brute_force, factorial_table, local_path_predict,
+    shapley_values_for_row_f64,
 };
 use crate::types::build_model_structure;
 use crate::*;
