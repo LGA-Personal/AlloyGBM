@@ -71,6 +71,14 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
         "xgboost": "3.2.0",
         "catboost": "1.2.10",
     }
+    expected_dataset_sha256 = {
+        "dense_regression": "e0e11ef536a47421f3b03e5bf21b387bdfbbd8be044ee47ef2886acff01ba6be",
+        "binary": "04e7aac0fefbe3c2270d852a1222df47a395d72d6721f2219e7f4cab6114947a",
+        "grouped_ranking": "d5533db052925250d2bf9f69874f4ddd6135d7a9ca11daa201d5152e19e4df49",
+        "native_categorical": "e4fc65f230b5c90edd3829d17ee8a9512f12278cfe76d69b3931cce243d05c31",
+        "csr_sparse": "cf6847173f10fda14d7e27e840a8afb577aba9a7bd58ee09d0c4d492436547ff",
+        "joint_multi_output": "f07bca7fc46b5b50e992282d920448d3be08bcad080044ca686559d075dcce8e",
+    }
     assert len(records) == 120
     assert {record.git_sha for record in records} == {
         "adfa2c8e593cea68b124e7975f3b4fd9f862a148"
@@ -80,6 +88,7 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
     assert {record.repetition for record in records} == {0, 1, 2, 3, 4}
     assert all(record.effective_params for record in records)
     assert {record.scenario for record in records} == expected_scenarios
+    assert set(expected_dataset_sha256) == expected_scenarios
     assert {record.library for record in records} == expected_libraries
     assert {record.library: record.library_version for record in records} == expected_versions
     populations = Counter((record.scenario, record.library) for record in records)
@@ -91,7 +100,7 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
     assert len(populations) == 24 and set(populations.values()) == {5}
     for record in records:
         case = cases[record.scenario]
-        assert record.dataset_sha256 == case.dataset_sha256
+        assert record.dataset_sha256 == expected_dataset_sha256[record.scenario]
         assert record.task == case.task
         assert record.metric_name == case.metric_name
         allowed_inputs = {case.input_representation}
@@ -128,6 +137,10 @@ def test_committed_baseline_is_complete_traceable_and_round_trips() -> None:
             assert dict(record.machine) == dict(summary.machine or {})
             assert dict(record.effective_params) == dict(summary.effective_params or {})
             assert json.loads(raw_lines[summary.raw_line_numbers[index] - 1]) == record.to_dict()
+    for scenario, expected_hash in expected_dataset_sha256.items():
+        assert {record.dataset_sha256 for record in records if record.scenario == scenario} == {
+            expected_hash
+        }
     assert sorted(referenced_lines) == list(range(1, 121))
     regenerated = summarize_file(raw_path)
     regenerated_rows = [summary.to_dict() for summary in regenerated]
@@ -401,6 +414,35 @@ def test_ci_workflow_has_event_scoped_smoke_and_observational_comparator() -> No
     assert "--repetitions 3 --warmups 1" in workflow_text
     assert "evaluate_claim" not in workflow_text
     assert "no timing gate applied" in workflow_text
+
+    python_smoke = workflow["jobs"]["python-smoke"]
+    fetch_steps = [
+        step
+        for step in python_smoke["steps"]
+        if step.get("name") == "Fetch historical harness commits for contracts"
+    ]
+    assert len(fetch_steps) == 1
+    fetch_step = fetch_steps[0]
+    assert fetch_step["if"] == "matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'"
+    assert "git fetch --no-tags --depth=1 origin" in fetch_step["run"]
+    assert "7082301fcd79bac3e1f05e696c376588158eaee3" in fetch_step["run"]
+    assert "88f754c9f3f2d17d8e929842923d6a3760ebbc09" in fetch_step["run"]
+
+    security_workflow = yaml.load(
+        (ROOT / ".github" / "workflows" / "security-audit.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+    audit_job = security_workflow["jobs"]["cargo-audit"]
+    audit_text = "\n".join(str(step.get("run", "")) for step in audit_job["steps"])
+    assert "rustsec/audit-check@" not in "\n".join(
+        str(step.get("uses", "")) for step in audit_job["steps"]
+    )
+    assert any(
+        step.get("with", {}).get("toolchain") == "1.92.0"
+        for step in audit_job["steps"]
+    )
+    assert "cargo install cargo-audit --version 0.22.2 --locked" in audit_text
+    assert "cargo audit" in audit_text
 
 
 def test_docs_link_committed_artifacts_and_match_recorded_provenance() -> None:
