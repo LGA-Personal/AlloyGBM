@@ -454,6 +454,7 @@ class BenchmarkSummaryV1:
     effective_params: dict[str, object] | None = None
     machine: dict[str, str] | None = None
     raw_line_numbers: tuple[int, ...] | None = None
+    profiled: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw_repetition_ids", tuple(self.raw_repetition_ids))
@@ -510,6 +511,7 @@ class BenchmarkSummaryV1:
             "raw_line_numbers": (
                 list(self.raw_line_numbers) if self.raw_line_numbers is not None else None
             ),
+            "profiled": self.profiled,
         }
         result["raw_repetition_ids"] = list(self.raw_repetition_ids)
         return result
@@ -553,6 +555,7 @@ class BenchmarkSummaryV1:
                 if value.get("raw_line_numbers") is not None
                 else None
             ),  # type: ignore[arg-type]
+            profiled=value.get("profiled"),  # type: ignore[arg-type]
         )
 
     @classmethod
@@ -687,6 +690,8 @@ def validate_summary(summary: BenchmarkSummaryV1) -> None:
             raise ValueError("effective_params must be a mapping or null")
         _validate_finite_values(summary.effective_params, "effective_params")
     _validate_machine_metadata(summary.machine, "machine", allow_none=True)
+    if summary.profiled is not None and not isinstance(summary.profiled, bool):
+        raise ValueError("profiled must be a boolean or null")
     if summary.raw_line_numbers is not None:
         if not isinstance(summary.raw_line_numbers, Sequence) or isinstance(
             summary.raw_line_numbers, (str, bytes)
@@ -895,6 +900,15 @@ def load_run_bundle(
     observed_git_shas = {record.git_sha for record in records}
     if observed_git_shas != {metadata.measured_git_sha}:
         raise ValueError("metadata git_sha does not match raw records")
+
+    if metadata.profile_alloy and set(metadata.libraries) != {"alloygbm"}:
+        raise ValueError("profile_alloy requires an AlloyGBM-only bundle")
+    for record in records:
+        if record.library == "alloygbm":
+            if (record.profile is not None) != metadata.profile_alloy:
+                raise ValueError("metadata profile_alloy does not match AlloyGBM record profile presence")
+        elif record.profile is not None:
+            raise ValueError("non-Alloy records may not contain AlloyGBM profiling")
 
     cohort_repetitions: dict[tuple[str, str, int], set[int]] = {}
     for record in records:

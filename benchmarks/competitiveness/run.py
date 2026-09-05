@@ -69,6 +69,7 @@ def validate_options(
     repetitions: int | None = None,
     warmups: int | None = None,
     smoke: bool = False,
+    profile_alloy: bool = False,
     known_scenarios: Sequence[str] | None = None,
     known_libraries: Sequence[str] | None = None,
 ) -> None:
@@ -90,6 +91,8 @@ def validate_options(
         raise ValueError(f"unknown library(ies): {sorted(unknown_libraries)}")
     if not libraries:
         raise ValueError("at least one library is required")
+    if profile_alloy and set(libraries) != {"alloygbm"}:
+        raise ValueError("profile_alloy requires the selected library set to be exactly AlloyGBM")
 
 
 def _metric(case: DatasetCase, predictions: np.ndarray) -> float:
@@ -465,12 +468,12 @@ def run_subprocess_benchmark(
     spec_by_name = {str(item["name"]): item for item in specs}
     selected_names = [scenario] if scenario else names
     selected_libraries = list(libraries or DEFAULT_LIBRARIES)
-    validate_options(selected_names, selected_libraries, threads=threads, repetitions=repetitions, warmups=warmups, smoke=smoke, known_scenarios=names)
+    validate_options(selected_names, selected_libraries, threads=threads, repetitions=repetitions, warmups=warmups, smoke=smoke, profile_alloy=profile_alloy, known_scenarios=names)
     if any(name not in names for name in selected_names):
         raise ValueError(f"unknown scenario(s): {sorted(set(selected_names) - set(names))}")
     timed = int(repetitions if repetitions is not None else config.get("timed_repetitions", 0))
     warmup_count = int(warmups if warmups is not None else config.get("warmup_repetitions", 0))
-    validate_options(selected_names, selected_libraries, threads=threads, repetitions=timed, warmups=warmup_count, smoke=smoke, known_scenarios=names)
+    validate_options(selected_names, selected_libraries, threads=threads, repetitions=timed, warmups=warmup_count, smoke=smoke, profile_alloy=profile_alloy, known_scenarios=names)
     seed = int(config.get("seed", 0))
     run_id = str(uuid.uuid4())
     run_path = Path(output_dir) / run_id
@@ -480,7 +483,7 @@ def run_subprocess_benchmark(
         for name in selected_names:
             for library in selected_libraries:
                 for _ in range(warmup_count):
-                    _subprocess_measurement(manifest, name, library, seed, threads, profile_alloy=profile_alloy)
+                    _subprocess_measurement(manifest, name, library, seed, threads, profile_alloy=False)
                 for repetition in range(timed):
                     value = _subprocess_measurement(manifest, name, library, seed, threads, profile_alloy=profile_alloy)
                     spec = spec_by_name[name]
@@ -517,7 +520,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     config = load_manifest(args.manifest)
     names = [str(item["name"]) for item in config["scenarios"] if isinstance(item, Mapping)]  # type: ignore[index]
     selected = [args.scenario] if args.scenario else names
-    validate_options(selected, args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke, known_scenarios=names)
+    validate_options(selected, args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke, profile_alloy=args.profile_alloy, known_scenarios=names)
     run_path = run_subprocess_benchmark(args.manifest, args.output_dir, scenario=args.scenario, libraries=args.libraries, threads=args.threads, repetitions=args.repetitions, warmups=args.warmups, smoke=args.smoke, profile_alloy=args.profile_alloy)
     print(run_path)
     return 0

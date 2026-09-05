@@ -54,6 +54,7 @@
       "predict_median_seconds": 0.996846792,
       "preprocessing_mad_seconds": 4.199999999999998e-08,
       "preprocessing_median_seconds": 1.375e-06,
+      "profiled": false,
       "raw_line_numbers": [
         1,
         2,

@@ -16,6 +16,7 @@ import pytest
 from benchmarks.competitiveness.schema import (
     BenchmarkSummaryV1,
     METRIC_DIRECTIONS,
+    ProfileRecordV1,
     SCHEMA_VERSION,
     harness_tree_sha256,
     load_records,
@@ -258,6 +259,39 @@ def test_run_bundle_rejects_false_metadata_declarations(
         load_run_bundle(copied_raw, copied_metadata)
 
 
+def test_run_bundle_rejects_alloy_profile_metadata_for_non_alloy_bundle(tmp_path: Path) -> None:
+    raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
+    metadata_path = BASELINES / "adfa2c8-pr-smoke.run-metadata.json"
+    copied_raw = tmp_path / raw_path.name
+    copied_metadata = tmp_path / metadata_path.name
+    shutil.copyfile(raw_path, copied_raw)
+    metadata = json.loads(metadata_path.read_text())
+    metadata["profile_alloy"] = True
+    copied_metadata.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+    with pytest.raises(ValueError, match="profile"):
+        load_run_bundle(copied_raw, copied_metadata)
+
+
+def test_run_bundle_rejects_alloy_record_profile_when_metadata_disables_it(tmp_path: Path) -> None:
+    raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
+    metadata_path = BASELINES / "adfa2c8-pr-smoke.run-metadata.json"
+    copied_raw = tmp_path / raw_path.name
+    copied_metadata = tmp_path / metadata_path.name
+    payloads = [json.loads(line) for line in raw_path.read_text().splitlines()]
+    payloads[0]["profile"] = ProfileRecordV1(
+        rows=1, features=1, rounds=1, threads=1, loop_wall_ns=1,
+        untimed_ns=0,
+        stage_ns={label: 0 for label in ("gradients", "row_sampling", "feature_tiles", "prediction_copy", "tree_build", "prediction_update", "loss", "validation")},
+        tree_stage_ns={label: 0 for label in ("histogram_build", "split_find", "partition")},
+    ).to_dict()
+    copied_raw.write_text("\n".join(json.dumps(payload, sort_keys=True) for payload in payloads) + "\n")
+    metadata = json.loads(metadata_path.read_text())
+    metadata["raw_sha256"] = hashlib.sha256(copied_raw.read_bytes()).hexdigest()
+    copied_metadata.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+    with pytest.raises(ValueError, match="profile_alloy"):
+        load_run_bundle(copied_raw, copied_metadata)
+
+
 def test_run_bundle_rejects_missing_and_extra_cohort_repetitions(tmp_path: Path) -> None:
     raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
     metadata_path = BASELINES / "adfa2c8-pr-smoke.run-metadata.json"
@@ -371,3 +405,11 @@ def test_docs_link_committed_artifacts_and_match_recorded_provenance() -> None:
     records = load_records(BASELINES / "adfa2c8-pr-smoke.jsonl")
     versions = {record.library_version for record in records}
     assert all(version in benchmark_doc for version in versions)
+
+
+def test_deep_scaling_crosscheck_distinguishes_reproducibility_from_timing() -> None:
+    benchmark_doc = (ROOT / "docs" / "benchmarks" / "v1.0.0_deep_scaling.md").read_text()
+    assert "072478d" not in benchmark_doc
+    assert "differ in commit and estimator" in benchmark_doc
+    assert "coarse sanity check" in benchmark_doc
+    assert "meaningful reproducibility signal" in benchmark_doc

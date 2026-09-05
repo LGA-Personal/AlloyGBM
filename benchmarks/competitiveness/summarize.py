@@ -55,6 +55,11 @@ def aggregate_records(
         raise ValueError("minimum_repetitions must be positive")
     if raw_line_numbers is not None and len(raw_line_numbers) != len(records):
         raise ValueError("raw_line_numbers must align with records")
+    line_by_identity = (
+        {id(record): line for record, line in zip(records, raw_line_numbers)}
+        if raw_line_numbers is not None
+        else {}
+    )
     groups: dict[tuple[object, ...], list[BenchmarkRecordV1]] = {}
     seen: set[tuple[object, ...]] = set()
     versions: dict[tuple[str, str], str] = {}
@@ -90,6 +95,9 @@ def aggregate_records(
             raise ValueError(f"machine metadata mismatch in summary group {key!r}")
         if len({item.library_version for item in population}) != 1:
             raise ValueError(f"library_version mismatch in summary group {key!r}")
+        profile_presence = {item.profile is not None for item in population}
+        if len(profile_presence) != 1:
+            raise ValueError(f"profile presence mismatch in summary group {key!r}")
         metric_median, metric_mad = median_mad(item.metric_value for item in population)
         prep_median, prep_mad = median_mad(item.preprocessing_seconds for item in population)
         fit_median, fit_mad = median_mad(item.fit_seconds for item in population)
@@ -99,7 +107,7 @@ def aggregate_records(
         source_lines = None
         if raw_line_numbers is not None:
             source_lines = tuple(
-                raw_line_numbers[records.index(item)]  # type: ignore[arg-type]
+                line_by_identity[id(item)]
                 for item in sorted(population, key=lambda value: value.repetition)
             )
             if any(line is None for line in source_lines):
@@ -130,6 +138,7 @@ def aggregate_records(
             effective_params=dict(first.effective_params),
             machine=dict(first.machine),
             raw_line_numbers=source_lines,  # type: ignore[arg-type]
+            profiled=first.profile is not None,
         )
         validate_summary(summary)
         summaries.append(summary)

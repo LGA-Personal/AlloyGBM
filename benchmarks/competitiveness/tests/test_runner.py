@@ -397,7 +397,17 @@ def test_warmup_profile_is_not_persisted(monkeypatch: pytest.MonkeyPatch, tmp_pa
     records = load_records(run_dir / "raw.jsonl")
     assert len(records) == 1
     assert records[0].profile is not None
-    assert calls == [True, True]
+    assert calls == [False, True]
+
+
+def test_profile_alloy_requires_alloy_only_library_selection(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    tiny_manifest(manifest)
+    with pytest.raises(ValueError, match="exactly AlloyGBM"):
+        run_subprocess_benchmark(
+            manifest, tmp_path / "out", libraries=["alloygbm", "lightgbm"],
+            repetitions=1, warmups=0, smoke=True, profile_alloy=True,
+        )
 
 
 def test_profile_allows_joint_warm_start_rounds_below_total_completed() -> None:

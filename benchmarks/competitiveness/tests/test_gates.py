@@ -68,6 +68,19 @@ def test_aggregate_uses_median_unscaled_mad_and_raw_provenance() -> None:
     assert "raw.jsonl#L" not in markdown
 
 
+def test_aggregate_records_emits_concrete_profiled_provenance() -> None:
+    assert aggregate_records(records("run-current", "alloygbm", fit=1.0, metric=1.0))[0].profiled is False
+
+
+def test_aggregate_rejects_mixed_profile_presence_in_one_cohort() -> None:
+    from benchmarks.competitiveness.tests.test_schema import profile
+
+    mixed = records("run-current", "alloygbm", fit=1.0, metric=1.0)
+    mixed[0] = replace(mixed[0], profile=profile())
+    with pytest.raises(ValueError, match="profile"):
+        aggregate_records(mixed)
+
+
 def test_file_summary_links_global_jsonl_lines_across_groups(tmp_path: Path) -> None:
     raw = records("run-current", "alloygbm", fit=1.0, metric=1.0, n=3)
     raw += records("run-current", "alloygbm", fit=1.0, metric=1.0, scenario="binary", n=3)
@@ -256,6 +269,21 @@ def test_hand_built_summary_missing_provenance_is_insufficient() -> None:
     current = BenchmarkSummaryV1.from_dict(aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0].to_dict())
     baseline = replace(current, run_id="run-base", fit_median_seconds=1.0, machine=None)
     assert evaluate_speed([current], [baseline]).status == "insufficient-data"
+
+
+def test_gate_requires_concrete_profile_provenance_and_isolates_mismatch() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=0.8, metric=1.0))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_speed([replace(current, profiled=None)], [baseline]).status == "insufficient-data"
+    assert evaluate_speed([current], [replace(baseline, profiled=True)]).status == "insufficient-data"
+
+
+def test_default_policy_catastrophe_precedes_profile_isolation_but_clean_candidate_does_not() -> None:
+    current = aggregate_records(records("run-current", "alloygbm", fit=2.1, metric=1.1))[0]
+    baseline = aggregate_records(records("run-base", "alloygbm", fit=1.0, metric=1.0))[0]
+    assert evaluate_default_policy([current], [replace(baseline, profiled=True)]).status == "reject"
+    clean = replace(current, fit_median_seconds=1.0, metric_median=1.0)
+    assert evaluate_default_policy([clean], [replace(baseline, profiled=True)]).status == "insufficient-data"
 
 
 def test_duplicate_summary_slice_is_insufficient_for_gate_and_rank() -> None:

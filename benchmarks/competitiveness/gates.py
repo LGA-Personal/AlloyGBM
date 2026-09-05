@@ -170,6 +170,7 @@ def _pairs(
     current: Sequence[BenchmarkSummaryV1], baseline: Sequence[BenchmarkSummaryV1],
     *, candidate_library: str = "alloygbm", minimum_repetitions: int = 5,
     allowed_param_differences: frozenset[str] = frozenset(),
+    require_profile_provenance: bool = True,
 ) -> tuple[list[tuple[BenchmarkSummaryV1, BenchmarkSummaryV1]], list[str]]:
     current_by_key: dict[tuple[object, ...], BenchmarkSummaryV1] = {}
     baseline_by_key: dict[tuple[object, ...], BenchmarkSummaryV1] = {}
@@ -206,6 +207,13 @@ def _pairs(
         if candidate.machine != reference.machine:
             reasons.append(f"machine metadata mismatch for slice: {key!r}")
             continue
+        if require_profile_provenance:
+            if candidate.profiled is None or reference.profiled is None:
+                reasons.append(f"missing profiling provenance for slice: {key!r}")
+                continue
+            if candidate.profiled != reference.profiled:
+                reasons.append(f"profiling provenance mismatch for slice: {key!r}")
+                continue
         parameter_reason = _parameter_reason(
             candidate, reference, allowed_param_differences, allow_candidate=True
         )
@@ -245,6 +253,8 @@ def _validate_gate_inputs(
                 reasons.append(f"missing machine provenance for {side} summary at index {index}")
             if require_durable_provenance and summary.effective_params is None:
                 reasons.append(f"missing effective parameter provenance for {side} summary at index {index}")
+            if require_durable_provenance and summary.profiled is None:
+                reasons.append(f"missing profiling provenance for {side} summary at index {index}")
     if reasons:
         return allowed, reasons, current_items, baseline_items
     try:
@@ -329,6 +339,10 @@ def _compatibility_reasons(
             reasons.append(f"missing machine metadata for paired library slice: {key!r}")
         elif candidate.machine != reference.machine:
             reasons.append(f"machine metadata mismatch for paired library slice: {key!r}")
+        if candidate.profiled is None or reference.profiled is None:
+            reasons.append(f"missing profiling provenance for paired library slice: {key!r}")
+        elif candidate.profiled != reference.profiled:
+            reasons.append(f"profiling provenance mismatch for paired library slice: {key!r}")
         if candidate.effective_params is None or reference.effective_params is None:
             reasons.append(f"missing effective parameter provenance for paired library slice: {key!r}")
         else:
@@ -379,6 +393,11 @@ def _rank_context_reasons(
         baseline_machines = {_canonical(item.machine) for item in baseline_rows if item.machine is not None}
         if len(current_machines) != 1 or len(baseline_machines) != 1:
             reasons.append(f"ranked libraries must share identical machine metadata for slice: {key!r}")
+            continue
+        current_profiles = {item.profiled for item in current_rows}
+        baseline_profiles = {item.profiled for item in baseline_rows}
+        if current_profiles != baseline_profiles or len(current_profiles) != 1:
+            reasons.append(f"profiling provenance mismatch for rank-context slice: {key!r}")
             continue
         current_by_library = {item.library: item for item in current_rows}
         baseline_by_library = {item.library: item for item in baseline_rows}
@@ -513,7 +532,7 @@ def normalized_ranks(summaries: Sequence[BenchmarkSummaryV1]) -> dict[str, float
         # Legacy summaries may decode with null provenance, but rank
         # comparisons cannot establish a trustworthy execution context without
         # both durable machine and effective-parameter metadata.
-        if summary.machine is None or summary.effective_params is None:
+        if summary.machine is None or summary.effective_params is None or summary.profiled is None:
             return {}
     if len({summary.run_id for summary in items}) > 1:
         return {}
@@ -524,6 +543,8 @@ def normalized_ranks(summaries: Sequence[BenchmarkSummaryV1]) -> dict[str, float
     for population in slices.values():
         libraries = {item.library for item in population}
         if len(libraries) < 2 or len(libraries) != len(population):
+            return {}
+        if len({item.profiled for item in population}) != 1:
             return {}
         # Every library in a ranked slice must have run on the same machine;
         # this is a fairness invariant, not a current-vs-baseline check.
@@ -556,7 +577,10 @@ def catastrophic_regressions(
     allowed, isolation_reasons, current, baseline, _invalid_candidate_cohort = _candidate_gate_inputs(
         current, baseline, minimum_repetitions, allowed_param_differences
     )
-    pairs, pair_reasons = _pairs(current, baseline, minimum_repetitions=minimum_repetitions, allowed_param_differences=allowed)
+    pairs, pair_reasons = _pairs(
+        current, baseline, minimum_repetitions=minimum_repetitions,
+        allowed_param_differences=allowed, require_profile_provenance=False,
+    )
     reasons = isolation_reasons + pair_reasons
     if not pairs:
         return [_insufficient("catastrophic-regression", reasons, allowed=allowed)]

@@ -276,6 +276,19 @@ def test_summary_round_trip_preserves_repetition_ids() -> None:
     assert decoded.raw_repetition_ids == (0, 1, 2, 3, 4)
 
 
+def test_summary_round_trip_preserves_profiled_provenance() -> None:
+    original = summary(profiled=False)
+    decoded = BenchmarkSummaryV1.from_json(original.to_json())
+    assert decoded.profiled is False
+    assert json.loads(original.to_json())["profiled"] is False
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, [], {}])
+def test_validate_summary_rejects_non_boolean_profiled(value: object) -> None:
+    with pytest.raises(ValueError, match="profiled"):
+        validate_summary(replace(summary(), profiled=value))  # type: ignore[arg-type]
+
+
 def test_profile_stage_maps_reject_unknown_labels() -> None:
     bad = replace(profile(), stage_ns={"not_a_stage": 1})
     with pytest.raises(ValueError, match="stage"):
