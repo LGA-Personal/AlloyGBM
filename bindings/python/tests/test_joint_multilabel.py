@@ -5,6 +5,8 @@ v0.10.0 shipped the Rust joint trainer (`fit_joint_multi_output`) and the
 routed every fit to the independent-per-label fallback.  v0.10.1 wires
 `multi_label_mode='joint'` through to the joint trainer.
 """
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -540,6 +542,41 @@ def test_joint_mode_accepts_dart():
     preds = m.predict(X)
     assert preds.shape == (n, 2)
     assert np.isfinite(preds).all()
+
+
+@pytest.mark.parametrize("explicit", [None, 0.23])
+def test_joint_dart_forwards_dart_skip_drop(monkeypatch, explicit):
+    import alloygbm._alloygbm as native
+
+    captured = {}
+
+    def fake_train(*args, **kwargs):
+        captured.update(kwargs)
+        return b"fake-artifact", [0.0, 0.0], 1, 1, SimpleNamespace()
+
+    class FakeHandle:
+        def __init__(self, artifact, baselines, feature_count):
+            del artifact, baselines, feature_count
+
+    monkeypatch.setattr(native, "train_joint_multi_label_ranker", fake_train)
+    monkeypatch.setattr(native, "JointPredictorHandle", FakeHandle)
+
+    kwargs = {
+        "n_estimators": 1,
+        "multi_label_mode": "joint",
+        "boosting_mode": "dart",
+    }
+    if explicit is not None:
+        kwargs["dart_skip_drop"] = explicit
+    model = MultiLabelGBMRanker(**kwargs)
+    assert "dart_skip_drop" in model._JOINT_SUPPORTED_KWARGS
+    model.fit(
+        np.asarray([[0.0], [1.0]], dtype=np.float32),
+        np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+        group=[2],
+    )
+
+    assert captured["dart_skip_drop"] == (0.5 if explicit is None else explicit)
 
 
 def test_independent_multilabel_dart_omission_inherits_ranker_default():

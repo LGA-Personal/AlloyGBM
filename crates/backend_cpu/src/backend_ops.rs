@@ -594,6 +594,7 @@ impl BackendOps for CpuBackend {
                     &right_leaf,
                     learning_rate,
                     linear_context.l2_lambda,
+                    linear_context.max_abs_leaf_value,
                 )?;
                 Some(PreparedLinearSplit {
                     split,

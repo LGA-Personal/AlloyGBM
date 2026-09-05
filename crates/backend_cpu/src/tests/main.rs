@@ -500,6 +500,63 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
     assert_eq!((prepared.left_leaf, prepared.right_leaf), oracle_leaves);
 }
 
+#[test]
+fn shortlisted_linear_feature_rejects_row_over_output_ceiling() {
+    let backend = CpuBackend;
+    let binned = BinnedMatrix::new(3, 1, 1, vec![0_u8, 0, 1]).expect("valid bins");
+    let gradients = vec![
+        GradientPair {
+            grad: 1.0e-6,
+            hess: 1.0e-6,
+        },
+        GradientPair {
+            grad: -1.0e-6,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 0.0,
+            hess: 1.0,
+        },
+    ];
+    let node = NodeSlice::new(0, vec![0, 1, 2]).expect("valid node");
+    let raw = vec![1000.0_f32, 0.0, 0.0];
+    let options = SplitSelectionOptions {
+        l2_lambda: 0.0,
+        min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
+        missing_bin_index: binned.missing_bin() as usize,
+        ..SplitSelectionOptions::default()
+    };
+    let context = LinearContext {
+        regressor_features: vec![0],
+        l2_lambda: 0.0,
+        max_abs_leaf_value: 0.5,
+    };
+
+    let prepared = backend
+        .evaluate_shortlisted_linear_feature(
+            &binned,
+            &gradients,
+            &node,
+            0,
+            &context,
+            &LinearFeatureScaler::identity(1),
+            &raw,
+            3,
+            1,
+            options,
+            1.0,
+            0.0,
+            None,
+        )
+        .expect("shortlisted evaluation succeeds");
+
+    assert!(
+        prepared.is_none(),
+        "shortlisted PL candidates must reject an actual row output above the cap"
+    );
+}
+
 fn legacy_parallel_partition_with_stats(
     binned_matrix: &BinnedMatrix,
     gradients: &[GradientPair],

@@ -123,6 +123,7 @@ def _factories(task: str, threads: int, rounds: int, depth: int, lr: float, seed
         out["catboost"] = lambda: cb(
             iterations=rounds, learning_rate=lr, depth=depth, random_seed=seed,
             thread_count=threads, verbose=False, allow_writing_files=False,
+            bootstrap_type="Bernoulli", subsample=0.8, rsm=0.8,
         )
     except ImportError:
         pass
