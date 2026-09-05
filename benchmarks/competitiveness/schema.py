@@ -743,6 +743,8 @@ def validate_run_metadata(metadata: RunMetadataV1) -> None:
         raise ValueError("smoke must be a boolean")
     if not isinstance(metadata.profile_alloy, bool):
         raise ValueError("profile_alloy must be a boolean")
+    if metadata.profile_alloy and tuple(metadata.libraries) != ("alloygbm",):
+        raise ValueError("profile_alloy requires the metadata libraries to be exactly AlloyGBM")
     _positive_int(metadata.raw_record_count, "raw_record_count")
 
 
@@ -901,7 +903,7 @@ def load_run_bundle(
     if observed_git_shas != {metadata.measured_git_sha}:
         raise ValueError("metadata git_sha does not match raw records")
 
-    if metadata.profile_alloy and set(metadata.libraries) != {"alloygbm"}:
+    if metadata.profile_alloy and tuple(metadata.libraries) != ("alloygbm",):
         raise ValueError("profile_alloy requires an AlloyGBM-only bundle")
     for record in records:
         if record.library == "alloygbm":

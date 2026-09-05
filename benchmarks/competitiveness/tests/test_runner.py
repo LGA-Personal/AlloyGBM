@@ -400,12 +400,13 @@ def test_warmup_profile_is_not_persisted(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert calls == [False, True]
 
 
-def test_profile_alloy_requires_alloy_only_library_selection(tmp_path: Path) -> None:
+@pytest.mark.parametrize("libraries", [["lightgbm"], ["alloygbm", "alloygbm"]])
+def test_profile_alloy_requires_exactly_one_alloy_library_selection(tmp_path: Path, libraries: list[str]) -> None:
     manifest = tmp_path / "manifest.yaml"
     tiny_manifest(manifest)
     with pytest.raises(ValueError, match="exactly AlloyGBM"):
         run_subprocess_benchmark(
-            manifest, tmp_path / "out", libraries=["alloygbm", "lightgbm"],
+            manifest, tmp_path / "out", libraries=libraries,
             repetitions=1, warmups=0, smoke=True, profile_alloy=True,
         )
 

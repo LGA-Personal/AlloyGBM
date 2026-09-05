@@ -91,7 +91,7 @@ def validate_options(
         raise ValueError(f"unknown library(ies): {sorted(unknown_libraries)}")
     if not libraries:
         raise ValueError("at least one library is required")
-    if profile_alloy and set(libraries) != {"alloygbm"}:
+    if profile_alloy and tuple(libraries) != ("alloygbm",):
         raise ValueError("profile_alloy requires the selected library set to be exactly AlloyGBM")
 
 

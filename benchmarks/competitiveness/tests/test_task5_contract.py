@@ -272,6 +272,20 @@ def test_run_bundle_rejects_alloy_profile_metadata_for_non_alloy_bundle(tmp_path
         load_run_bundle(copied_raw, copied_metadata)
 
 
+def test_run_bundle_rejects_duplicate_alloy_profile_metadata_library(tmp_path: Path) -> None:
+    raw_path = BASELINES / "adfa2c8-published-v1-crosscheck.jsonl"
+    metadata_path = BASELINES / "adfa2c8-published-v1-crosscheck.run-metadata.json"
+    copied_raw = tmp_path / raw_path.name
+    copied_metadata = tmp_path / metadata_path.name
+    shutil.copyfile(raw_path, copied_raw)
+    metadata = json.loads(metadata_path.read_text())
+    metadata["libraries"] = ["alloygbm", "alloygbm"]
+    metadata["profile_alloy"] = True
+    copied_metadata.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+    with pytest.raises(ValueError, match="libraries|profile"):
+        load_run_bundle(copied_raw, copied_metadata)
+
+
 def test_run_bundle_rejects_alloy_record_profile_when_metadata_disables_it(tmp_path: Path) -> None:
     raw_path = BASELINES / "adfa2c8-pr-smoke.jsonl"
     metadata_path = BASELINES / "adfa2c8-pr-smoke.run-metadata.json"
@@ -409,7 +423,10 @@ def test_docs_link_committed_artifacts_and_match_recorded_provenance() -> None:
 
 def test_deep_scaling_crosscheck_distinguishes_reproducibility_from_timing() -> None:
     benchmark_doc = (ROOT / "docs" / "benchmarks" / "v1.0.0_deep_scaling.md").read_text()
-    assert "072478d" not in benchmark_doc
+    assert "pre-date `072478d`" in benchmark_doc
+    assert "roughly 7% at depth 12" in benchmark_doc
+    assert "no measured depth-8 effect" in benchmark_doc
     assert "differ in commit and estimator" in benchmark_doc
+    assert "does not explain the 15.97 vs 16.76 delta" in benchmark_doc
     assert "coarse sanity check" in benchmark_doc
     assert "meaningful reproducibility signal" in benchmark_doc
