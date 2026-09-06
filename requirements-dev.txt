@@ -22,7 +22,7 @@ maturin>=1.7,<2.0
 numpy>=1.24
 
 # Test infra
-pytest>=9.0.3
+pytest>=9.1.1
 pytest-subtests>=0.13
 pytest-cov>=7.1.0
 coverage>=7.14.1
