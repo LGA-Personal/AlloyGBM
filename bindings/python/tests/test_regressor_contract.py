@@ -144,6 +144,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             ({"categorical_min_samples_leaf": 0}, "categorical_min_samples_leaf"),
             ({"continuous_binning_strategy": "invalid"}, "continuous_binning_strategy"),
             ({"continuous_binning_max_bins": 1}, "continuous_binning_max_bins"),
+            ({"continuous_binning_max_bins": 2}, "continuous_binning_max_bins"),
             ({"continuous_binning_max_bins": 65536}, "continuous_binning_max_bins"),
             ({"feature_bundling": "approximate"}, "feature_bundling"),
             ({"leaf_solver": "invalid"}, "leaf_solver"),

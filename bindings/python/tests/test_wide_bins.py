@@ -148,16 +148,18 @@ class WideBinValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             GBMRegressor(continuous_binning_max_bins=65536).fit(X, y)
 
-    def test_rejects_below_2(self):
-        """max_bins < 2 should raise ValueError."""
+    def test_rejects_below_3(self):
+        """max_bins < 3 should raise ValueError."""
         X, y = _make_dataset()
         with self.assertRaises(ValueError):
             GBMRegressor(continuous_binning_max_bins=1).fit(X, y)
+        with self.assertRaises(ValueError):
+            GBMRegressor(continuous_binning_max_bins=2).fit(X, y)
 
     def test_accepts_boundary_values(self):
         """Boundary values should be accepted."""
-        m = GBMRegressor(continuous_binning_max_bins=2)
-        self.assertEqual(m.get_params()["continuous_binning_max_bins"], 2)
+        m = GBMRegressor(continuous_binning_max_bins=3)
+        self.assertEqual(m.get_params()["continuous_binning_max_bins"], 3)
         m = GBMRegressor(continuous_binning_max_bins=65535)
         self.assertEqual(m.get_params()["continuous_binning_max_bins"], 65535)
 
