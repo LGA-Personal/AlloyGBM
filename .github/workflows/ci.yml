@@ -120,10 +120,17 @@ jobs:
 
       - name: Fetch historical harness commits for contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        # Fetched by tag rather than by raw SHA. These revisions are ancestors
+        # of the feature branch that introduced the harness and of nothing
+        # else, so once that branch is squash-merged and deleted the commits
+        # become unreachable and are eventually collected -- which would break
+        # both this step and the harness-provenance contract test that digests
+        # their trees. The tags keep them reachable under any merge strategy;
+        # see `git show harness-baseline/pr-smoke` for the rationale.
         run: |
           git fetch --no-tags --depth=1 origin \
-            7082301fcd79bac3e1f05e696c376588158eaee3 \
-            88f754c9f3f2d17d8e929842923d6a3760ebbc09
+            +refs/tags/harness-baseline/pr-smoke:refs/tags/harness-baseline/pr-smoke \
+            +refs/tags/harness-baseline/v1-crosscheck:refs/tags/harness-baseline/v1-crosscheck
 
       - name: Run competitiveness contract tests
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'

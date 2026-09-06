@@ -425,8 +425,14 @@ def test_ci_workflow_has_event_scoped_smoke_and_observational_comparator() -> No
     fetch_step = fetch_steps[0]
     assert fetch_step["if"] == "matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'"
     assert "git fetch --no-tags --depth=1 origin" in fetch_step["run"]
-    assert "7082301fcd79bac3e1f05e696c376588158eaee3" in fetch_step["run"]
-    assert "88f754c9f3f2d17d8e929842923d6a3760ebbc09" in fetch_step["run"]
+    # Fetched by tag, not by raw SHA: the revisions are ancestors of the
+    # harness feature branch alone, so a squash-merge plus branch deletion
+    # would orphan them. The tag -> commit binding is still enforced end to
+    # end, because the provenance assertions above digest the tree at the
+    # recorded `harness_git_sha`; if a tag were ever repointed, that object
+    # would not be fetched and those tests would fail loudly.
+    assert "refs/tags/harness-baseline/pr-smoke" in fetch_step["run"]
+    assert "refs/tags/harness-baseline/v1-crosscheck" in fetch_step["run"]
 
     security_workflow = yaml.load(
         (ROOT / ".github" / "workflows" / "security-audit.yml").read_text(),
