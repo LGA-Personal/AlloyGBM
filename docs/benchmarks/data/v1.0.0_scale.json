@@ -1,5 +1,5 @@
 {
-  "run_id": "20260831T062359Z",
+  "run_id": "20260906T065026Z",
   "environment": {
     "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
     "machine": "arm64",
@@ -39,10 +39,10 @@
       "features": 40,
       "threads": 1,
       "model": "alloygbm",
-      "fit_seconds": 2.499409374780953,
-      "predict_seconds": 0.019994624890387058,
+      "fit_seconds": 2.205867165699601,
+      "predict_seconds": 0.020900999661535025,
       "metric_name": "rmse",
-      "metric": 2.076264387563067
+      "metric": 2.07626443159557
     },
     {
       "task": "regression",
@@ -50,8 +50,8 @@
       "features": 40,
       "threads": 1,
       "model": "lightgbm",
-      "fit_seconds": 1.6668669590726495,
-      "predict_seconds": 0.08724212506785989,
+      "fit_seconds": 1.7033321661874652,
+      "predict_seconds": 0.09276762511581182,
       "metric_name": "rmse",
       "metric": 2.0686625255006375
     },
@@ -61,8 +61,8 @@
       "features": 40,
       "threads": 1,
       "model": "xgboost",
-      "fit_seconds": 1.8152502500452101,
-      "predict_seconds": 0.021510290913283825,
+      "fit_seconds": 1.8159354580566287,
+      "predict_seconds": 0.021449666935950518,
       "metric_name": "rmse",
       "metric": 2.071844388644303
     },
@@ -72,10 +72,10 @@
       "features": 40,
       "threads": 1,
       "model": "catboost",
-      "fit_seconds": 2.0829580407589674,
-      "predict_seconds": 0.002952208276838064,
+      "fit_seconds": 1.9514081249944866,
+      "predict_seconds": 0.002830957993865013,
       "metric_name": "rmse",
-      "metric": 2.031651636676759
+      "metric": 2.036849129879942
     },
     {
       "task": "regression",
@@ -83,10 +83,10 @@
       "features": 40,
       "threads": 10,
       "model": "alloygbm",
-      "fit_seconds": 1.3746873745694757,
-      "predict_seconds": 0.020309458952397108,
+      "fit_seconds": 1.0021223332732916,
+      "predict_seconds": 0.02081845887005329,
       "metric_name": "rmse",
-      "metric": 2.076264441684665
+      "metric": 2.07626443159557
     },
     {
       "task": "regression",
@@ -94,8 +94,8 @@
       "features": 40,
       "threads": 10,
       "model": "lightgbm",
-      "fit_seconds": 0.9533708333037794,
-      "predict_seconds": 0.02358916588127613,
+      "fit_seconds": 0.984588791616261,
+      "predict_seconds": 0.02131425030529499,
       "metric_name": "rmse",
       "metric": 2.0686625255006375
     },
@@ -105,8 +105,8 @@
       "features": 40,
       "threads": 10,
       "model": "xgboost",
-      "fit_seconds": 1.8023184589110315,
-      "predict_seconds": 0.02142370818182826,
+      "fit_seconds": 1.8180161253549159,
+      "predict_seconds": 0.021343874745070934,
       "metric_name": "rmse",
       "metric": 2.071844388644303
     },
@@ -116,10 +116,10 @@
       "features": 40,
       "threads": 10,
       "model": "catboost",
-      "fit_seconds": 0.4976812079548836,
-      "predict_seconds": 0.002789832651615143,
+      "fit_seconds": 0.573953834362328,
+      "predict_seconds": 0.002796499989926815,
       "metric_name": "rmse",
-      "metric": 2.031651636676759
+      "metric": 2.036849129879942
     },
     {
       "task": "regression",
@@ -127,10 +127,10 @@
       "features": 40,
       "threads": 1,
       "model": "alloygbm",
-      "fit_seconds": 12.182497834321111,
-      "predict_seconds": 0.09903599973767996,
+      "fit_seconds": 10.334112165961415,
+      "predict_seconds": 0.1037165829911828,
       "metric_name": "rmse",
-      "metric": 2.433727709144698
+      "metric": 2.433727666064474
     },
     {
       "task": "regression",
@@ -138,8 +138,8 @@
       "features": 40,
       "threads": 1,
       "model": "lightgbm",
-      "fit_seconds": 6.806914791930467,
-      "predict_seconds": 0.47454358311370015,
+      "fit_seconds": 6.840111959259957,
+      "predict_seconds": 0.46506962506100535,
       "metric_name": "rmse",
       "metric": 2.432197850097394
     },
@@ -149,8 +149,8 @@
       "features": 40,
       "threads": 1,
       "model": "xgboost",
-      "fit_seconds": 8.122252416796982,
-      "predict_seconds": 0.10818962519988418,
+      "fit_seconds": 8.066148709040135,
+      "predict_seconds": 0.11019245814532042,
       "metric_name": "rmse",
       "metric": 2.43410498091458
     },
@@ -160,10 +160,10 @@
       "features": 40,
       "threads": 1,
       "model": "catboost",
-      "fit_seconds": 8.110188582912087,
-      "predict_seconds": 0.012367417104542255,
+      "fit_seconds": 7.609249165747315,
+      "predict_seconds": 0.014568916987627745,
       "metric_name": "rmse",
-      "metric": 2.4181080610324557
+      "metric": 2.4193432285577523
     },
     {
       "task": "regression",
@@ -171,10 +171,10 @@
       "features": 40,
       "threads": 10,
       "model": "alloygbm",
-      "fit_seconds": 7.006173708010465,
-      "predict_seconds": 0.10317145800217986,
+      "fit_seconds": 4.00914516672492,
+      "predict_seconds": 0.10735158296301961,
       "metric_name": "rmse",
-      "metric": 2.4337277046295402
+      "metric": 2.433727666064474
     },
     {
       "task": "regression",
@@ -182,8 +182,8 @@
       "features": 40,
       "threads": 10,
       "model": "lightgbm",
-      "fit_seconds": 2.4089832501485944,
-      "predict_seconds": 0.09586562495678663,
+      "fit_seconds": 2.434640542138368,
+      "predict_seconds": 0.10064500011503696,
       "metric_name": "rmse",
       "metric": 2.432197850097394
     },
@@ -193,8 +193,8 @@
       "features": 40,
       "threads": 10,
       "model": "xgboost",
-      "fit_seconds": 8.131852000020444,
-      "predict_seconds": 0.10694645764306188,
+      "fit_seconds": 8.27298904210329,
+      "predict_seconds": 0.10761487483978271,
       "metric_name": "rmse",
       "metric": 2.43410498091458
     },
@@ -204,10 +204,10 @@
       "features": 40,
       "threads": 10,
       "model": "catboost",
-      "fit_seconds": 1.93726637493819,
-      "predict_seconds": 0.013013000134378672,
+      "fit_seconds": 2.2710110833868384,
+      "predict_seconds": 0.012468250002712011,
       "metric_name": "rmse",
-      "metric": 2.4181080610324557
+      "metric": 2.4193432285577523
     },
     {
       "task": "classification",
@@ -215,8 +215,8 @@
       "features": 40,
       "threads": 1,
       "model": "alloygbm",
-      "fit_seconds": 2.6355012920685112,
-      "predict_seconds": 0.022286249790340662,
+      "fit_seconds": 2.3720084158703685,
+      "predict_seconds": 0.022709541954100132,
       "metric_name": "accuracy",
       "metric": 0.6609
     },
@@ -226,8 +226,8 @@
       "features": 40,
       "threads": 1,
       "model": "lightgbm",
-      "fit_seconds": 1.7829241249710321,
-      "predict_seconds": 0.09522087499499321,
+      "fit_seconds": 1.7831326252780855,
+      "predict_seconds": 0.09111758414655924,
       "metric_name": "accuracy",
       "metric": 0.6595
     },
@@ -237,8 +237,8 @@
       "features": 40,
       "threads": 1,
       "model": "xgboost",
-      "fit_seconds": 1.7869087080471218,
-      "predict_seconds": 0.021865457762032747,
+      "fit_seconds": 1.7878167917951941,
+      "predict_seconds": 0.022842166014015675,
       "metric_name": "accuracy",
       "metric": 0.66245
     },
@@ -248,10 +248,10 @@
       "features": 40,
       "threads": 1,
       "model": "catboost",
-      "fit_seconds": 2.7700888328254223,
-      "predict_seconds": 0.006622292101383209,
+      "fit_seconds": 2.6726347501389682,
+      "predict_seconds": 0.007207625079900026,
       "metric_name": "accuracy",
-      "metric": 0.6626
+      "metric": 0.66355
     },
     {
       "task": "classification",
@@ -259,8 +259,8 @@
       "features": 40,
       "threads": 10,
       "model": "alloygbm",
-      "fit_seconds": 1.5000630831345916,
-      "predict_seconds": 0.06047670915722847,
+      "fit_seconds": 1.1806004168465734,
+      "predict_seconds": 0.026425250340253115,
       "metric_name": "accuracy",
       "metric": 0.6609
     },
@@ -270,8 +270,8 @@
       "features": 40,
       "threads": 10,
       "model": "lightgbm",
-      "fit_seconds": 1.0047229998745024,
-      "predict_seconds": 0.02241079229861498,
+      "fit_seconds": 1.021821541711688,
+      "predict_seconds": 0.026303334161639214,
       "metric_name": "accuracy",
       "metric": 0.6595
     },
@@ -281,8 +281,8 @@
       "features": 40,
       "threads": 10,
       "model": "xgboost",
-      "fit_seconds": 1.7861220831982791,
-      "predict_seconds": 0.02195870829746127,
+      "fit_seconds": 1.8811015831306577,
+      "predict_seconds": 0.022656541783362627,
       "metric_name": "accuracy",
       "metric": 0.66245
     },
@@ -292,10 +292,10 @@
       "features": 40,
       "threads": 10,
       "model": "catboost",
-      "fit_seconds": 0.7734512500464916,
-      "predict_seconds": 0.007147666998207569,
+      "fit_seconds": 0.9781637503765523,
+      "predict_seconds": 0.007587791886180639,
       "metric_name": "accuracy",
-      "metric": 0.6626
+      "metric": 0.66355
     },
     {
       "task": "classification",
@@ -303,10 +303,10 @@
       "features": 40,
       "threads": 1,
       "model": "alloygbm",
-      "fit_seconds": 12.679357333108783,
-      "predict_seconds": 0.10830699978396297,
+      "fit_seconds": 11.463727375026792,
+      "predict_seconds": 0.11497220816090703,
       "metric_name": "accuracy",
-      "metric": 0.66343
+      "metric": 0.663665
     },
     {
       "task": "classification",
@@ -314,8 +314,8 @@
       "features": 40,
       "threads": 1,
       "model": "lightgbm",
-      "fit_seconds": 7.443214375060052,
-      "predict_seconds": 0.4714089999906719,
+      "fit_seconds": 7.6831887499429286,
+      "predict_seconds": 0.47180616576224566,
       "metric_name": "accuracy",
       "metric": 0.664605
     },
@@ -325,8 +325,8 @@
       "features": 40,
       "threads": 1,
       "model": "xgboost",
-      "fit_seconds": 8.173024833202362,
-      "predict_seconds": 0.10742316721007228,
+      "fit_seconds": 8.363475167192519,
+      "predict_seconds": 0.12201454117894173,
       "metric_name": "accuracy",
       "metric": 0.66453
     },
@@ -336,10 +336,10 @@
       "features": 40,
       "threads": 1,
       "model": "catboost",
-      "fit_seconds": 11.316905625164509,
-      "predict_seconds": 0.03489245939999819,
+      "fit_seconds": 11.297464916016906,
+      "predict_seconds": 0.032835624646395445,
       "metric_name": "accuracy",
-      "metric": 0.664965
+      "metric": 0.66552
     },
     {
       "task": "classification",
@@ -347,8 +347,8 @@
       "features": 40,
       "threads": 10,
       "model": "alloygbm",
-      "fit_seconds": 7.911973458714783,
-      "predict_seconds": 0.12702483404427767,
+      "fit_seconds": 4.7087107500992715,
+      "predict_seconds": 0.1179485828615725,
       "metric_name": "accuracy",
       "metric": 0.663665
     },
@@ -358,8 +358,8 @@
       "features": 40,
       "threads": 10,
       "model": "lightgbm",
-      "fit_seconds": 2.9569528326392174,
-      "predict_seconds": 0.10963212512433529,
+      "fit_seconds": 2.582156457938254,
+      "predict_seconds": 0.10901804221794009,
       "metric_name": "accuracy",
       "metric": 0.664605
     },
@@ -369,8 +369,8 @@
       "features": 40,
       "threads": 10,
       "model": "xgboost",
-      "fit_seconds": 8.186029999982566,
-      "predict_seconds": 0.11805870803073049,
+      "fit_seconds": 8.343366999644786,
+      "predict_seconds": 0.11511141713708639,
       "metric_name": "accuracy",
       "metric": 0.66453
     },
@@ -380,10 +380,10 @@
       "features": 40,
       "threads": 10,
       "model": "catboost",
-      "fit_seconds": 2.8323069158941507,
-      "predict_seconds": 0.03788966732099652,
+      "fit_seconds": 3.3389168330468237,
+      "predict_seconds": 0.03968149982392788,
       "metric_name": "accuracy",
-      "metric": 0.664965
+      "metric": 0.66552
     }
   ]
 }
