@@ -64,10 +64,18 @@ These do not use the query `group` for their gradient (it is still required by
   - Sigmoid sharpness for `"rank:pairwise"`, `"rank:ndcg"`, and `"yetirank"`.
     Higher values make pairwise score margins steeper. Must be finite and
     greater than zero.
-- `lambdarank_truncation_level: int | None = None`
+- `lambdarank_truncation_level: int | None = 30`
   - For `"rank:ndcg"`, score only LambdaMART pairs where at least one document
-    is currently ranked in the top-k positions for its query. `None` preserves
-    all-pairs behavior.
+    is currently ranked in the top-k positions for its query. `None` scores
+    all pairs. The default matches LightGBM.
+  - This trades quality for speed, and group size decides which side wins.
+    All-pairs is `O(n^2)` per query group. On 50 groups of 2,000 documents,
+    `30` fit in 2.05 s for NDCG 0.9735 while `None` took 3.65 s for NDCG
+    0.9901 (LightGBM's default: 0.47 s, NDCG 0.9727). With small groups
+    (tens of documents) a truncation level at or above the group size is
+    effectively all-pairs and costs nothing; with large groups (financial
+    cross-sections) raise it or pass `None` when ranking quality matters
+    more than fit time.
 - `lambdarank_normalize: bool = False`
   - For `"rank:ndcg"`, apply per-query LambdaMART lambda normalization. This
     can help with unbalanced query groups. `False` preserves the original
@@ -288,7 +296,7 @@ strategy:
 | `dart_normalize_type` | str | `"tree"` | `"tree"` or `"forest"` normalization (DART). |
 | `dart_sample_type` | str | `"uniform"` | `"uniform"` or `"weighted"` dropout (DART). |
 | `ranking_sigma` | float | `1.0` | Sigmoid sharpness for joint `rank:pairwise` and `rank:ndcg` objectives. |
-| `lambdarank_truncation_level` | int \| None | `None` | Top-k pair truncation for joint `rank:ndcg`. |
+| `lambdarank_truncation_level` | int \| None | `30` | Top-k pair truncation for joint `rank:ndcg`; `None` scores all pairs. |
 | `lambdarank_normalize` | bool | `False` | Per-query lambda normalization for joint `rank:ndcg`. |
 | `categorical_feature_indices` | list[int] | `[]` | Column indices to treat as native categorical. |
 | `max_cat_threshold` | int | `0` | Max categories for Fisher-sort splits (0 = disabled). |

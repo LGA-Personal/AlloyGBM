@@ -1,0 +1,389 @@
+{
+  "run_id": "20260906T065026Z",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "logical_cpus": 10,
+    "python": "3.13.5",
+    "thread_budgets": [
+      1,
+      10
+    ],
+    "versions": {
+      "alloygbm": "1.0.0",
+      "lightgbm": "4.6.0",
+      "xgboost": "3.2.0",
+      "catboost": "1.2.10",
+      "numpy": "2.5.0"
+    }
+  },
+  "params": {
+    "rows": [
+      200000,
+      1000000
+    ],
+    "features": 40,
+    "rounds": 100,
+    "max_depth": 6,
+    "learning_rate": 0.1,
+    "seed": 7,
+    "row_subsample": 0.8,
+    "col_subsample": 0.8,
+    "lightgbm_subsample_freq": 1,
+    "lightgbm_num_leaves": "2 ** max_depth"
+  },
+  "records": [
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "alloygbm",
+      "fit_seconds": 2.205867165699601,
+      "predict_seconds": 0.020900999661535025,
+      "metric_name": "rmse",
+      "metric": 2.07626443159557
+    },
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "lightgbm",
+      "fit_seconds": 1.7033321661874652,
+      "predict_seconds": 0.09276762511581182,
+      "metric_name": "rmse",
+      "metric": 2.0686625255006375
+    },
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "xgboost",
+      "fit_seconds": 1.8159354580566287,
+      "predict_seconds": 0.021449666935950518,
+      "metric_name": "rmse",
+      "metric": 2.071844388644303
+    },
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "catboost",
+      "fit_seconds": 1.9514081249944866,
+      "predict_seconds": 0.002830957993865013,
+      "metric_name": "rmse",
+      "metric": 2.036849129879942
+    },
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "alloygbm",
+      "fit_seconds": 1.0021223332732916,
+      "predict_seconds": 0.02081845887005329,
+      "metric_name": "rmse",
+      "metric": 2.07626443159557
+    },
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "lightgbm",
+      "fit_seconds": 0.984588791616261,
+      "predict_seconds": 0.02131425030529499,
+      "metric_name": "rmse",
+      "metric": 2.0686625255006375
+    },
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "xgboost",
+      "fit_seconds": 1.8180161253549159,
+      "predict_seconds": 0.021343874745070934,
+      "metric_name": "rmse",
+      "metric": 2.071844388644303
+    },
+    {
+      "task": "regression",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "catboost",
+      "fit_seconds": 0.573953834362328,
+      "predict_seconds": 0.002796499989926815,
+      "metric_name": "rmse",
+      "metric": 2.036849129879942
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "alloygbm",
+      "fit_seconds": 10.334112165961415,
+      "predict_seconds": 0.1037165829911828,
+      "metric_name": "rmse",
+      "metric": 2.433727666064474
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "lightgbm",
+      "fit_seconds": 6.840111959259957,
+      "predict_seconds": 0.46506962506100535,
+      "metric_name": "rmse",
+      "metric": 2.432197850097394
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "xgboost",
+      "fit_seconds": 8.066148709040135,
+      "predict_seconds": 0.11019245814532042,
+      "metric_name": "rmse",
+      "metric": 2.43410498091458
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "catboost",
+      "fit_seconds": 7.609249165747315,
+      "predict_seconds": 0.014568916987627745,
+      "metric_name": "rmse",
+      "metric": 2.4193432285577523
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "alloygbm",
+      "fit_seconds": 4.00914516672492,
+      "predict_seconds": 0.10735158296301961,
+      "metric_name": "rmse",
+      "metric": 2.433727666064474
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "lightgbm",
+      "fit_seconds": 2.434640542138368,
+      "predict_seconds": 0.10064500011503696,
+      "metric_name": "rmse",
+      "metric": 2.432197850097394
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "xgboost",
+      "fit_seconds": 8.27298904210329,
+      "predict_seconds": 0.10761487483978271,
+      "metric_name": "rmse",
+      "metric": 2.43410498091458
+    },
+    {
+      "task": "regression",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "catboost",
+      "fit_seconds": 2.2710110833868384,
+      "predict_seconds": 0.012468250002712011,
+      "metric_name": "rmse",
+      "metric": 2.4193432285577523
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "alloygbm",
+      "fit_seconds": 2.3720084158703685,
+      "predict_seconds": 0.022709541954100132,
+      "metric_name": "accuracy",
+      "metric": 0.6609
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "lightgbm",
+      "fit_seconds": 1.7831326252780855,
+      "predict_seconds": 0.09111758414655924,
+      "metric_name": "accuracy",
+      "metric": 0.6595
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "xgboost",
+      "fit_seconds": 1.7878167917951941,
+      "predict_seconds": 0.022842166014015675,
+      "metric_name": "accuracy",
+      "metric": 0.66245
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 1,
+      "model": "catboost",
+      "fit_seconds": 2.6726347501389682,
+      "predict_seconds": 0.007207625079900026,
+      "metric_name": "accuracy",
+      "metric": 0.66355
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "alloygbm",
+      "fit_seconds": 1.1806004168465734,
+      "predict_seconds": 0.026425250340253115,
+      "metric_name": "accuracy",
+      "metric": 0.6609
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "lightgbm",
+      "fit_seconds": 1.021821541711688,
+      "predict_seconds": 0.026303334161639214,
+      "metric_name": "accuracy",
+      "metric": 0.6595
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "xgboost",
+      "fit_seconds": 1.8811015831306577,
+      "predict_seconds": 0.022656541783362627,
+      "metric_name": "accuracy",
+      "metric": 0.66245
+    },
+    {
+      "task": "classification",
+      "rows": 200000,
+      "features": 40,
+      "threads": 10,
+      "model": "catboost",
+      "fit_seconds": 0.9781637503765523,
+      "predict_seconds": 0.007587791886180639,
+      "metric_name": "accuracy",
+      "metric": 0.66355
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "alloygbm",
+      "fit_seconds": 11.463727375026792,
+      "predict_seconds": 0.11497220816090703,
+      "metric_name": "accuracy",
+      "metric": 0.663665
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "lightgbm",
+      "fit_seconds": 7.6831887499429286,
+      "predict_seconds": 0.47180616576224566,
+      "metric_name": "accuracy",
+      "metric": 0.664605
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "xgboost",
+      "fit_seconds": 8.363475167192519,
+      "predict_seconds": 0.12201454117894173,
+      "metric_name": "accuracy",
+      "metric": 0.66453
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 1,
+      "model": "catboost",
+      "fit_seconds": 11.297464916016906,
+      "predict_seconds": 0.032835624646395445,
+      "metric_name": "accuracy",
+      "metric": 0.66552
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "alloygbm",
+      "fit_seconds": 4.7087107500992715,
+      "predict_seconds": 0.1179485828615725,
+      "metric_name": "accuracy",
+      "metric": 0.663665
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "lightgbm",
+      "fit_seconds": 2.582156457938254,
+      "predict_seconds": 0.10901804221794009,
+      "metric_name": "accuracy",
+      "metric": 0.664605
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "xgboost",
+      "fit_seconds": 8.343366999644786,
+      "predict_seconds": 0.11511141713708639,
+      "metric_name": "accuracy",
+      "metric": 0.66453
+    },
+    {
+      "task": "classification",
+      "rows": 1000000,
+      "features": 40,
+      "threads": 10,
+      "model": "catboost",
+      "fit_seconds": 3.3389168330468237,
+      "predict_seconds": 0.03968149982392788,
+      "metric_name": "accuracy",
+      "metric": 0.66552
+    }
+  ]
+}

@@ -4,9 +4,13 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.10` release is a patch optimization release: it speeds existing piecewise-linear leaf training and factor-neutral split search, preserves artifact compatibility, and adds exposure preprocessing diagnostics for factor-neutral workflows. Follow-up v0.12.11 work changes numeric `GBMRegressor.predict(...)` and `GBMRanker.predict(...)` results to NumPy arrays while keeping artifact compatibility helpers list-returning. No artifact-format change. The remaining user-facing limitations are unchanged from v0.12.9: CPU-only runtime, Classifier / multiclass rejection of GLM and quantile objectives, and squared-error-only `neutralization="pre_target"`.
+`1.0.0` is the first stable release. The public Python API, the binary artifact format, and the determinism guarantees are now under semantic versioning — breaking changes require a major version. It ships the full pre-1.0 development series (PRs #71–#141: split-search feasibility, quantile binning by default, monotone bounds propagation, node-level parallelism, SoA histograms, compact predictor nodes, GIL release, `n_jobs`, EFB, quantile sketches, and the MorphBoost/DRO/PL/DART calibration work) together with the fixes from three review passes recorded in `docs/reviews/`.
 
-**No artifact format change.** Test counts: 452 cargo + 657 pytest.
+Four defaults changed deliberately at the 1.0 boundary — `n_estimators` 6→100, `lambdarank_truncation_level` None→30, the new `dart_skip_drop=0.5`, and unrounded `predict_proba` — each because the previous value was measurably wrong. Three correctness defects were fixed: piecewise-linear leaves diverging at `lambda_l2=0`, SHAP routing typical models through a brute-force O(2^N) path, and `feature_bundling="exact"` silently no-opping under the default binning.
+
+The remaining user-facing limitations are unchanged: CPU-only runtime, Classifier / multiclass rejection of GLM and quantile objectives, and squared-error-only `neutralization="pre_target"`.
+
+**No artifact format change.** Test counts: 792 cargo + 1,001 pytest (plus 62 subtests).
 
 ## DART Expected-Drop Calibration (PR #137)
 
@@ -136,6 +140,37 @@ fresh post-duplicate-storage baseline, the full candidate held mean/p99/max rank
 0.896x, and incremental fit RSS from 145.86 MiB to 81.36 MiB. See the
 [candidate evidence](../benchmarks/architectural_backlog_v1.md#approximate-quantile-sketch-candidate)
 and [completed plan](../benchmarks/architectural_backlog_quantile_sketches_implementation.md).
+
+## What Shipped In v1.0.0
+
+**Stability commitment.** Semantic versioning now covers the public Python API,
+the binary artifact format (a 1.x artifact stays readable by any later 1.x),
+and determinism — a fixed `seed` with `deterministic=True` produces
+byte-identical artifacts across repeated fits *and* across `n_jobs` thread
+counts. The Rust crates remain internal and unpublished; exact floating-point
+values across releases and parameters marked experimental
+(`dro_robust_split`) are explicitly out of scope.
+
+**Breaking default changes.** `n_estimators` 6→100; `lambdarank_truncation_level`
+None→30 (matching LightGBM); new `dart_skip_drop` defaulting to 0.5;
+`predict_proba` no longer rounds to 7 decimals and `predict_log_proba` is now
+exactly `log(predict_proba)`.
+
+**Correctness fixes.** PL leaves could diverge at `lambda_l2=0` (training RMSE
+~1.08e6 → 0.19) — the effective ridge is now floored relative to the mean
+diagonal of `XᵀHX`, and a leaf whose bounded output would exceed
+`max_abs_leaf_value` falls back to a scalar leaf. SHAP routed any model with
+≤25 distinct split features through brute-force O(2^N) Shapley; TreeSHAP is
+exact and now used everywhere, with rows explained in parallel (18.2 s →
+0.015 s on a 50-tree, 12-feature model over 200 rows). `feature_bundling="exact"`
+now warns instead of silently training unbundled.
+
+**Testing.** New per-mode quality gate (`benchmarks/mode_quality_gate.py`, in
+CI) trains 21 mode configurations on fixed seeds and asserts each beats the
+constant predictor and stays within a factor of the plain-boosting baseline —
+the class of regression byte-equivalence tests structurally cannot catch. The
+perf-regression gate gained a 50k×40 scenario so its scaling check covers the
+histogram-dominated regime.
 
 ## What Shipped In v0.12.10
 
@@ -1016,15 +1051,29 @@ Python API surface changes.
 
 ## Longer-Term Themes
 
-- Joint shared-tree multi-label ranking (one ensemble updating all label
-  predictions simultaneously) — the v0.7.1 `MultiLabelGBMRanker` is a
-  K-independent-rankers wrapper; a shared-tree engine is a v0.7.2+ follow-up.
-- Path-walk alignment between SHAP and the predictor for piecewise-linear
-  leaves (so strict additivity holds on continuous-feature artifacts).
-- MorphBoost EMA snapshot persisted in the warm-start artifact so resumed
-  training does not restart the EMA cold.
-- Dart / GOSS boosting modes.
-- GPU backend.
+Every item previously listed here (joint shared-tree multi-label ranking,
+SHAP/predictor path-walk alignment for PL leaves, MorphBoost EMA warm-start
+persistence, DART and GOSS boosting) shipped between v0.7.2 and v0.12.x. The
+current post-1.0 themes are:
+
+- **Parallel scaling.** The headline performance opportunity. Measured on a
+  10-core machine at 250k×50: `n_jobs=1` takes 4.64 s and unlimited threads
+  2.40 s — a 1.9× speedup on 10 cores, against LightGBM's 1.44 s. The
+  single-threaded work is competitive; thread utilization is not. Candidate
+  work: interleaved gradient/hessian histogram layout, in-place per-tree row
+  partitioning, and deeper node-level parallelism. See the
+  [v1.0 readiness resolutions](../reviews/2026-08-29-v1.0-prep-resolutions.md)
+  §2.4.
+- **Bundle-aware split scanning.** Exclusive feature bundling currently reduces
+  storage and histogram memory traffic but not split-search work, because
+  per-original-feature histograms are still materialized and scanned, so it is
+  not a wall-clock speedup. Realizing the usual EFB win needs the split scanner
+  to consume bundles directly — which also forfeits the current
+  byte-identical-artifact guarantee between bundled and unbundled fits, so it
+  needs its own validation cycle. Modal-bin bundle discovery (making EFB
+  reachable under the default quantile binning) is only worth doing after this.
+- **GPU backend.** The `BackendOps` trait exists for this; only `CpuBackend` is
+  implemented.
 
 ## Planning Style
 

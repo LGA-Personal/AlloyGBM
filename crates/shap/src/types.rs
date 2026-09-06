@@ -2,11 +2,16 @@ use alloygbm_core::{
     deserialize_model_artifact_v1, format_required_section_mode_error,
     required_section_compatibility_report,
 };
-use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel, TrainedStump};
+#[cfg(test)]
+use alloygbm_engine::TrainedStump;
+use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel};
 use std::collections::HashMap;
 
+#[cfg(test)]
 use crate::binning::MAX_EXACT_SPLIT_FEATURES;
-use crate::brute_force::{decode_tree_node_id, tree_local_key};
+use crate::brute_force::decode_tree_node_id;
+#[cfg(test)]
+use crate::brute_force::tree_local_key;
 use crate::error::{ShapError, ShapResult};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +41,7 @@ pub(crate) struct ArtifactShapContext {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 pub(crate) struct ModelStructure<'a> {
     pub(crate) tree_root_ids: Vec<u32>,
     pub(crate) nodes_by_tree_local_id: HashMap<u64, &'a TrainedStump>,
@@ -229,6 +235,7 @@ pub(crate) fn load_artifact_context(artifact_bytes: &[u8]) -> ShapResult<Artifac
     })
 }
 
+#[cfg(test)]
 pub(crate) fn build_model_structure(model: &TrainedModel) -> ShapResult<ModelStructure<'_>> {
     let mut nodes_by_tree_local_id = HashMap::new();
     let mut tree_root_ids = Vec::new();

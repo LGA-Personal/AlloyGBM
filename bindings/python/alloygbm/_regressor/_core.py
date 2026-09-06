@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+import warnings
 from numbers import Integral
 
 import numpy as np
@@ -66,7 +67,7 @@ class _GBMEstimatorCore(
         *,
         learning_rate: float = 0.1,
         max_depth: int = 6,
-        n_estimators: int = 6,
+        n_estimators: int = 100,
         row_subsample: float = 1.0,
         col_subsample: float = 1.0,
         colsample_bynode: float = 1.0,
@@ -123,6 +124,7 @@ class _GBMEstimatorCore(
         dart_max_drop: int = 5,
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
+        dart_skip_drop: float = 0.5,
         tweedie_variance_power: float = 1.5,
         poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
@@ -292,6 +294,10 @@ class _GBMEstimatorCore(
         _validate_quantile_alpha(quantile_alpha)
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
+        # "auto" delegates the split-criterion choice to AlloyGBM and today
+        # resolves to the standard criterion (i.e. same behaviour as
+        # "manual"); it may become adaptive in a future release. "manual" is
+        # the commitment to the standard criterion across upgrades.
         if training_mode not in ("auto", "manual", "morph"):
             raise ValueError(
                 f"training_mode must be 'auto', 'manual', or 'morph', got {training_mode!r}"
@@ -419,6 +425,12 @@ class _GBMEstimatorCore(
                     "dart_sample_type in {'uniform', 'weighted'}, "
                     f"got {dart_sample_type!r}"
                 )
+            skip_drop_value = float(dart_skip_drop)
+            if not math.isfinite(skip_drop_value) or not 0.0 <= skip_drop_value <= 1.0:
+                raise ValueError(
+                    "dart_skip_drop must be a finite value in [0.0, 1.0], "
+                    f"got {dart_skip_drop!r}"
+                )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -503,6 +515,7 @@ class _GBMEstimatorCore(
         self.dart_max_drop = int(dart_max_drop)
         self.dart_normalize_type = str(dart_normalize_type)
         self.dart_sample_type = str(dart_sample_type)
+        self.dart_skip_drop = float(dart_skip_drop)
         self.tweedie_variance_power = float(tweedie_variance_power)
         self.poisson_max_delta_step = float(poisson_max_delta_step)
         self.quantile_alpha = float(quantile_alpha)
@@ -528,7 +541,7 @@ class _GBMEstimatorCore(
         *,
         learning_rate: float = 0.1,
         max_depth: int = 6,
-        n_estimators: int = 6,
+        n_estimators: int = 100,
         row_subsample: float = 1.0,
         col_subsample: float = 1.0,
         colsample_bynode: float = 1.0,
@@ -585,6 +598,7 @@ class _GBMEstimatorCore(
         dart_max_drop: int = 5,
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
+        dart_skip_drop: float = 0.5,
         tweedie_variance_power: float = 1.5,
         poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
@@ -649,6 +663,7 @@ class _GBMEstimatorCore(
         self.dart_max_drop = dart_max_drop
         self.dart_normalize_type = dart_normalize_type
         self.dart_sample_type = dart_sample_type
+        self.dart_skip_drop = dart_skip_drop
         self.tweedie_variance_power = tweedie_variance_power
         self.poisson_max_delta_step = poisson_max_delta_step
         self.quantile_alpha = quantile_alpha
@@ -731,6 +746,7 @@ class _GBMEstimatorCore(
             f"dart_max_drop={self.dart_max_drop}, "
             f"dart_normalize_type='{self.dart_normalize_type}', "
             f"dart_sample_type='{self.dart_sample_type}', "
+            f"dart_skip_drop={self.dart_skip_drop}, "
             f"poisson_max_delta_step={self.poisson_max_delta_step}, "
             f"quantile_alpha={self.quantile_alpha}, "
             f"n_jobs={self.n_jobs}"
@@ -800,6 +816,7 @@ class _GBMEstimatorCore(
             "dart_max_drop": self.dart_max_drop,
             "dart_normalize_type": self.dart_normalize_type,
             "dart_sample_type": self.dart_sample_type,
+            "dart_skip_drop": self.dart_skip_drop,
             "tweedie_variance_power": self.tweedie_variance_power,
             "poisson_max_delta_step": self.poisson_max_delta_step,
             "quantile_alpha": self.quantile_alpha,
@@ -868,6 +885,7 @@ class _GBMEstimatorCore(
             "dart_max_drop",
             "dart_normalize_type",
             "dart_sample_type",
+            "dart_skip_drop",
             "tweedie_variance_power",
             "poisson_max_delta_step",
             "quantile_alpha",
@@ -1394,6 +1412,14 @@ class _GBMEstimatorCore(
                     f"got {s!r}"
                 )
             self.dart_sample_type = s
+        if "dart_skip_drop" in params:
+            value = float(params["dart_skip_drop"])
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    "dart_skip_drop must be a finite value in [0.0, 1.0], "
+                    f"got {params['dart_skip_drop']!r}"
+                )
+            self.dart_skip_drop = value
         if "tweedie_variance_power" in params:
             v = float(params["tweedie_variance_power"])
             self.tweedie_variance_power = v
@@ -2067,6 +2093,9 @@ class _GBMEstimatorCore(
                     dart_sample_type=(
                         self.dart_sample_type if self.boosting_mode == "dart" else None
                     ),
+                    dart_skip_drop=(
+                        self.dart_skip_drop if self.boosting_mode == "dart" else None
+                    ),
                     tweedie_variance_power=(
                         self.tweedie_variance_power
                         if self._objective_name() == "tweedie"
@@ -2226,6 +2255,9 @@ class _GBMEstimatorCore(
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
+                ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
@@ -2335,6 +2367,9 @@ class _GBMEstimatorCore(
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
                 ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power
@@ -2488,6 +2523,42 @@ class _GBMEstimatorCore(
             "skipped_feature_count": int(diagnostics.skipped_feature_count),
             "observed_conflict_count": int(diagnostics.observed_conflict_count),
         }
+        self._warn_if_feature_bundling_inert()
+
+    def _warn_if_feature_bundling_inert(self) -> None:
+        """Warn when bundling was asked for but nothing could be bundled.
+
+        Bundle discovery treats *bin 0* as a feature's "empty" value and
+        skips any column that is more than a quarter non-zero. Only
+        ``continuous_binning_strategy="linear"`` reliably maps a raw 0.0 to
+        bin 0; under the default ``"quantile"`` strategy a one-hot column's
+        zeros can land in a higher bin, so every candidate is skipped and
+        the request silently does nothing.
+        """
+        diagnostics = getattr(self, "feature_bundling_diagnostics_", None)
+        if not diagnostics or diagnostics.get("active"):
+            return
+        if getattr(self, "feature_bundling", "off") == "off":
+            return
+        message = (
+            "feature_bundling='exact' produced no bundles, so training ran "
+            f"unbundled ({diagnostics.get('skipped_feature_count', 0)} of "
+            f"{diagnostics.get('original_feature_count', 0)} features were "
+            "skipped as bundle candidates)."
+        )
+        if diagnostics.get("observed_conflict_count"):
+            message += (
+                " Some candidate features were not mutually exclusive on "
+                "every row."
+            )
+        elif self.continuous_binning_strategy != "linear":
+            message += (
+                " Bundle discovery requires each sparse feature's dominant "
+                "value to occupy bin 0, which "
+                f"continuous_binning_strategy='{self.continuous_binning_strategy}' "
+                "does not guarantee; try continuous_binning_strategy='linear'."
+            )
+        warnings.warn(message, UserWarning, stacklevel=3)
 
     def _publish_fitted_schema(self, X: object, feature_count: int) -> None:
         self.n_features_in_ = int(feature_count)
@@ -2796,6 +2867,9 @@ class _GBMEstimatorCore(
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
+                ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
@@ -2876,6 +2950,9 @@ class _GBMEstimatorCore(
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                dart_skip_drop=(
+                    self.dart_skip_drop if self.boosting_mode == "dart" else None
                 ),
                 tweedie_variance_power=(
                     self.tweedie_variance_power

@@ -924,6 +924,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
+    dart_skip_drop=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
     quantile_alpha=None,
@@ -978,6 +979,7 @@ pub(crate) fn train_regression_artifact(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    dart_skip_drop: Option<f32>,
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
@@ -1017,6 +1019,7 @@ pub(crate) fn train_regression_artifact(
         dart_max_drop,
         dart_normalize_type,
         dart_sample_type,
+        dart_skip_drop,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -1153,6 +1156,7 @@ pub(crate) fn train_regression_artifact(
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
+    dart_skip_drop=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
     quantile_alpha=None,
@@ -1209,6 +1213,7 @@ pub(crate) fn train_regression_artifact_dense(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    dart_skip_drop: Option<f32>,
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
@@ -1248,6 +1253,7 @@ pub(crate) fn train_regression_artifact_dense(
         dart_max_drop,
         dart_normalize_type,
         dart_sample_type,
+        dart_skip_drop,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -1406,6 +1412,7 @@ pub(crate) fn train_regression_artifact_dense(
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
+    dart_skip_drop=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
     quantile_alpha=None,
@@ -1488,6 +1495,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    dart_skip_drop: Option<f32>,
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
@@ -1528,6 +1536,7 @@ pub(crate) fn train_regression_artifact_with_summary(
         dart_max_drop,
         dart_normalize_type,
         dart_sample_type,
+        dart_skip_drop,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -1780,6 +1789,7 @@ mod tests {
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
+    dart_skip_drop=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
     quantile_alpha=None,
@@ -1865,6 +1875,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    dart_skip_drop: Option<f32>,
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
@@ -1905,6 +1916,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         dart_max_drop,
         dart_normalize_type,
         dart_sample_type,
+        dart_skip_drop,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -2099,6 +2111,7 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
+    dart_skip_drop=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
     quantile_alpha=None,
@@ -2184,6 +2197,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    dart_skip_drop: Option<f32>,
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
@@ -2230,6 +2244,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         dart_max_drop,
         dart_normalize_type,
         dart_sample_type,
+        dart_skip_drop,
     )?;
     let params = build_train_params(
         learning_rate,

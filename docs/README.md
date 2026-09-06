@@ -32,11 +32,16 @@ and repository evolution:
   - Research notes, inspiration, and candidate follow-ups.
 - `reference/`
   - Stable pointers into the codebase and developer-facing entry points.
+  - Includes `release_checklist.md`, the operating manual for cutting a release.
+- `reviews/`
+  - Periodic deep-dive code reviews (design, efficiency, correctness) and the
+    matching `*-resolutions.md` follow-ups recording how findings were closed.
+    See `reviews/README.md` for the naming and metadata conventions.
 - `archive/`
   - Legacy material from the previous planning/documentation system.
   - Includes `v0.1_plans/` with pre-v0.2.0 limitation analysis and implementation plans.
 - `limitations.md`
-  - Current limitations, the resolved-since-v0.1 list, and v0.7.x follow-ups.
+  - Current limitations and the resolved-since-v0.1 list.
 
 If you are trying to understand the project as a maintainer, start here:
 

@@ -115,6 +115,7 @@ impl JointPredictorHandle {
     dart_max_drop=None::<usize>,
     dart_normalize_type=None::<String>,
     dart_sample_type=None::<String>,
+    dart_skip_drop=None::<f32>,
     init_artifact_bytes=None::<Vec<u8>>,
     init_baselines=None::<Vec<f32>>,
     init_rounds_completed=None::<usize>,
@@ -170,6 +171,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<String>,
     dart_sample_type: Option<String>,
+    dart_skip_drop: Option<f32>,
     init_artifact_bytes: Option<Vec<u8>>,
     init_baselines: Option<Vec<f32>>,
     init_rounds_completed: Option<usize>,
@@ -232,6 +234,7 @@ pub(crate) fn train_joint_multi_label_ranker(
                 dart_max_drop,
                 dart_normalize_type,
                 dart_sample_type,
+                dart_skip_drop,
                 init_artifact_bytes,
                 init_baselines,
                 init_rounds_completed,
@@ -290,6 +293,7 @@ fn train_joint_multi_label_ranker_in_fit_pool(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<String>,
     dart_sample_type: Option<String>,
+    dart_skip_drop: Option<f32>,
     init_artifact_bytes: Option<Vec<u8>>,
     init_baselines: Option<Vec<f32>>,
     init_rounds_completed: Option<usize>,
@@ -412,6 +416,7 @@ fn train_joint_multi_label_ranker_in_fit_pool(
         dart_max_drop,
         dart_normalize_type.as_deref(),
         dart_sample_type.as_deref(),
+        dart_skip_drop,
     )?;
     // v0.10.5: DRO leaf solver — mirrors the single-output path.
     let parsed_leaf_solver = parse_leaf_solver(&leaf_solver)?;

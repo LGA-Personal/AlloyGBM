@@ -384,3 +384,95 @@ class TestPlTreesShap:
         assert np.shape(shap_values) == (3, 4)
         assert np.isfinite(ev)
         assert np.all(np.isfinite(shap_values))
+
+
+class TestLinearLeafConditioningGuards:
+    """End-to-end invariants for the PL solve's numerical guards.
+
+    Background: ``leaf_model="linear"`` with ``lambda_l2=0`` (the default
+    under ``training_policy="manual"``) could produce a near-singular
+    ``XᵀHX`` that still passed the positive-definiteness and
+    diagonal-ratio checks.  Cholesky then returned weights orders of
+    magnitude too large and — because only a leaf's *intercept* is
+    clamped, never its ``Σ wⱼ·zⱼ`` term — the error compounded every
+    round (an observed 200-round fit reached a training RMSE of ~1e6).
+
+    Two guards now prevent that: a ridge floor relative to the mean
+    diagonal of ``XᵀHX``, and a leaf-output magnitude bound that rejects
+    an unbounded leaf in favour of a scalar one.  Both are pinned
+    precisely and deterministically by the Rust unit tests in
+    ``crates/backend_cpu/src/pl.rs`` (``ridge_floor_*``,
+    ``unregularized_collinear_system_*``, ``leaf_output_guard_*``,
+    ``solve_pl_leaf_returns_none_*``).
+
+    The original blow-up turned out to be a numerical knife-edge tied to
+    one specific split on one specific train/test partition — reshuffling
+    the same dataset avoids it — so the cases below are deliberately
+    framed as *invariants* ("an unregularized PL fit stays bounded and
+    beats the constant predictor") rather than as reproductions of that
+    exact event.
+    """
+
+    @staticmethod
+    def _raw_scale_data(seed: int = 0):
+        # Deliberately unstandardized, wildly different per-column scales,
+        # plus two nearly-collinear columns — the configuration that made
+        # the unregularized solve blow up.
+        rng = np.random.default_rng(seed)
+        n = 800
+        base = rng.standard_normal(n).astype("float32")
+        X = np.column_stack(
+            [
+                base * 3.0,
+                base * 3.0 + 1e-3 * rng.standard_normal(n).astype("float32"),
+                rng.standard_normal(n).astype("float32") * 5_000.0,
+                rng.standard_normal(n).astype("float32") * 0.001,
+            ]
+        ).astype("float32")
+        y = (2.0 * base + 0.1 * rng.standard_normal(n)).astype("float32")
+        return X, y
+
+    def test_unregularized_linear_leaves_do_not_diverge(self):
+        X, y = self._raw_scale_data()
+        model = GBMRegressor(
+            n_estimators=120,
+            learning_rate=0.1,
+            max_depth=6,
+            leaf_model="linear",
+            training_policy="manual",
+            lambda_l2=0.0,
+        ).fit(X, y)
+
+        predictions = np.asarray(model.predict(X), dtype=np.float64)
+        assert np.all(np.isfinite(predictions))
+
+        train_rmse = float(np.sqrt(np.mean((predictions - y.astype(np.float64)) ** 2)))
+        constant_rmse = float(np.std(y.astype(np.float64)))
+        # The bar is deliberately loose: this pins "does not diverge", not
+        # a quality target.
+        assert train_rmse < constant_rmse, (
+            f"unregularized PL fit diverged: train_rmse={train_rmse}, "
+            f"constant-predictor rmse={constant_rmse}"
+        )
+        # Predictions must stay in a sane neighbourhood of the target range.
+        span = float(y.max() - y.min())
+        assert predictions.min() > y.min() - 10.0 * span
+        assert predictions.max() < y.max() + 10.0 * span
+
+    def test_unregularized_shortlisted_linear_leaves_do_not_diverge(self):
+        # Same contract for the top-k PL shortlist path (pl_split_candidates).
+        X, y = self._raw_scale_data(seed=1)
+        model = GBMRegressor(
+            n_estimators=120,
+            learning_rate=0.1,
+            max_depth=6,
+            leaf_model="linear",
+            pl_split_candidates=4,
+            training_policy="manual",
+            lambda_l2=0.0,
+        ).fit(X, y)
+
+        predictions = np.asarray(model.predict(X), dtype=np.float64)
+        assert np.all(np.isfinite(predictions))
+        train_rmse = float(np.sqrt(np.mean((predictions - y.astype(np.float64)) ** 2)))
+        assert train_rmse < float(np.std(y.astype(np.float64)))

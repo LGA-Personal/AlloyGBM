@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use alloygbm_core::{BinnedMatrix, PartitionResult};
+use rayon::prelude::*;
 
 use crate::error::{EngineError, EngineResult};
 use crate::tree_node::decode_tree_node_id;
@@ -116,6 +117,13 @@ pub(crate) fn apply_weighted_round_to_predictions_and_accumulator(
     )
 }
 
+/// Row count below which complement replay stays on the serial path.
+///
+/// Under this many rows the rayon fork/join costs more than the replay saves.
+/// Both paths produce bit-identical predictions, so this threshold -- and the
+/// thread count it is compared against -- only affect speed, never results.
+const REPLAY_PARALLEL_MIN_ROWS: usize = 32_768;
+
 pub(crate) fn apply_weighted_round_to_rows(
     predictions: &mut [f32],
     binned_matrix: &BinnedMatrix,
@@ -130,6 +138,49 @@ pub(crate) fn apply_weighted_round_to_rows(
         return Ok(());
     }
     let missing_bin = binned_matrix.missing_bin();
+
+    // Complement replay is a pure scatter: every row writes only its own
+    // prediction slot, and the stumps for a given row are replayed in the
+    // same order however the work is divided. Splitting it across threads is
+    // therefore bit-identical to the serial loop -- there is no cross-row
+    // reduction whose associativity could shift, so unlike histogram
+    // accumulation this needs no fixed chunk width to stay deterministic.
+    //
+    // The split works by chunking the *output* slice and binary-searching each
+    // chunk's slice of `row_indices`, which requires the indices to be sorted.
+    // Every producer in `sampling.rs` sorts them, but the check is O(n) against
+    // an O(n * depth) replay, so verify rather than assume and fall back to the
+    // serial loop if a future caller passes an unsorted list.
+    let parallel = row_indices.len() >= REPLAY_PARALLEL_MIN_ROWS
+        && rayon::current_num_threads() > 1
+        && row_indices.is_sorted();
+
+    if parallel {
+        let threads = rayon::current_num_threads();
+        let chunk_rows = predictions.len().div_ceil(threads * 4).max(1);
+        predictions.par_chunks_mut(chunk_rows).enumerate().for_each(
+            |(chunk_index, chunk_predictions)| {
+                let chunk_start = chunk_index * chunk_rows;
+                let chunk_end = chunk_start + chunk_predictions.len();
+                let lo = row_indices.partition_point(|&row| (row as usize) < chunk_start);
+                let hi = row_indices.partition_point(|&row| (row as usize) < chunk_end);
+                for &row_index in &row_indices[lo..hi] {
+                    let row_index = row_index as usize;
+                    let prediction = &mut chunk_predictions[row_index - chunk_start];
+                    replay_round_row(
+                        row_index,
+                        binned_matrix,
+                        &stump_by_local,
+                        missing_bin,
+                        raw_features,
+                        |_, leaf_value| *prediction += factor * leaf_value,
+                    );
+                }
+            },
+        );
+        return Ok(());
+    }
+
     for &row_index in row_indices {
         let row_index = row_index as usize;
         let prediction = &mut predictions[row_index];

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pickle
 import tempfile
 import unittest
+import warnings
 
 import numpy as np
 
@@ -254,3 +255,63 @@ class ExactFeatureBundlingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InertBundlingDiagnosticsTests(unittest.TestCase):
+    """`feature_bundling="exact"` must never fail silently.
+
+    Bundle discovery treats bin 0 as a feature's "empty" value, which only
+    `continuous_binning_strategy="linear"` reliably produces for a raw 0.0.
+    Under the default `"quantile"` strategy a one-hot column's zeros can
+    land in a higher bin, every candidate is skipped, and training runs
+    unbundled — previously with no signal to the caller at all.
+    """
+
+    @staticmethod
+    def _one_hot_fixture(rows: int = 2_000, width: int = 24):
+        rng = np.random.default_rng(11)
+        active = rng.integers(0, width, rows)
+        one_hot = np.eye(width, dtype=np.float32)[active]
+        dense = rng.standard_normal((rows, 3)).astype(np.float32)
+        X = np.hstack([dense, one_hot]).astype(np.float32)
+        y = (dense[:, 0] + (active % 5)).astype(np.float32)
+        return X, y
+
+    def test_inert_bundling_warns_and_names_the_binning_cause(self) -> None:
+        X, y = self._one_hot_fixture()
+        with self.assertWarns(UserWarning) as captured:
+            model = GBMRegressor(
+                n_estimators=5,
+                feature_bundling="exact",
+                continuous_binning_strategy="quantile",
+            ).fit(X, y)
+
+        message = str(captured.warning)
+        self.assertIn("produced no bundles", message)
+        self.assertIn("continuous_binning_strategy='linear'", message)
+        self.assertFalse(model.feature_bundling_diagnostics_["active"])
+
+    def test_successful_bundling_does_not_warn(self) -> None:
+        X, y = self._one_hot_fixture()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = GBMRegressor(
+                n_estimators=5,
+                feature_bundling="exact",
+                continuous_binning_strategy="linear",
+            ).fit(X, y)
+
+        self.assertTrue(model.feature_bundling_diagnostics_["active"])
+        self.assertEqual(
+            [w for w in caught if "produced no bundles" in str(w.message)], []
+        )
+
+    def test_bundling_off_never_warns(self) -> None:
+        X, y = self._one_hot_fixture()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            GBMRegressor(n_estimators=5, continuous_binning_strategy="quantile").fit(X, y)
+
+        self.assertEqual(
+            [w for w in caught if "produced no bundles" in str(w.message)], []
+        )

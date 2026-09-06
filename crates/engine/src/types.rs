@@ -192,8 +192,13 @@ pub struct IterationDiagnostics {
     pub neutralization_effectiveness: Option<f32>,
     /// Number of training rows sampled for this round (after row_subsample).
     pub n_active_rows: usize,
-    /// Number of split-feature tiles available for this round (after
-    /// col_subsample).
+    /// Number of features eligible for splitting this round (after
+    /// `col_subsample`).
+    ///
+    /// This is a property of the data and the sampling seed, not of the
+    /// runtime: it does not vary with `n_jobs`. (Before v1.0.0 this
+    /// reported the internal split-feature *tile* count, which changed
+    /// with the thread count.)
     pub n_active_features: usize,
 }
 

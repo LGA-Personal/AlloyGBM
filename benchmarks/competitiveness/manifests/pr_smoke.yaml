@@ -1,0 +1,57 @@
+schema: alloygbm-competitiveness/v1
+seed: 20260904
+warmup_repetitions: 1
+timed_repetitions: 5
+scenarios:
+  - name: dense_regression
+    task: regression
+    rows: 4096
+    features: 40
+    rounds: 40
+    depth: 6
+    metric: rmse
+    input_representation: dense
+  - name: binary
+    task: binary_classification
+    rows: 4096
+    features: 40
+    rounds: 40
+    depth: 6
+    metric: log_loss
+    input_representation: dense
+  - name: grouped_ranking
+    task: ranking
+    rows: 4096
+    features: 30
+    groups: 128
+    rounds: 40
+    depth: 6
+    metric: ndcg_at_10
+    input_representation: dense
+  - name: native_categorical
+    task: binary_classification
+    rows: 4096
+    numeric_features: 20
+    categorical_cardinalities: [16, 256]
+    rounds: 40
+    depth: 6
+    metric: log_loss
+    input_representation: native_categorical
+  - name: csr_sparse
+    task: regression
+    rows: 4096
+    features: 1000
+    density: 0.01
+    rounds: 40
+    depth: 6
+    metric: rmse
+    input_representation: csr
+  - name: joint_multi_output
+    task: multi_output_regression
+    rows: 4096
+    features: 30
+    outputs: 8
+    rounds: 40
+    depth: 6
+    metric: rmse
+    input_representation: dense

@@ -306,7 +306,10 @@ class GBMRankerSerializationTests(unittest.TestCase):
             training_policy="manual",
             seed=11,
         )
-        unnormalized = GBMRanker(**common).fit(X, y, group=group)
+        # `lambdarank_normalize` defaults to True since v1.0.0, so the
+        # unnormalized arm has to opt out explicitly for this to compare the
+        # two objectives rather than a model against itself.
+        unnormalized = GBMRanker(**common, lambdarank_normalize=False).fit(X, y, group=group)
         normalized = GBMRanker(**common, lambdarank_normalize=True).fit(X, y, group=group)
 
         diff = np.abs(np.asarray(unnormalized.predict(X)) - np.asarray(normalized.predict(X)))

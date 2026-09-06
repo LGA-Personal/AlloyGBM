@@ -15,7 +15,7 @@ one-dimensional inputs are rejected before native training.
   - Step size for additive boosting updates.
 - `max_depth: int = 6`
   - Maximum tree depth.
-- `n_estimators: int = 6`
+- `n_estimators: int = 100`
   - Number of boosting rounds requested.
 - `row_subsample: float = 1.0`
   - Fraction of rows sampled per round.  Ignored when
@@ -28,8 +28,9 @@ one-dimensional inputs are rejected before native training.
     `col_subsample`'s per-round (per-tree) sampling and with any
     `interaction_constraints`. Default `1.0` disables it (inert, byte-identical
     to prior behavior). Must be in `(0.0, 1.0]`. Single-output estimators only
-    (`GBMRegressor`, `GBMClassifier`, `GBMRanker`); not yet supported on
-    `MultiLabelGBMRanker(multi_label_mode="joint")` or multiclass softmax.
+    (`GBMRegressor`, binary `GBMClassifier`, `GBMRanker`). Multiclass
+    `GBMClassifier` and `MultiLabelGBMRanker(multi_label_mode="joint")` reject
+    a value below `1.0` rather than silently ignoring it.
 - `quantile_alpha: float = 0.5`
   - Target quantile for `"quantile"` regression. Must be strictly in `(0.0, 1.0)`.
 
@@ -79,6 +80,16 @@ one-dimensional inputs are rejected before native training.
   - Dropout sampling strategy.  `"uniform"` picks each tree
     independently with probability `dart_drop_rate`.  `"weighted"`
     biases dropout probability toward heavier-weight trees.
+- `dart_skip_drop: float = 0.5`
+  - Probability that a round performs **no** dropout at all, rolled once per
+    round independently of the per-tree draws. Matches LightGBM's
+    `skip_drop`. Skipping dropout on some rounds lets the ensemble
+    consolidate, which is both faster and usually more accurate; `0.0`
+    reproduces always-drop behaviour.
+  - Measured on California housing (200 rounds, `dart_drop_rate=0.1`,
+    `dart_max_drop=5`): `0.0` gave 1.21 s / RMSE 0.6241, while the default
+    `0.5` gave 0.77 s / RMSE 0.4815 (LightGBM DART at its own defaults:
+    1.18 s / RMSE 0.5238).
 
 GOSS and DART are supported on the binary classifier / regression /
 ranking single-output objectives and multiclass classification. For
@@ -245,13 +256,27 @@ methods.
 
 ### Exact feature bundling
 
-`feature_bundling="exact"` can reduce histogram work for dense matrices that
-contain contiguous one-hot or otherwise mutually exclusive sparse numeric
-columns. Bundling is training-only: trees, feature names, importances, SHAP
-arrays, and persisted artifacts continue to use the original feature indices.
-`feature_bundling_diagnostics_` reports whether bundling activated and gives
-the original/effective feature counts, bundle counts, skipped features, and
-observed conflicts.
+`feature_bundling="exact"` groups mutually exclusive sparse numeric columns
+(contiguous one-hot blocks and the like) into shared storage columns.
+Bundling is training-only: trees, feature names, importances, SHAP arrays, and
+persisted artifacts continue to use the original feature indices, and a
+bundled fit produces a **byte-identical artifact** to the same fit with
+bundling off. `feature_bundling_diagnostics_` reports whether bundling
+activated and gives the original/effective feature counts, bundle counts,
+skipped features, and observed conflicts.
+
+**Requires `continuous_binning_strategy="linear"` in practice.** Bundle
+discovery treats *bin 0* as a feature's "empty" value, and only linear
+binning reliably maps a raw `0.0` to bin 0. Under the default `"quantile"`
+strategy a sparse column's zeros can land in a higher bin, so every candidate
+is skipped and training runs unbundled — AlloyGBM emits a `UserWarning`
+naming this cause rather than failing silently.
+
+**Not currently a speed knob.** Bundling reduces storage and histogram memory
+traffic, but per-original-feature histograms are still materialized and
+scanned, so fit time is typically unchanged. The usual EFB speedup needs a
+bundle-aware split scanner, which would also forfeit the byte-identical
+artifact guarantee above.
 
 The first implementation is intentionally conservative. It skips categorical,
 monotone-constrained, interaction-constrained, missing-valued,

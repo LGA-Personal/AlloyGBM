@@ -38,6 +38,7 @@ pub(crate) use validate::{
 // The Trainer impl uses many crate-level types and pub(crate) helpers; rather than
 // enumerate ~50 imports here, we use a glob import. Tightening this is left to a
 // future task.
+use crate::profiling::{RoundProfile, Stage as ProfileStage};
 use crate::*;
 use multiclass_build::{
     MulticlassTreeBuildOutcome, collect_ordered_class_results, should_parallelize_multiclass_trees,
@@ -990,7 +991,8 @@ impl Trainer {
                 max_drop,
                 normalize_type,
                 sample_type,
-            } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+                skip_drop,
+            } => Some((drop_rate, max_drop, normalize_type, sample_type, skip_drop)),
             _ => None,
         };
         // v0.10.2: leaf-wise multiclass DART is now supported. The per-class
@@ -1304,7 +1306,9 @@ impl Trainer {
             // (PR review C1).
             let mut dart_predictions_backup: Option<Vec<Vec<f32>>> = None;
             let (dropped_tree_indices, material_dropped_classes): (Vec<usize>, Vec<usize>) =
-                if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) =
+                    dart_params
+                {
                     let dart_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
                         EngineError::ContractViolation(
                             "multiclass DART contribution buffer was not initialized".to_string(),
@@ -1318,6 +1322,7 @@ impl Trainer {
                         &dart_state.tree_weights,
                         sampling_seed_base,
                         effective_round,
+                        skip_drop,
                     );
                     let material_classes =
                         multiclass_dart_material_classes(&drops, k, &dart_round_counts)?;
@@ -1445,7 +1450,7 @@ impl Trainer {
                         gradients,
                         class_original_gradient_norms[class_k],
                         sampled_row_count,
-                        feature_tiles.len(),
+                        sampled_feature_count,
                     );
                 let morph_tree_ctx: Option<MorphTreeContext<'_>> =
                     morph_state.as_ref().map(|ms| MorphTreeContext {
@@ -1581,7 +1586,7 @@ impl Trainer {
             // off or the round had no dropouts (in which case new
             // trees get `tree_weight = 1.0`).
             let dart_round_finalize: Option<(f32, f32, Vec<f32>)> =
-                if let Some((_, _, normalize_type, _)) = dart_params {
+                if let Some((_, _, normalize_type, _, _)) = dart_params {
                     let n_dropped = dropped_tree_indices.len() as f32;
                     let new_w = 1.0 / (n_dropped + 1.0);
                     let drop_factor = match normalize_type {
@@ -2003,7 +2008,7 @@ impl Trainer {
             // warm-start and phantom slots) through the selected logical
             // round, then replay only the new retained rounds from the
             // persisted warm-start weight prefix.
-            if let Some((_, _, normalize_type, _)) = dart_params {
+            if let Some((_, _, normalize_type, _, _)) = dart_params {
                 let truncate_at = round_index_offset + best_round;
                 for class_k in 0..k {
                     dart_round_start_offsets[class_k].truncate(truncate_at);
@@ -2223,7 +2228,8 @@ impl Trainer {
                 max_drop,
                 normalize_type,
                 sample_type,
-            } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+                skip_drop,
+            } => Some((drop_rate, max_drop, normalize_type, sample_type, skip_drop)),
             _ => None,
         };
         let requires_full_replay =
@@ -2565,7 +2571,12 @@ impl Trainer {
             ms.ema_stats.copy_from_slice(snapshot);
         }
 
+        // Opt-in stage timing (ALLOYGBM_PROFILE=human|json; 1 aliases human);
+        // free when disabled.
+        let mut profile = RoundProfile::new();
+
         for round_index in 0..effective_round_cap {
+            profile.note_round();
             // Offset round_index for sampling seeds and tree IDs when warm-starting
             let effective_round_index = round_index + round_index_offset;
 
@@ -2582,7 +2593,9 @@ impl Trainer {
             let mut dart_predictions_backup: Option<Vec<f32>> = None;
             let mut dart_validation_backup: Option<Vec<f32>> = None;
             let dropped_tree_ids: Vec<usize> =
-                if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type, skip_drop)) =
+                    dart_params
+                {
                     let train_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
                         EngineError::ContractViolation(
                             "DART contribution buffer was not initialized".to_string(),
@@ -2596,6 +2609,7 @@ impl Trainer {
                         &dart_state.tree_weights,
                         sampling_seed_base,
                         effective_round_index,
+                        skip_drop,
                     );
                     train_contribution.fill(0.0);
                     if let Some(contribution) = dart_validation_contribution.as_mut() {
@@ -2661,12 +2675,14 @@ impl Trainer {
             // GOSS can score rows by `|gradient|`.  Standard / DART
             // boosting modes ignore the gradient input and fall back
             // to uniform subsampling.
-            objective.compute_gradients_into(
-                &predictions,
-                &active_dataset.targets,
-                active_dataset.sample_weights.as_deref(),
-                &mut gradient_buffer,
-            )?;
+            profile.time(ProfileStage::Gradients, || {
+                objective.compute_gradients_into(
+                    &predictions,
+                    &active_dataset.targets,
+                    active_dataset.sample_weights.as_deref(),
+                    &mut gradient_buffer,
+                )
+            })?;
             // Capture the pre-projection L2 norm so neutralization
             // effectiveness can be reported alongside the post-projection
             // gradient stats below.  Only allocated when a per-round
@@ -2685,20 +2701,25 @@ impl Trainer {
             let RoundRowSelection {
                 selected: root_row_indices,
                 excluded: excluded_row_indices,
-            } = select_row_indices_for_round(
-                self.params.boosting_mode,
-                active_dataset.row_count(),
-                controls.row_subsample,
-                sampling_seed_base,
-                effective_round_index as u64,
-                &mut gradient_buffer,
-            );
-            let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
-                binned_matrix.feature_count,
-                controls.col_subsample,
-                sampling_seed_base,
-                effective_round_index as u64,
-            )?;
+            } = profile.time(ProfileStage::RowSampling, || {
+                select_row_indices_for_round(
+                    self.params.boosting_mode,
+                    active_dataset.row_count(),
+                    controls.row_subsample,
+                    sampling_seed_base,
+                    effective_round_index as u64,
+                    &mut gradient_buffer,
+                )
+            });
+            let (feature_tiles, sampled_feature_count) =
+                profile.time(ProfileStage::FeatureTiles, || {
+                    sampled_feature_tiles(
+                        binned_matrix.feature_count,
+                        controls.col_subsample,
+                        sampling_seed_base,
+                        effective_round_index as u64,
+                    )
+                })?;
             let sampled_row_count = root_row_indices.len();
             let gradients = &gradient_buffer;
             validate_gradient_pair_length(gradients, active_dataset.row_count())?;
@@ -2715,7 +2736,7 @@ impl Trainer {
                 gradients,
                 original_gradient_norm,
                 sampled_row_count,
-                feature_tiles.len(),
+                sampled_feature_count,
             );
 
             // Update EMA stats from this round's gradients before tree-building so
@@ -2725,7 +2746,9 @@ impl Trainer {
             }
 
             if requires_full_replay {
-                candidate_predictions.copy_from_slice(&predictions);
+                profile.time(ProfileStage::PredictionCopy, || {
+                    candidate_predictions.copy_from_slice(&predictions);
+                });
             }
 
             let morph_tree_ctx: Option<MorphTreeContext<'_>> =
@@ -2745,45 +2768,47 @@ impl Trainer {
                     seed: self.params.seed,
                 });
             let (mut candidate_round_stumps, round_rejection_reason) =
-                if self.params.tree_growth == TreeGrowth::Leaf {
-                    build_tree_leaf_wise(
-                        backend,
-                        binned_matrix,
-                        gradients,
-                        root_row_indices,
-                        effective_round_index,
-                        &feature_tiles,
-                        round_split_options,
-                        &self.params,
-                        &controls,
-                        &mut candidate_predictions,
-                        &self.params.feature_weights,
-                        &execution.categorical_features,
-                        morph_tree_ctx,
-                        raw_fv,
-                        active_dataset.factor_exposures.as_ref(),
-                        colsample_bynode,
-                    )?
-                } else {
-                    build_tree_level_wise(
-                        backend,
-                        binned_matrix,
-                        gradients,
-                        root_row_indices,
-                        effective_round_index,
-                        &feature_tiles,
-                        round_split_options,
-                        &self.params,
-                        &controls,
-                        &mut candidate_predictions,
-                        &self.params.feature_weights,
-                        &execution.categorical_features,
-                        morph_tree_ctx,
-                        raw_fv,
-                        active_dataset.factor_exposures.as_ref(),
-                        colsample_bynode,
-                    )?
-                };
+                profile.time(ProfileStage::TreeBuild, || -> EngineResult<_> {
+                    Ok(if self.params.tree_growth == TreeGrowth::Leaf {
+                        build_tree_leaf_wise(
+                            backend,
+                            binned_matrix,
+                            gradients,
+                            root_row_indices,
+                            effective_round_index,
+                            &feature_tiles,
+                            round_split_options,
+                            &self.params,
+                            &controls,
+                            &mut candidate_predictions,
+                            &self.params.feature_weights,
+                            &execution.categorical_features,
+                            morph_tree_ctx,
+                            raw_fv,
+                            active_dataset.factor_exposures.as_ref(),
+                            colsample_bynode,
+                        )?
+                    } else {
+                        build_tree_level_wise(
+                            backend,
+                            binned_matrix,
+                            gradients,
+                            root_row_indices,
+                            effective_round_index,
+                            &feature_tiles,
+                            round_split_options,
+                            &self.params,
+                            &controls,
+                            &mut candidate_predictions,
+                            &self.params.feature_weights,
+                            &execution.categorical_features,
+                            morph_tree_ctx,
+                            raw_fv,
+                            active_dataset.factor_exposures.as_ref(),
+                            colsample_bynode,
+                        )?
+                    })
+                })?;
 
             let in_warmup_phase = morph_state
                 .as_ref()
@@ -2851,14 +2876,16 @@ impl Trainer {
             } else {
                 // Tree builders have already applied this round to selected
                 // rows. Replay just the complement to complete the candidate.
-                apply_weighted_round_to_rows(
-                    &mut candidate_predictions,
-                    binned_matrix,
-                    &candidate_round_stumps,
-                    raw_features_opt,
-                    &excluded_row_indices,
-                    1.0,
-                )?;
+                profile.time(ProfileStage::PredictionUpdate, || {
+                    apply_weighted_round_to_rows(
+                        &mut candidate_predictions,
+                        binned_matrix,
+                        &candidate_round_stumps,
+                        raw_features_opt,
+                        &excluded_row_indices,
+                        1.0,
+                    )
+                })?;
             }
 
             // DART: rebuild `candidate_predictions` to reflect the
@@ -2874,7 +2901,7 @@ impl Trainer {
             // on a DART round; `None` otherwise. The commit path
             // consumes this to update `dart_state`.
             let dart_round_finalize: Option<(f32, f32, Vec<f32>)> =
-                if let Some((_, _, normalize_type, _)) = dart_params {
+                if let Some((_, _, normalize_type, _, _)) = dart_params {
                     let k = dropped_tree_ids.len() as f32;
                     let new_w = 1.0 / (k + 1.0);
                     let drop_factor = match normalize_type {
@@ -2911,11 +2938,13 @@ impl Trainer {
                     None
                 };
 
-            let candidate_loss = objective.loss(
-                &candidate_predictions,
-                &active_dataset.targets,
-                active_dataset.sample_weights.as_deref(),
-            )?;
+            let candidate_loss = profile.time(ProfileStage::Loss, || {
+                objective.loss(
+                    &candidate_predictions,
+                    &active_dataset.targets,
+                    active_dataset.sample_weights.as_deref(),
+                )
+            })?;
             let loss_improvement = current_loss - candidate_loss;
             // Ranking objectives (LambdaMART, pairwise, XeNDCG, YetiRank,
             // QueryRMSE) have bounded, NDCG-weighted losses whose round-to-
@@ -3175,6 +3204,15 @@ impl Trainer {
             }
         }
 
+        // Freeze profiling at the loop boundary. Finalization below can be
+        // substantial (leaf refinement, DART stamping, artifact assembly),
+        // but it is intentionally excluded from loop timing.
+        let profile_snapshot = profile.snapshot_if_enabled(
+            active_dataset.row_count(),
+            binned_matrix.feature_count,
+            rayon::current_num_threads(),
+        );
+
         // Determine the best round for truncation: custom metric takes priority
         let truncation_round = if stop_reason == IterationStopReason::CustomMetricPlateau {
             best_custom_metric_round
@@ -3236,7 +3274,7 @@ impl Trainer {
                 dart_state.tree_weights = vec![1.0; truncate_at];
                 dart_state.dropped_per_round.truncate(truncate_at);
                 for (r, dropped) in kept_dropped.iter().enumerate() {
-                    if let Some((_, _, normalize_type, _)) = dart_params {
+                    if let Some((_, _, normalize_type, _, _)) = dart_params {
                         apply_normalization(
                             &mut dart_state.tree_weights,
                             dropped,
@@ -3376,6 +3414,7 @@ impl Trainer {
             neutralization_metadata: None,
         };
         let final_loss = current_loss;
+        profile.report(profile_snapshot.as_ref());
 
         Ok(IterationRunSummary {
             model,

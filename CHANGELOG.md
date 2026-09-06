@@ -1,8 +1,149 @@
 # Changelog
 
-## Unreleased
+## v1.0.0 (2026-08-29)
 
-### Added
+**First stable release.** AlloyGBM's public API, artifact format, and
+determinism guarantees are now covered by semantic versioning: breaking changes
+require a major version. See "Stability guarantees" below for exactly what is
+and is not covered.
+
+This release is the outcome of three review passes (see `docs/reviews/`) that
+audited the whole workspace for correctness, efficiency, and release
+readiness. It carries four deliberate breaking changes to defaults — each one
+because the old default was measurably the wrong choice — and fixes three
+defects that could silently degrade model quality.
+
+### Stability guarantees
+
+Covered by semantic versioning from this release onward:
+
+- The public Python API: `GBMRegressor`, `GBMClassifier`, `GBMRanker`,
+  `MultiLabelGBMRanker`, `alloygbm.evaluation`, `alloygbm.validation`, and
+  their constructor parameters, fitted attributes, and method signatures.
+- The binary artifact format (`AGBM` magic, versioned sections). A v1.x
+  artifact will be readable by any later 1.x release.
+- Determinism: a fixed `seed` with `deterministic=True` produces byte-identical
+  artifacts across repeated fits **and across thread counts** (`n_jobs`).
+
+Explicitly *not* covered:
+
+- The Rust crates (`alloygbm-core`, `-engine`, `-backend-cpu`, `-predictor`,
+  `-shap`, `-categorical`) are internal implementation detail and are not
+  published to crates.io. Their APIs may change in any release.
+- Exact floating-point model *values* across releases. Algorithmic fixes and
+  optimizations may shift predictions; quality is guarded by the benchmark
+  gates rather than by bit-exact reproduction across versions.
+- Parameters documented as experimental (currently `dro_robust_split`).
+
+
+### Changed (breaking, v1.0 readiness review)
+
+- **`n_estimators` now defaults to `100`** (was `6`) on `GBMRegressor`,
+  `GBMClassifier`, `GBMRanker`, and the `MultiLabelGBMRanker` joint bridge.
+  A default construction previously trained a nearly-untrained model.
+- **`lambdarank_truncation_level` now defaults to `30`** (was `None`) for
+  `rank:ndcg`, matching LightGBM. All-pairs LambdaMART is `O(n^2)` per query
+  group. On 50 groups of 2,000 documents: 3.65s/NDCG 0.9901 all-pairs vs
+  2.05s/NDCG 0.9735 truncated (LightGBM: 0.47s/NDCG 0.9727). This is a
+  speed/quality trade -- pass `None` to restore all-pairs scoring.
+- **`dart_skip_drop` added, defaulting to `0.5`** (LightGBM's `skip_drop`),
+  so DART rounds now skip dropout half the time instead of always dropping.
+  On California housing (200 rounds): 1.21s/RMSE 0.6241 -> 0.77s/RMSE 0.4815,
+  beating LightGBM DART's 1.18s/RMSE 0.5238. `dart_skip_drop=0.0` reproduces
+  the previous behaviour.
+- **`lambdarank_normalize` now defaults to `True`** (was `False`), matching
+  LightGBM's `lambdarank_norm`. Per-query lambda normalization keeps queries
+  with very different document counts contributing comparably. Measured
+  NDCG@10: `california_ranking` 0.6547 -> 0.7674 (moving AlloyGBM from last to
+  second, ahead of LightGBM and CatBoost); uniform 50-document groups 0.9649
+  -> 0.9697. Pass `False` for the unnormalized objective.
+- **`GBMClassifier.predict_proba` no longer rounds to 7 decimals.** The
+  rounding manufactured exact-zero probabilities without renormalizing;
+  multiclass rows are now renormalized in float64 instead.
+  `predict_log_proba` is now exactly `log(predict_proba)`, including `-inf`
+  on a true zero, per the sklearn contract.
+
+### Fixed (v1.0 readiness review)
+
+- **Thread count could change the trained model.** Partition gradient
+  statistics were reduced in chunks whose width was derived from
+  `rayon::current_num_threads()`, so the summation order -- and therefore node
+  statistics and leaf values -- varied with `n_jobs`. Fits from roughly 100k
+  rows upward produced genuinely different artifacts at different thread
+  counts, contradicting the determinism guarantee published above. The chunk
+  width is now fixed and independent of the thread count; the fix is
+  performance-neutral. It survived until now because the existing
+  thread-invariance tests use ~1,000 rows, where the drift stays below the last
+  mantissa bit of every leaf value -- regression tests at 100k rows (Python)
+  and on adversarially-scaled gradients (Rust) now cover it.
+
+- **Piecewise-linear leaves could diverge with `lambda_l2=0`.** A
+  near-singular `XᵀHX` passed the positive-definiteness and diagonal-ratio
+  guards (both inspect only the diagonal), so Cholesky returned weights
+  orders of magnitude too large; because only a leaf's intercept is clamped
+  and never its `Σ wⱼ·zⱼ` term, the error compounded every round. An
+  observed 200-round fit reached a training RMSE of ~1.08e6. Two guards now
+  apply: the effective ridge is floored at `1e-6 x` the mean diagonal of
+  `XᵀHX` (leaving any explicit `lambda_l2` untouched), and a leaf whose
+  bounded output would exceed `max_abs_leaf_value` is rejected in favour of
+  a scalar leaf. Measured: training RMSE 1.08e6 -> 0.19, test 13.13 -> 0.52.
+- **`feature_bundling="exact"` failed silently under the default binning.**
+  Bundle discovery treats bin 0 as a feature's empty value, which only
+  `continuous_binning_strategy="linear"` reliably produces; under the
+  default `"quantile"` strategy every candidate was skipped with no signal.
+  It now emits a `UserWarning` naming the cause, and the docs state both the
+  bin-0 requirement and the fact that bundling is not currently a speed knob.
+
+### Performance (v1.0 readiness review)
+
+- **SHAP is dramatically faster on typical models.** Any model splitting on
+  ≤ 25 distinct features was routed to the legacy brute-force `O(2^N)`
+  Shapley path; TreeSHAP is exact for tree models and is now used
+  everywhere, with brute force retained only as a test-time parity oracle.
+  Rows are also explained in parallel. Measured on a 50-tree depth-6
+  12-feature model over 200 rows: 18.2s -> 0.015s (91 ms/row -> 0.07 ms/row).
+
+### Benchmarks
+
+- **Comparative benchmark harness fairness fixes.** The harness pinned
+  LightGBM, XGBoost, and CatBoost to a single thread while leaving AlloyGBM
+  unconstrained, so it used every core -- inflating every published speed
+  comparison by roughly AlloyGBM's parallel speedup. `--threads N` now applies
+  one budget to all four libraries through their own knobs, with the
+  OpenMP/BLAS environment pinned to match. Two LightGBM-specific corrections
+  were also needed for hyperparameter equality to be real: `subsample` is
+  silently ignored without `subsample_freq >= 1` (so LightGBM had been
+  training on 100% of rows against the others' 80%), and its `num_leaves`
+  default of 31 capped trees below the depth-wise peers' `2 ** max_depth`.
+  Runs now record the thread budget, host, and library versions in their JSON
+  output under `params.fairness` and `params.environment`.
+- **New large-scale comparison** (`benchmarks/scale_comparison.py`) covering
+  200k- and 1M-row datasets at multiple thread budgets. The curated suite is
+  run single-threaded because at its sizes (142-40,000 rows) forcing all cores
+  measures thread-spawn overhead rather than throughput -- LightGBM and
+  XGBoost are *slower* multi-threaded below ~40,000 rows on the reference
+  host.
+- **Published v1.0.0 results** in `docs/benchmarks/v1.0.0_comparison.md`.
+  AlloyGBM wins 5 of 15 curated scenarios and is top-two on 11; accuracy is
+  effectively tied with all three peers at 200k-1M rows. Fit speed is
+  reported plainly as the weak axis. The previous claim that
+  `panel_time_series` was AlloyGBM's strongest scenario came from a run with
+  LightGBM's bagging disabled and its capacity halved, and has been corrected
+  rather than dropped.
+
+### Testing (v1.0 readiness review)
+
+- **New per-mode quality gate** (`benchmarks/mode_quality_gate.py`, wired
+  into CI) trains 21 mode configurations on fixed seeds and asserts each
+  beats the constant predictor and stays within a factor of the
+  plain-boosting baseline. Byte-equivalence tests structurally cannot catch
+  a mode that regresses in quality -- both sides share the defect -- which
+  is how the subsample/GOSS, DART, and PL regressions all shipped.
+- The performance-regression gate gained a 50k-row x 40-feature scenario so
+  its scaling check exercises the regime where histogram construction
+  dominates.
+
+### Added (pre-1.0 development series)
 
 - **Experimental opt-in joint-DRO robust split selection.**
   `MultiLabelGBMRanker(multi_label_mode="joint", leaf_solver="dro", dro_radius>0,
@@ -52,7 +193,7 @@
   median cost versus `0`, although `k=8` used only 13.96–20.66% of exhaustive
   rescoring time on wide fixtures. Prediction and artifact formats are unchanged.
 
-### Fixed
+### Fixed (from the pre-1.0 development series)
 
 - **Vectorized exhaustive MorphBoost numeric split scanning.** Ordinary
   post-warmup numeric Morph scans now evaluate all thresholds and both missing
@@ -141,7 +282,7 @@
   conflicts fall back to the original matrix, fitted diagnostics report
   activation and effective feature counts, and `"off"` remains the default.
 
-### Performance
+### Performance (from the pre-1.0 development series)
 
 - **Vectorized active numeric DRO split scanning.** Scalar-model numeric DRO now
   evaluates every valid threshold and both missing directions with an exhaustive

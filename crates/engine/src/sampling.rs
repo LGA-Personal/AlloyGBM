@@ -54,39 +54,61 @@ pub(crate) struct RoundRowSelection {
     pub(crate) excluded: Vec<u32>,
 }
 
+fn round_seed_for(seed_base: u64, round_index: u64) -> u64 {
+    mixed_hash(seed_base ^ round_index.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+/// Rank key for one index: rows are ordered by a hash of (round seed, index),
+/// so which rows are sampled depends only on the seed and the round -- never
+/// on the thread count or on iteration order.
+///
+/// Indices are unique, so the (hash, index) pair is a strict total order and
+/// the cut between kept and dropped rows is never ambiguous.
+#[inline]
+fn selection_key(round_seed: u64, index: usize) -> (u64, u32) {
+    let index_seed = (index as u64).wrapping_mul(0xD6E8_FD50_89A4_7A4D);
+    (mixed_hash(round_seed ^ index_seed), index as u32)
+}
+
+/// Split `0..total_count` into a kept sample of `keep_count` and its
+/// complement, both in ascending index order.
+///
+/// The rank order is found with `select_nth_unstable` (O(n)) purely to locate
+/// the pivot key; the two output lists then come from a single ascending scan.
+/// The obvious alternative -- collect both halves out of the partitioned
+/// buffer and sort each -- costs an O(n log n) sort of the whole index space
+/// every round to recover an order the scan produces for free. Rehashing each
+/// index in the scan is far cheaper than that sort.
 fn sampled_index_partition(
     total_count: usize,
     subsample: f32,
     seed_base: u64,
     round_index: u64,
-) -> (Vec<usize>, Vec<usize>) {
+) -> (Vec<u32>, Vec<u32>) {
     if total_count == 0 {
         return (Vec::new(), Vec::new());
     }
     let keep_count = sampled_count(total_count, subsample);
     if keep_count >= total_count {
-        return ((0..total_count).collect(), Vec::new());
+        return ((0..total_count as u32).collect(), Vec::new());
     }
-    let round_seed = mixed_hash(seed_base ^ round_index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    let mut scored = (0..total_count)
-        .map(|index| {
-            let index_seed = (index as u64).wrapping_mul(0xD6E8_FD50_89A4_7A4D);
-            (index, mixed_hash(round_seed ^ index_seed))
-        })
-        .collect::<Vec<_>>();
-    scored.select_nth_unstable_by(keep_count, |lhs, rhs| {
-        lhs.1.cmp(&rhs.1).then_with(|| lhs.0.cmp(&rhs.0))
-    });
-    let mut selected = scored[..keep_count]
-        .iter()
-        .map(|(index, _)| *index)
-        .collect::<Vec<_>>();
-    let mut excluded = scored[keep_count..]
-        .iter()
-        .map(|(index, _)| *index)
-        .collect::<Vec<_>>();
-    selected.sort_unstable();
-    excluded.sort_unstable();
+    let round_seed = round_seed_for(seed_base, round_index);
+    let mut scored: Vec<(u64, u32)> = (0..total_count)
+        .map(|index| selection_key(round_seed, index))
+        .collect();
+    scored.select_nth_unstable(keep_count);
+    let pivot = scored[keep_count];
+    drop(scored);
+
+    let mut selected = Vec::with_capacity(keep_count);
+    let mut excluded = Vec::with_capacity(total_count - keep_count);
+    for index in 0..total_count {
+        if selection_key(round_seed, index) < pivot {
+            selected.push(index as u32);
+        } else {
+            excluded.push(index as u32);
+        }
+    }
     (selected, excluded)
 }
 
@@ -96,7 +118,11 @@ pub(crate) fn sampled_indices(
     seed_base: u64,
     round_index: u64,
 ) -> Vec<usize> {
-    sampled_index_partition(total_count, subsample, seed_base, round_index).0
+    sampled_index_partition(total_count, subsample, seed_base, round_index)
+        .0
+        .into_iter()
+        .map(|index| index as usize)
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -172,30 +198,26 @@ pub(crate) fn select_row_indices_for_round(
             }
         }
         BoostingMode::Standard | BoostingMode::Dart { .. } => {
+            // Every row usually has a positive hessian, and then the sample is
+            // just a partition of `0..row_count`. Test that with a
+            // short-circuiting scan rather than building the index list first:
+            // materializing it costs a row_count-sized allocation every round
+            // and is thrown away immediately in the common case.
+            if gradients.iter().all(|pair| pair.hess > 0.0) {
+                let (selected, excluded) =
+                    sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+                return RoundRowSelection { selected, excluded };
+            }
             let active = gradients
                 .iter()
                 .enumerate()
                 .filter_map(|(index, pair)| (pair.hess > 0.0).then_some(index))
                 .collect::<Vec<_>>();
-            if active.len() == row_count {
-                let (selected, excluded) =
-                    sampled_index_partition(row_count, row_subsample, seed_base, round_index);
-                return RoundRowSelection {
-                    selected: selected
-                        .into_iter()
-                        .map(|row_index| row_index as u32)
-                        .collect(),
-                    excluded: excluded
-                        .into_iter()
-                        .map(|row_index| row_index as u32)
-                        .collect(),
-                };
-            }
             let (selected_positions, _) =
                 sampled_index_partition(active.len(), row_subsample, seed_base, round_index);
             let selected = selected_positions
                 .into_iter()
-                .map(|position| active[position])
+                .map(|position| active[position as usize])
                 .collect::<Vec<_>>();
             let mut selected_mask = vec![false; row_count];
             for &row_index in &selected {
@@ -287,6 +309,20 @@ pub(crate) fn select_row_indices_for_round_multiclass(
             }
         }
         BoostingMode::Standard | BoostingMode::Dart { .. } => {
+            // As in the single-output path: test for a fully active row set
+            // with a short-circuiting scan instead of building the index list
+            // and comparing its length, which allocates row_count entries per
+            // round only to discard them in the common case.
+            let all_active = (0..row_count).all(|index| {
+                class_gradient_buffers
+                    .iter()
+                    .any(|gradients| gradients[index].hess > 0.0)
+            });
+            if all_active {
+                let (selected, excluded) =
+                    sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+                return RoundRowSelection { selected, excluded };
+            }
             let active = (0..row_count)
                 .filter(|&index| {
                     class_gradient_buffers
@@ -294,25 +330,11 @@ pub(crate) fn select_row_indices_for_round_multiclass(
                         .any(|gradients| gradients[index].hess > 0.0)
                 })
                 .collect::<Vec<_>>();
-            if active.len() == row_count {
-                let (selected, excluded) =
-                    sampled_index_partition(row_count, row_subsample, seed_base, round_index);
-                return RoundRowSelection {
-                    selected: selected
-                        .into_iter()
-                        .map(|row_index| row_index as u32)
-                        .collect(),
-                    excluded: excluded
-                        .into_iter()
-                        .map(|row_index| row_index as u32)
-                        .collect(),
-                };
-            }
             let (selected_positions, _) =
                 sampled_index_partition(active.len(), row_subsample, seed_base, round_index);
             let selected = selected_positions
                 .into_iter()
-                .map(|position| active[position])
+                .map(|position| active[position as usize])
                 .collect::<Vec<_>>();
             let mut selected_mask = vec![false; row_count];
             for &row_index in &selected {

@@ -201,3 +201,47 @@ class TrainingMetricTrackingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ColsampleBynodeMulticlassContractTests(unittest.TestCase):
+    """`colsample_bynode` must not be silently ignored on multiclass.
+
+    The parameter is enforced only by the single-output tree builders; the
+    multiclass round loop passes no colsample context. Before this contract
+    the parameter was accepted on a multiclass fit and produced a
+    byte-identical (unsampled) model, which is the same silent-no-op failure
+    mode as the exclusive-feature-bundling case. Joint `MultiLabelGBMRanker`
+    already rejects kwargs it cannot honour; multiclass now matches.
+    """
+
+    @staticmethod
+    def _data():
+        rng = np.random.default_rng(4)
+        X = rng.standard_normal((300, 6)).astype(np.float32)
+        signal = 2.0 * X[:, 0] + X[:, 1]
+        multiclass = np.digitize(signal, np.quantile(signal, [0.33, 0.66]))
+        binary = (signal > 0).astype(int)
+        return X, binary, multiclass
+
+    def test_multiclass_rejects_colsample_bynode(self) -> None:
+        X, _, multiclass = self._data()
+        with self.assertRaises(ValueError) as caught:
+            GBMClassifier(n_estimators=3, colsample_bynode=0.5).fit(X, multiclass)
+        message = str(caught.exception)
+        self.assertIn("colsample_bynode", message)
+        self.assertIn("multiclass", message)
+
+    def test_multiclass_accepts_the_inert_default(self) -> None:
+        X, _, multiclass = self._data()
+        model = GBMClassifier(n_estimators=3, colsample_bynode=1.0).fit(X, multiclass)
+        self.assertEqual(len(np.asarray(model.predict(X))), len(multiclass))
+
+    def test_binary_still_applies_colsample_bynode(self) -> None:
+        # Guards the other direction: the rejection must not disable the
+        # parameter where it genuinely works.
+        X, binary, _ = self._data()
+        sampled = GBMClassifier(n_estimators=15, seed=3, colsample_bynode=0.3).fit(
+            X, binary
+        )
+        full = GBMClassifier(n_estimators=15, seed=3).fit(X, binary)
+        self.assertNotEqual(sampled.artifact_bytes, full.artifact_bytes)

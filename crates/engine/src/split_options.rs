@@ -104,6 +104,11 @@ pub struct LinearContext {
     pub regressor_features: Vec<u32>,
     /// L2 regularisation added to the diagonal of `XᵀHX` before inversion.
     pub l2_lambda: f32,
+    /// Magnitude ceiling for a PL leaf's output, mirroring the clamp applied
+    /// to scalar leaves. A solved leaf whose bounded output would exceed this
+    /// is rejected and the split falls back to scalar leaves. Use
+    /// `f32::INFINITY` to disable.
+    pub max_abs_leaf_value: f32,
 }
 
 impl LinearContext {

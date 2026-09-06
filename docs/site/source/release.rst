@@ -1,7 +1,101 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.10`` release notes and platform policy.
+AlloyGBM ``1.0.0`` release notes and platform policy.
+
+What's new in 1.0.0
+-------------------
+
+**First stable release.** The public Python API, the binary artifact format,
+and AlloyGBM's determinism guarantees are now covered by semantic versioning:
+breaking changes require a major version bump.
+
+Stability guarantees
+~~~~~~~~~~~~~~~~~~~~
+
+Covered from 1.0.0 onward:
+
+- The public Python API -- ``GBMRegressor``, ``GBMClassifier``, ``GBMRanker``,
+  ``MultiLabelGBMRanker``, ``alloygbm.evaluation``, ``alloygbm.validation`` --
+  including constructor parameters, fitted attributes, and method signatures.
+- The binary artifact format (``AGBM`` magic, versioned sections). A 1.x
+  artifact stays readable by any later 1.x release.
+- Determinism: a fixed ``seed`` with ``deterministic=True`` yields
+  byte-identical artifacts across repeated fits *and* across ``n_jobs`` thread
+  counts.
+
+Not covered:
+
+- The Rust crates are internal implementation detail, are not published to
+  crates.io, and may change in any release.
+- Exact floating-point model values across releases; algorithmic fixes may
+  shift predictions. Quality is guarded by the benchmark gates rather than by
+  bit-exact reproduction across versions.
+- Parameters documented as experimental (currently ``dro_robust_split``).
+
+Breaking default changes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Four defaults changed because the previous value was measurably the wrong
+choice. Each is a one-line revert if you depended on the old behavior.
+
+- ``n_estimators`` now defaults to ``100`` (was ``6``). A default construction
+  previously trained a nearly-untrained model.
+- ``lambdarank_truncation_level`` now defaults to ``30`` (was ``None``),
+  matching LightGBM. All-pairs LambdaMART is ``O(n^2)`` per query group. On 50
+  groups of 2,000 documents: 3.65 s / NDCG 0.9901 all-pairs versus 2.05 s /
+  NDCG 0.9735 truncated. This is a speed/quality trade -- pass ``None`` to
+  restore all-pairs scoring.
+- ``dart_skip_drop`` added, defaulting to ``0.5`` (LightGBM's ``skip_drop``).
+  On California housing (200 rounds): 1.21 s / RMSE 0.6241 to 0.77 s /
+  RMSE 0.4815, beating LightGBM DART's 1.18 s / RMSE 0.5238.
+  ``dart_skip_drop=0.0`` reproduces the previous behavior.
+- ``GBMClassifier.predict_proba`` no longer rounds to seven decimals (which
+  manufactured exact-zero probabilities without renormalizing); multiclass rows
+  are renormalized in float64 instead, and ``predict_log_proba`` is now exactly
+  ``log(predict_proba)``.
+
+Correctness fixes
+~~~~~~~~~~~~~~~~~
+
+- **Piecewise-linear leaves could diverge with** ``lambda_l2=0``. A
+  near-singular ``XᵀHX`` passed the positive-definiteness and diagonal-ratio
+  guards (both inspect only the diagonal), so the solve returned weights orders
+  of magnitude too large; because only a leaf's intercept is clamped, never its
+  linear term, the error compounded every round. The effective ridge is now
+  floored relative to the mean diagonal, and a leaf whose bounded output would
+  exceed ``max_abs_leaf_value`` falls back to a scalar leaf. Measured: training
+  RMSE 1.08e6 to 0.19, test 13.13 to 0.52.
+- **SHAP is dramatically faster.** Any model splitting on 25 or fewer distinct
+  features was routed to a legacy brute-force ``O(2^N)`` Shapley path. TreeSHAP
+  is exact for tree models and is now used everywhere, with rows explained in
+  parallel: 18.2 s to 0.015 s on a 50-tree, 12-feature model over 200 rows.
+- **``feature_bundling="exact"`` no longer fails silently.** Bundle discovery
+  requires each sparse feature's dominant value to occupy bin 0, which only
+  ``continuous_binning_strategy="linear"`` guarantees; a ``UserWarning`` now
+  names the cause instead of quietly training unbundled.
+
+Benchmarks
+~~~~~~~~~~
+
+The comparative benchmark harness had been pinning LightGBM, XGBoost, and
+CatBoost to a single thread while leaving AlloyGBM unconstrained, so every
+published speed comparison was inflated by roughly AlloyGBM's parallel
+speedup. One thread budget is now applied to all four libraries, LightGBM's
+silently-disabled bagging (``subsample_freq``) and halved tree capacity
+(``num_leaves``) are corrected, and every run records its thread budget, host,
+and library versions.
+
+Measured v1.0.0 results are published in ``docs/benchmarks/v1.0.0_comparison.md``:
+AlloyGBM wins 5 of 15 curated scenarios and places top-two on 11, with accuracy
+effectively tied against all three peers at 200k-1M rows. Fit speed is the weak
+axis and is reported as such -- LightGBM and XGBoost fit roughly 3-4x faster per
+core on the small curated scenarios, narrowing to 1.5-1.8x at 1M rows, and
+AlloyGBM's parallel scaling (1.6-1.8x on 10 cores) trails LightGBM (2.5-2.8x)
+and CatBoost (4.0-4.2x).
+
+The full list, including the pre-1.0 development series that ships in this
+release, is in ``CHANGELOG.md``.
 
 What's new in 0.12.10
 ---------------------

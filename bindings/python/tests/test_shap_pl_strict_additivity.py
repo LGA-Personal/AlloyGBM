@@ -166,13 +166,11 @@ def test_regressor_with_interaction_constraints():
     _assert_strict_additivity(model, X, label="interaction-constraints")
 
 
-def test_feature_importances_smoke_brute_force_path():
-    """``feature_importances`` invokes the SHAP machinery; for models with
-    distinct split features <= ``MAX_EXACT_SPLIT_FEATURES`` (=25, see
-    ``crates/shap/src/lib.rs``) this exercises the brute-force exact
-    path.  This case keeps n_features small (6) so we stay on
-    brute-force; the TreeSHAP polynomial path is exercised by
-    ``test_strict_additivity_via_tree_shap_polynomial_path`` below."""
+def test_feature_importances_smoke_low_feature_count():
+    """``feature_importances`` invokes the SHAP machinery on a small
+    (6-feature) linear-leaf model.  Every production path now routes
+    through TreeSHAP; the legacy brute-force implementation is retained
+    only as a cargo-test parity oracle."""
     X, y = _make_linear_data(seed=7)
     model = GBMRegressor(
         leaf_model="linear",

@@ -1884,6 +1884,7 @@ impl BackendOps for CategoricalAncestorLinearPathBackend {
         _right_rows: &[u32],
         _learning_rate: f32,
         _l2_lambda: f32,
+        _max_abs_leaf_value: f32,
     ) -> Option<(alloygbm_core::LinearLeaf, alloygbm_core::LinearLeaf)> {
         let weights = vec![0.5; regressor_features.len()];
         Some((
@@ -3832,6 +3833,7 @@ fn dart_boosting_mode_produces_non_uniform_tree_weights() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         seed: 42,
         deterministic: true,
@@ -3876,6 +3878,7 @@ fn dart_boosting_mode_supports_warm_start() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -5825,6 +5828,7 @@ fn sampled_prediction_delta_multiclass() {
                     max_drop: 2,
                     normalize_type: alloygbm_core::DartNormalize::Tree,
                     sample_type: alloygbm_core::DartSampleType::Uniform,
+                    skip_drop: 0.0,
                 },
                 0.5,
             ),
@@ -5892,6 +5896,7 @@ fn sampled_prediction_delta_fallback() {
                 max_drop: 2,
                 normalize_type: alloygbm_core::DartNormalize::Tree,
                 sample_type: alloygbm_core::DartSampleType::Uniform,
+                skip_drop: 0.0,
             },
             ..TrainParams::default()
         },
@@ -5944,6 +5949,7 @@ fn round_row_selection_preserves_uniform_rows_and_partitions_domain() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         17,
         0.5,
@@ -6418,10 +6424,48 @@ fn auto_tile_size_targets_features_per_thread() {
 }
 
 #[test]
+fn auto_tile_size_never_caps_tiles_below_thread_count() {
+    // Guards against tuning-machine bias: these thread counts cannot be
+    // exercised on the 10-core host this was developed on, but a fixed minimum
+    // tile width silently caps parallelism at `feature_count / width`, which
+    // only shows up on a machine with more cores than that.
+    for &n_threads in &[4usize, 10, 32, 64, 128, 256] {
+        for &feature_count in &[16usize, 40, 100, 320, 2_000] {
+            let tile = compute_optimal_tile_size(feature_count, n_threads);
+            assert!(tile >= 1, "tile width must be positive");
+            assert!(tile <= MAX_TILE_FEATURE_WIDTH);
+            let tiles = feature_count.div_ceil(tile);
+            // Either every thread can get a tile, or there are not enough
+            // features to go round even one feature per tile.
+            assert!(
+                tiles >= n_threads.min(feature_count),
+                "threads={n_threads} features={feature_count}: {tiles} tiles \
+                 starves the pool (tile width {tile})"
+            );
+        }
+    }
+}
+
+#[test]
+fn auto_tile_size_keeps_preferred_width_when_it_fills_the_pool() {
+    // The floor should only yield where it would starve the pool -- otherwise
+    // the wider, more cache-friendly tile is kept.
+    assert_eq!(compute_optimal_tile_size(40, 10), 4); // 10 tiles for 10 threads
+    assert_eq!(compute_optimal_tile_size(320, 10), 16); // 20 tiles, floor unused
+    // 40 features on a 64-core host: the floor would allow only 10 tiles, so it
+    // gives way and the tile narrows to one feature.
+    assert_eq!(compute_optimal_tile_size(40, 64), 1);
+}
+
+#[test]
 fn auto_tile_size_falls_back_for_low_feature_count() {
-    // 10 features, 16 threads → return feature_count itself (10), capped at MAX
+    // 10 features on 16 threads: the 4-feature floor would allow only 3 tiles,
+    // leaving 13 threads idle, so it yields and each feature gets its own tile.
     let tile = compute_optimal_tile_size(10, 16);
-    assert_eq!(tile, 10);
+    assert_eq!(tile, 1);
+    // At or below the floor there is nothing to split: one tile, all features.
+    assert_eq!(compute_optimal_tile_size(4, 16), 4);
+    assert_eq!(compute_optimal_tile_size(3, 16), 3);
 }
 
 #[test]
@@ -7199,6 +7243,7 @@ fn dart_early_stopping_truncation_recomputes_tree_weights() {
             max_drop: 5,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         seed: 42,
         deterministic: true,
@@ -7311,6 +7356,7 @@ fn dart_aggregate_forest_validation_matches_repeated_walk_baseline() {
             max_drop: 3,
             normalize_type: alloygbm_core::DartNormalize::Forest,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         seed: 17,
         deterministic: true,
@@ -8088,6 +8134,7 @@ fn multiclass_dart_expected_weights(
             &weights,
             seed,
             round,
+            0.0,
         );
         let factor = drops.len() as f32 / (drops.len() as f32 + 1.0);
         for &flat_tree_id in &drops {
@@ -8147,6 +8194,7 @@ fn assert_multiclass_dart_aggregate_regression(tree_growth: TreeGrowth) {
             max_drop: MAX_DROP,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8365,6 +8413,7 @@ fn multiclass_dart_early_stop_replays_retained_weights_and_summary_losses() {
             max_drop: MAX_DROP,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8720,6 +8769,7 @@ fn multiclass_dart_empty_morph_warmup_preserves_the_next_round_index() {
             max_drop: 2,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8775,6 +8825,7 @@ fn multiclass_dart_empty_morph_warmup_preserves_the_next_round_index() {
             &expected_weights,
             17,
             effective_round,
+            0.0,
         );
         let factor = drops.len() as f32 / (drops.len() as f32 + 1.0);
         for &flat_tree_id in &drops {
@@ -8823,6 +8874,7 @@ fn multiclass_dart_empty_morph_warmup_plateau_truncates_dense_logical_rounds() {
             max_drop: 2,
             normalize_type: alloygbm_core::DartNormalize::Tree,
             sample_type: alloygbm_core::DartSampleType::Uniform,
+            skip_drop: 0.0,
         },
         ..TrainParams::default()
     };
@@ -8873,6 +8925,7 @@ fn multiclass_dart_empty_morph_warmup_plateau_truncates_dense_logical_rounds() {
         &[1.0, 1.0],
         17,
         1,
+        0.0,
     );
     let expected_weight = 1.0 / (first_material_drops.len() as f32 + 1.0);
     for stumps in &summary.model.class_stumps {
