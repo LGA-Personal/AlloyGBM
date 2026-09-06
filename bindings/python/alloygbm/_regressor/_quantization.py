@@ -739,26 +739,13 @@ class _QuantizationMixin:
                 if not math.isnan(value):
                     columns[feature_index].append(value)
 
-        feature_cuts: list[list[float]] = []
-        for feature_index in range(feature_count):
-            values = columns[feature_index]
-            values.sort()
-            if len(values) <= 1:
-                feature_cuts.append([])
-                continue
-
-            bin_count = min(max_bins, len(values))
-            cuts: list[float] = []
-            for quantile_index in range(1, bin_count):
-                rank = (quantile_index * len(values)) // bin_count
-                if rank >= len(values):
-                    rank = len(values) - 1
-                cut_value = values[rank]
-                if cuts and cut_value <= cuts[-1]:
-                    continue
-                cuts.append(cut_value)
-            feature_cuts.append(cuts)
-        return feature_cuts
+        data_bin_count = max(max_bins - 1, 0)
+        return [
+            GBMRegressor._single_feature_quantile_cuts_from_sorted_values(
+                sorted(column), data_bin_count
+            )
+            for column in columns
+        ]
 
     @staticmethod
     def _quantize_rows_quantile(
