@@ -769,7 +769,9 @@ class GBMRegressorContractTests(unittest.TestCase):
                 flat_values, row_count=4, feature_count=3, max_bins=4
             )
 
-        self.assertEqual(cuts, [[2.0, 3.0, 4.0], [5.0, 7.0], [10.0, 20.0, 30.0]])
+        # max_bins=4 reserves one slot for missing values, leaving 3 data bins
+        # delimited by 2 cuts.
+        self.assertEqual(cuts, [[2.0, 3.0], [5.0, 7.0], [10.0, 20.0]])
 
     def test_native_dense_payload_reuses_contiguous_float32_array(self) -> None:
         values = np.arange(12, dtype=np.float32).reshape(4, 3)

@@ -286,12 +286,16 @@ class _QuantizationMixin:
     def _derive_dense_feature_quantile_cuts(
         flat_values: Sequence[float], row_count: int, feature_count: int, max_bins: int
     ) -> list[list[float]]:
+        # One slot of `max_bins` belongs to the missing-value sentinel, so
+        # quantile selection may only address `max_bins - 1` data bins. This
+        # mirrors `derive_dense_feature_quantile_cuts` in quantization.rs.
+        data_bin_count = max(max_bins - 1, 0)
         sorted_feature_values = GBMRegressor._try_derive_dense_sorted_feature_values_numpy(
             flat_values, row_count, feature_count
         )
         if sorted_feature_values is not None:
             return GBMRegressor._feature_quantile_cuts_from_sorted_values(
-                sorted_feature_values, max_bins
+                sorted_feature_values, data_bin_count
             )
 
         feature_cuts: list[list[float]] = []
@@ -303,30 +307,30 @@ class _QuantizationMixin:
             values.sort()
             feature_cuts.append(
                 GBMRegressor._single_feature_quantile_cuts_from_sorted_values(
-                    values, max_bins
+                    values, data_bin_count
                 )
             )
         return feature_cuts
 
     @staticmethod
     def _feature_quantile_cuts_from_sorted_values(
-        sorted_feature_values: Sequence[Sequence[float]], max_bins: int
+        sorted_feature_values: Sequence[Sequence[float]], data_bin_count: int
     ) -> list[list[float]]:
         return [
             GBMRegressor._single_feature_quantile_cuts_from_sorted_values(
-                values, max_bins
+                values, data_bin_count
             )
             for values in sorted_feature_values
         ]
 
     @staticmethod
     def _single_feature_quantile_cuts_from_sorted_values(
-        values: Sequence[float], max_bins: int
+        values: Sequence[float], data_bin_count: int
     ) -> list[float]:
         if len(values) <= 1:
             return []
 
-        bin_count = min(max_bins, len(values))
+        bin_count = min(data_bin_count, len(values))
         cuts: list[float] = []
         for quantile_index in range(1, bin_count):
             rank = (quantile_index * len(values)) // bin_count

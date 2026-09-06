@@ -117,3 +117,26 @@ def test_changing_sketch_limit_after_fit_requires_refit() -> None:
 
     with pytest.raises(NotFittedError):
         model.predict(x)
+
+
+def test_python_quantile_cuts_reserve_the_missing_bin_slot() -> None:
+    """The Python mirror must budget bins exactly like the Rust path.
+
+    255 data bins are delimited by 254 cuts. Emitting 255 would address 256
+    intervals, and quantization then clamps the top one into its neighbour --
+    merging the two highest quantiles.
+    """
+    from alloygbm import GBMRegressor
+
+    values = [float(v) for v in range(1, 100_001)]
+    cuts = GBMRegressor._single_feature_quantile_cuts_from_sorted_values(values, 255)
+    assert len(cuts) == 254
+
+    flat = [float(v) for v in range(1, 20_001)]
+    derived = GBMRegressor._derive_dense_feature_quantile_cuts(flat, 20_000, 1, 256)
+    assert len(derived) == 1
+    assert len(derived[0]) <= 254, (
+        f"{len(derived[0])} cuts for max_bins=256 leaves no free slot for the "
+        "missing-value bin"
+    )
+
