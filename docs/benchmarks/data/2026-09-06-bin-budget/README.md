@@ -39,9 +39,37 @@ and bounds what can be attributed to the fix.
 
 ## Reading
 
-The peer libraries show 0.00% variance across all 15 scenarios, confirming zero machine noise and establishing an exact control baseline.
+On this suite the corrected budget is **roughly neutral in aggregate**: median
++0.22% across 15 scenarios, with wide scenario-level movement in both
+directions (-11.06% to +19.23%).
 
-Under the corrected quantile bin budget (generating `max_bins - 1` cuts so that 255 data bins occupy bins 0..254 and bin 255 remains strictly reserved for NaNs), AlloyGBM demonstrates clear metric movement across 11 of the 15 scenarios:
-- Real-world tabular and financial datasets show consistent gains (`histogram_stress` +19.23%, `breast_cancer` +7.15%, `synthetic_multiclass` +1.78%, `dow_jones_financial` +1.16%, `panel_time_series` +0.93%, `california_housing` +0.66%).
-- The single synthetic fixture that originally surfaced the upper-tail truncation defect (500k x 40, 200 rounds, depth 8) improved test RMSE from 0.163775 to 0.152451.
-- In `california_ranking`, the shift in bin cut boundaries altered tree splits and leaf assignments under the NDCG loss, showing that cut budget changes directly affect split selection and tree structure.
+**None of that per-scenario movement is signal.** The seed-variance measurement
+in [`../2026-09-06-seed-variance/`](../2026-09-06-seed-variance/README.md) runs
+the same suite across five seeds and finds that **no delta above exceeds its own
+scenario's noise floor — zero of fifteen**:
+
+| Scenario | Delta here | Seed spread | |
+|---|---:|---:|---|
+| `histogram_stress` | +19.23% | 24.58% | inside noise |
+| `california_ranking` | -11.06% | 33.81% | inside noise |
+| `breast_cancer` | +7.15% | 132.98% | inside noise |
+| `synthetic_classification` | -2.09% | 12.02% | inside noise |
+| all others | <= 1.8% | 3-10% | inside noise |
+
+`california_ranking` NDCG across five seeds runs 0.570, 0.673, 0.767, 0.798,
+0.830 — an 11% move there is an ordinary draw, not a regression caused by this
+change. The same applies in the other direction: the +19.23% on
+`histogram_stress` is not a win this change earned.
+
+The peer rows at exactly 0.00% confirm the treatment is isolated and that no
+machine noise contributed. They do not make AlloyGBM's per-scenario movement
+meaningful, because the peers were never subjected to a discretisation change.
+
+The case for this change therefore rests on **correctness** — 255 data bins
+were being addressed by 255 cuts, so the two highest quantiles shared a bin —
+and on the fixture that surfaced it (500k x 40, 200 rounds, depth 8:
+0.163775 -> 0.152451, reproduced exactly, artifacts identical across `n_jobs`).
+
+What this suite establishes is the narrower claim: **the fix does not regress
+the curated scenarios in aggregate.** It does not establish a general accuracy
+improvement and should not be cited as one.
