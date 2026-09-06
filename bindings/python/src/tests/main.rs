@@ -64,6 +64,7 @@ fn train_regression_artifact_impl(
         None,  // custom_loss_fn
         None,  // custom_metric_fn
         0,     // max_cat_threshold
+        None,  // init_continuous_feature_quantile_cuts
     )
     .map(|result| result.artifact_bytes)
 }
@@ -154,6 +155,7 @@ fn dense_training_preparation_uses_column_major_u8_bins() {
         None,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("u8 training matrices should prepare");
 
@@ -176,6 +178,7 @@ fn dense_training_preparation_uses_column_major_u16_bins() {
         None,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("u16 training matrices should prepare");
 
@@ -214,6 +217,7 @@ fn direct_column_major_quantization_matches_dual_layout() {
                 None,
                 false,
                 layout,
+                None,
             )
             .expect("training matrices should prepare")
         };
@@ -258,6 +262,7 @@ fn quantile_upper_tail_does_not_collide_with_missing_bin() {
             None,
             false,
             layout,
+            None,
         )
         .expect("quantile training matrices should prepare");
 
@@ -285,6 +290,7 @@ fn prepare_quantile_fixture(
         sketch_max_rows,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("quantile training matrices should prepare")
 }
@@ -334,6 +340,7 @@ fn integer_sample_weights_match_repeated_row_quantile_cuts() {
         None,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("weighted quantile preparation succeeds");
     let repeated = prepare_quantile_fixture(&repeated_values, repeated_values.len(), 1, None);
@@ -742,6 +749,7 @@ fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targ
         None,
         None,
         0,
+        None,
     )
     .expect("bridge training succeeds")
     .artifact_bytes;

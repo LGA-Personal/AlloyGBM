@@ -219,6 +219,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    init_continuous_feature_quantile_cuts: Option<&[Vec<f32>]>,
 ) -> Result<NativeTrainingResult, EngineError> {
     if !matches!(feature_bundling, "off" | "exact") {
         return Err(EngineError::InvalidConfig(format!(
@@ -253,6 +254,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
         quantile_sketch_max_rows,
         need_dense_values,
         BinnedLayout::ColumnMajor,
+        init_continuous_feature_quantile_cuts,
     )?;
     prepared.dataset.factor_exposures = factor_exposures;
 
@@ -1103,6 +1105,7 @@ pub(crate) fn train_regression_artifact(
                 None, // custom_loss_fn
                 None, // custom_metric_fn
                 0,    // max_cat_threshold (disabled for non-summary paths)
+                None, // init_continuous_feature_quantile_cuts
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -1333,6 +1336,7 @@ pub(crate) fn train_regression_artifact_dense(
                 None, // custom_loss_fn
                 None, // custom_metric_fn
                 0,    // max_cat_threshold (disabled for non-summary paths)
+                None, // init_continuous_feature_quantile_cuts
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -1387,6 +1391,7 @@ pub(crate) fn train_regression_artifact_dense(
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
     init_artifact_bytes=None,
+    init_continuous_feature_quantile_cuts=None,
     num_classes=None,
     custom_objective_fn=None,
     custom_loss_fn=None,
@@ -1470,6 +1475,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    init_continuous_feature_quantile_cuts: Option<Vec<Vec<f32>>>,
     num_classes: Option<usize>,
     custom_objective_fn: Option<Py<PyAny>>,
     custom_loss_fn: Option<Py<PyAny>>,
@@ -1640,6 +1646,7 @@ pub(crate) fn train_regression_artifact_with_summary(
                 custom_loss_fn,
                 custom_metric_fn,
                 max_cat_threshold,
+                init_continuous_feature_quantile_cuts.as_deref(),
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -1764,6 +1771,7 @@ mod tests {
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
     init_artifact_bytes=None,
+    init_continuous_feature_quantile_cuts=None,
     num_classes=None,
     custom_objective_fn=None,
     custom_loss_fn=None,
@@ -1850,6 +1858,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    init_continuous_feature_quantile_cuts: Option<Vec<Vec<f32>>>,
     num_classes: Option<usize>,
     custom_objective_fn: Option<Py<PyAny>>,
     custom_loss_fn: Option<Py<PyAny>>,
@@ -2001,6 +2010,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
                 custom_loss_fn,
                 custom_metric_fn,
                 max_cat_threshold,
+                init_continuous_feature_quantile_cuts.as_deref(),
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -2086,6 +2096,7 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
     init_artifact_bytes=None,
+    init_continuous_feature_quantile_cuts=None,
     num_classes=None,
     custom_objective_fn=None,
     custom_loss_fn=None,
@@ -2172,6 +2183,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    init_continuous_feature_quantile_cuts: Option<Vec<Vec<f32>>>,
     num_classes: Option<usize>,
     custom_objective_fn: Option<Py<PyAny>>,
     custom_loss_fn: Option<Py<PyAny>>,
@@ -2329,6 +2341,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
                 custom_loss_fn,
                 custom_metric_fn,
                 max_cat_threshold,
+                init_continuous_feature_quantile_cuts.as_deref(),
             )
             .map_err(engine_error_to_pyerr)
         })

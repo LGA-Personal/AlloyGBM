@@ -1342,6 +1342,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
     quantile_sketch_max_rows: Option<usize>,
     need_dense_values: bool,
     binned_layout: BinnedLayout,
+    init_feature_quantile_cuts: Option<&[Vec<f32>]>,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     validate_continuous_binning_max_bins(max_bins)?;
     if quantile_sketch_max_rows == Some(0) {
@@ -1428,14 +1429,25 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 feature_linear_rank_flags: None,
             },
             ContinuousBinningStrategy::Quantile => {
-                let (cuts, methods) = derive_dense_feature_quantile_cuts(
-                    values,
-                    row_count,
-                    feature_count,
-                    max_bins,
-                    quantile_sketch_max_rows,
-                    sample_weights.as_deref(),
-                );
+                let (cuts, methods) = if let Some(init_cuts) = init_feature_quantile_cuts {
+                    if init_cuts.len() != feature_count {
+                        return Err(EngineError::ContractViolation(format!(
+                            "init_continuous_feature_quantile_cuts length {} does not match feature_count {}",
+                            init_cuts.len(),
+                            feature_count
+                        )));
+                    }
+                    (init_cuts.to_vec(), vec!["exact".to_string(); feature_count])
+                } else {
+                    derive_dense_feature_quantile_cuts(
+                        values,
+                        row_count,
+                        feature_count,
+                        max_bins,
+                        quantile_sketch_max_rows,
+                        sample_weights.as_deref(),
+                    )
+                };
                 ContinuousBinningMetadataInternal {
                     uses_continuous_binning: true,
                     feature_mins: None,

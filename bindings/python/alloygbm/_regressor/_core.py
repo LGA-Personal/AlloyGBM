@@ -1598,6 +1598,7 @@ class _GBMEstimatorCore(
 
         # ── Resolve warm-start artifact bytes ──────────────────────────
         init_artifact_bytes: bytes | None = None
+        init_continuous_feature_quantile_cuts: list[list[float]] | None = None
         if init_model is not None:
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
@@ -1626,7 +1627,16 @@ class _GBMEstimatorCore(
                         f"init_model objective '{init_objective}' does not match "
                         f"current objective '{current_objective}'"
                     )
+            if hasattr(init_model, "continuous_binning_strategy"):
+                if init_model.continuous_binning_strategy != self.continuous_binning_strategy:
+                    raise ValueError(
+                        f"init_model continuous_binning_strategy '{init_model.continuous_binning_strategy}' "
+                        f"does not match current continuous_binning_strategy '{self.continuous_binning_strategy}'"
+                    )
             init_artifact_bytes = init_model._artifact_bytes
+            init_continuous_feature_quantile_cuts = getattr(
+                init_model, "_continuous_feature_quantile_cuts", None
+            )
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
             fit_neutralization, fit_lambda, fit_penalty = (
                 self._fitted_neutralization_contract()
@@ -1641,6 +1651,9 @@ class _GBMEstimatorCore(
                 fit_neutralization, factor_exposures
             )
             init_artifact_bytes = self._artifact_bytes
+            init_continuous_feature_quantile_cuts = getattr(
+                self, "_continuous_feature_quantile_cuts", None
+            )
 
         # ── Normalize categorical configuration to plural form ──────────
         # effective_categorical_indices: list of column indices (or None if no categoricals)
@@ -2049,6 +2062,7 @@ class _GBMEstimatorCore(
                     categorical_feature_values_list=categorical_values_list if has_categorical else None,
                     validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                     init_artifact_bytes=init_artifact_bytes,
+                    init_continuous_feature_quantile_cuts=init_continuous_feature_quantile_cuts,
                     num_classes=getattr(self, '_num_classes_for_training', None),
                     custom_objective_fn=_custom_objective_fn,
                     custom_loss_fn=_custom_loss_fn,
@@ -2151,6 +2165,7 @@ class _GBMEstimatorCore(
                 factor_exposure_row_count=factor_exposure_row_count,
                 factor_exposure_factor_count=factor_exposure_factor_count,
                 transformed_factor_exposures=transformed_factor_exposures,
+                init_continuous_feature_quantile_cuts=init_continuous_feature_quantile_cuts,
             )
 
         if dense_training_payload is not None:
@@ -2213,6 +2228,7 @@ class _GBMEstimatorCore(
                 categorical_feature_values_list=categorical_values_list if has_categorical else None,
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                 init_artifact_bytes=init_artifact_bytes,
+                init_continuous_feature_quantile_cuts=init_continuous_feature_quantile_cuts,
                 num_classes=getattr(self, '_num_classes_for_training', None),
                 custom_objective_fn=_custom_objective_fn,
                 custom_loss_fn=_custom_loss_fn,
@@ -2326,6 +2342,7 @@ class _GBMEstimatorCore(
                 categorical_feature_values_list=categorical_values_list if has_categorical else None,
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                 init_artifact_bytes=init_artifact_bytes,
+                init_continuous_feature_quantile_cuts=init_continuous_feature_quantile_cuts,
                 num_classes=getattr(self, '_num_classes_for_training', None),
                 custom_objective_fn=_custom_objective_fn,
                 custom_loss_fn=_custom_loss_fn,
@@ -2590,6 +2607,7 @@ class _GBMEstimatorCore(
         factor_exposure_row_count: int,
         factor_exposure_factor_count: int,
         transformed_factor_exposures: object | None,
+        init_continuous_feature_quantile_cuts: list[list[float]] | None = None,
     ) -> "GBMRegressor":
         if self.feature_bundling != "off":
             raise RuntimeError(
@@ -2679,9 +2697,12 @@ class _GBMEstimatorCore(
                         max_bins=self.continuous_binning_max_bins,
                     )
                 else:
-                    quantile_cuts = self._derive_continuous_feature_quantile_cuts(
-                        rows, self.continuous_binning_max_bins
-                    )
+                    if init_continuous_feature_quantile_cuts is not None:
+                        quantile_cuts = init_continuous_feature_quantile_cuts
+                    else:
+                        quantile_cuts = self._derive_continuous_feature_quantile_cuts(
+                            rows, self.continuous_binning_max_bins
+                        )
                     self._continuous_feature_quantile_cuts = quantile_cuts
                     self._continuous_feature_sorted_values = None
                     self._continuous_feature_mins = None
@@ -2782,12 +2803,15 @@ class _GBMEstimatorCore(
                         dense_feature_count,
                     )
                 else:
-                    quantile_cuts = self._derive_dense_feature_quantile_cuts(
-                        flat_values,
-                        row_count,
-                        dense_feature_count,
-                        self.continuous_binning_max_bins,
-                    )
+                    if init_continuous_feature_quantile_cuts is not None:
+                        quantile_cuts = init_continuous_feature_quantile_cuts
+                    else:
+                        quantile_cuts = self._derive_dense_feature_quantile_cuts(
+                            flat_values,
+                            row_count,
+                            dense_feature_count,
+                            self.continuous_binning_max_bins,
+                        )
                     self._continuous_feature_quantile_cuts = quantile_cuts
                     self._continuous_feature_sorted_values = None
                     self._continuous_feature_mins = None
