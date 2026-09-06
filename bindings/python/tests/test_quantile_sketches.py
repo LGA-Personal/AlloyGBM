@@ -140,3 +140,75 @@ def test_python_quantile_cuts_reserve_the_missing_bin_slot() -> None:
         "missing-value bin"
     )
 
+
+def test_quantile_binning_top_bin_is_not_double_width() -> None:
+    """End-to-end signature of the bin-budget defect.
+
+    With the budget off by one the highest data bin absorbs two quantile
+    intervals, so it holds roughly twice as many rows as its neighbours. This
+    reads the borders the model actually stored rather than recomputing them,
+    so it fails if either the Rust or the Python path regresses.
+    """
+    import numpy as np
+    from alloygbm import GBMRegressor
+
+    rng = np.random.default_rng(20260906)
+    rows = 60_000
+    X = rng.normal(size=(rows, 3)).astype(np.float32)
+    y = X[:, 0].astype(np.float32)
+
+    model = GBMRegressor(n_estimators=5, max_depth=4, seed=1, n_jobs=1).fit(X, y)
+    cuts = model._continuous_feature_quantile_cuts
+    assert cuts is not None, "quantile binning must record its borders"
+
+    for feature_index, feature_cuts in enumerate(cuts):
+        assert len(feature_cuts) <= 254, (
+            f"feature {feature_index} stored {len(feature_cuts)} cuts; only 254 "
+            "fit once the missing-value slot is reserved"
+        )
+        counts = np.bincount(
+            np.minimum(
+                np.searchsorted(
+                    np.asarray(feature_cuts), X[:, feature_index], side="right"
+                ),
+                254,
+            ),
+            minlength=255,
+        )
+        assert counts[254] <= counts[253] * 2, (
+            f"feature {feature_index}: top bin holds {counts[254]} rows against "
+            f"{counts[253]} in its neighbour, so two quantile intervals merged"
+        )
+
+
+def test_quantile_binning_stays_deterministic_across_thread_counts() -> None:
+    """The bin-budget fix must not disturb the cross-n_jobs guarantee."""
+    import hashlib
+
+    import numpy as np
+    from alloygbm import GBMRegressor
+
+    rng = np.random.default_rng(20260906)
+    rows = 120_000
+    X = rng.normal(size=(rows, 8)).astype(np.float32)
+    scale = np.where(np.arange(rows) % 997 == 0, 1.0e6, 1.0).astype(np.float32)
+    y = ((3.0 * X[:, 0] - 2.0 * X[:, 1]) * scale).astype(np.float32)
+
+    digests = {}
+    for n_jobs in (1, 2, 4):
+        model = GBMRegressor(
+            n_estimators=8,
+            max_depth=6,
+            seed=20260906,
+            deterministic=True,
+            n_jobs=n_jobs,
+        ).fit(X, y)
+        digests[n_jobs] = hashlib.sha256(bytes(model.artifact_bytes)).hexdigest()
+
+    reference = digests[1]
+    for n_jobs, digest in digests.items():
+        assert digest == reference, (
+            f"artifact from n_jobs={n_jobs} differs from the single-threaded fit"
+        )
+
+
