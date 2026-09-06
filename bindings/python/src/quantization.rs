@@ -155,7 +155,7 @@ fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16
 }
 
 #[inline]
-fn quantize_quantile_value(value: f32, cuts: &[f32], max_data_bin: u16) -> u16 {
+pub(crate) fn quantize_quantile_value(value: f32, cuts: &[f32], max_data_bin: u16) -> u16 {
     cuts.partition_point(|probe| *probe <= value)
         .min(usize::from(max_data_bin)) as u16
 }
@@ -313,11 +313,21 @@ fn derive_dense_sorted_feature_values(
         .collect()
 }
 
-fn quantile_cuts_from_sorted_values(sorted_values: &[f32], max_bins: usize) -> Vec<f32> {
+/// Choose quantile cut points for one feature column.
+///
+/// `data_bin_count` is the number of **data** bins available, which is one
+/// fewer than `max_bins` because the top slot is reserved for missing values
+/// (see `_max_data_bin_for_max_bins`). Passing the full `max_bins` here emits
+/// one cut too many, and `quantize_quantile_value` then clamps the top
+/// interval into its neighbour -- silently merging the two highest quantiles.
+pub(crate) fn quantile_cuts_from_sorted_values(
+    sorted_values: &[f32],
+    data_bin_count: usize,
+) -> Vec<f32> {
     if sorted_values.len() <= 1 {
         return Vec::new();
     }
-    let bin_count = max_bins.min(sorted_values.len());
+    let bin_count = data_bin_count.min(sorted_values.len());
     let mut cuts = Vec::with_capacity(bin_count.saturating_sub(1));
     for quantile_index in 1..bin_count {
         let rank = ((quantile_index as u128 * sorted_values.len() as u128) / bin_count as u128)
@@ -331,7 +341,14 @@ fn quantile_cuts_from_sorted_values(sorted_values: &[f32], max_bins: usize) -> V
     cuts
 }
 
-fn quantile_cuts_from_weighted_values(sorted_values: &[(f32, f32)], max_bins: usize) -> Vec<f32> {
+/// Weighted counterpart of [`quantile_cuts_from_sorted_values`].
+///
+/// `data_bin_count` carries the same meaning: data bins only, missing slot
+/// already reserved by the caller.
+pub(crate) fn quantile_cuts_from_weighted_values(
+    sorted_values: &[(f32, f32)],
+    data_bin_count: usize,
+) -> Vec<f32> {
     if sorted_values.len() <= 1 {
         return Vec::new();
     }
@@ -353,7 +370,7 @@ fn quantile_cuts_from_weighted_values(sorted_values: &[(f32, f32)], max_bins: us
             .filter(|(_, weight)| *weight > 0.0)
             .count()
     };
-    let bin_count = max_bins.min(effective_count);
+    let bin_count = data_bin_count.min(effective_count);
     if bin_count <= 1 {
         return Vec::new();
     }
@@ -390,7 +407,7 @@ fn evenly_spaced_row_index(sample_index: usize, sample_count: usize, row_count: 
         / sample_count.saturating_sub(1) as u128) as usize
 }
 
-fn derive_dense_feature_quantile_cuts(
+pub(crate) fn derive_dense_feature_quantile_cuts(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
@@ -398,6 +415,11 @@ fn derive_dense_feature_quantile_cuts(
     sketch_max_rows: Option<usize>,
     sample_weights: Option<&[f32]>,
 ) -> (Vec<Vec<f32>>, Vec<String>) {
+    // One slot of `max_bins` belongs to the missing-value sentinel, so quantile
+    // selection may only address `max_bins - 1` data bins. Passing the full
+    // budget emits one cut too many and `quantize_quantile_value` clamps the
+    // top interval into its neighbour, merging the two highest quantiles.
+    let data_bin_count = max_bins.saturating_sub(1);
     let sampled_row_count = sketch_max_rows.filter(|max_rows| row_count > *max_rows);
     let selected_row_count = sampled_row_count.unwrap_or(row_count);
     let derive_feature_cuts = |feature_index: usize| {
@@ -416,7 +438,7 @@ fn derive_dense_feature_quantile_cuts(
                 }
             }
             column.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
-            quantile_cuts_from_weighted_values(&column, max_bins)
+            quantile_cuts_from_weighted_values(&column, data_bin_count)
         } else {
             let mut column = Vec::with_capacity(selected_row_count);
             for selected_index in 0..selected_row_count {
@@ -431,7 +453,7 @@ fn derive_dense_feature_quantile_cuts(
                 }
             }
             column.sort_unstable_by(f32::total_cmp);
-            quantile_cuts_from_sorted_values(&column, max_bins)
+            quantile_cuts_from_sorted_values(&column, data_bin_count)
         }
     };
 
