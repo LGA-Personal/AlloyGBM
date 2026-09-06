@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.0 (2026-08-29)
+## v1.0.0 (2026-09-05)
 
 **First stable release.** AlloyGBM's public API, artifact format, and
 determinism guarantees are now covered by semantic versioning: breaking changes
