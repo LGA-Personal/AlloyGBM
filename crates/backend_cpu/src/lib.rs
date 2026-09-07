@@ -803,7 +803,35 @@ impl CpuBackend {
                 let mut best_default_left = false;
 
                 // For each NaN direction, evaluate gain across all bins in 8-wide chunks.
-                for &default_left in &[true, false] {
+                //
+                // The two directions differ only in which side receives the
+                // missing-value statistics. When there are none, both passes
+                // add zero to the same cumulative sums and compute identical
+                // gains -- and because the update below uses
+                // `gain_materially_exceeds`, an identical gain never displaces
+                // the incumbent, so the `default_left = false` pass cannot
+                // change the outcome. Skipping it halves the scan on dense
+                // data, which is the common case.
+                //
+                // The guard tests all three statistics rather than the count
+                // alone. Histogram subtraction (parent minus sibling) can leave
+                // floating-point residue in a bin whose count is exactly zero;
+                // that residue is real mass that must still be routed, so a
+                // count-only guard would skip a pass that is not redundant.
+                // Signed zero is safe here: `-0.0 == 0.0` in Rust, so a
+                // negative-zero residue is correctly treated as absent.
+                //
+                // Direction order is preserved. `gain_materially_exceeds` is a
+                // tolerance comparison, so which direction is visited first is
+                // part of observable behaviour, not an implementation detail.
+                let missing_is_absent =
+                    missing_count == 0 && missing_grad == 0.0 && missing_hess == 0.0;
+                let directions: &[bool] = if missing_is_absent {
+                    &[true]
+                } else {
+                    &[true, false]
+                };
+                for &default_left in directions {
                     let nan_left_mask = default_left;
                     // For each chunk-of-8 starting at `chunk_start`:
                     let mut chunk_start = 0usize;
