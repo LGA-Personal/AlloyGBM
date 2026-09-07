@@ -396,6 +396,7 @@ fn train_joint_multi_label_ranker_in_fit_pool(
         quantile_sketch_max_rows,
         false,
         BinnedLayout::Dual,
+        None,
     )
     .map_err(engine_error_to_pyerr)?;
 

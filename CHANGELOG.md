@@ -65,6 +65,15 @@ Explicitly *not* covered:
 
 ### Fixed (v1.0 readiness review)
 
+- **Quantile binning merged the two highest quantiles.** Cut selection received
+  the full `max_bins` budget, so the default 256 produced 255 cuts addressing
+  256 intervals while only 255 data bins exist — the top slot is reserved for
+  missing values. Quantization clamped the highest interval into its
+  neighbour, so the two highest quantiles shared one bin. Cut selection now
+  receives `max_bins - 1`. Quantile is the default strategy, so this changes
+  models trained on continuous features; previously saved models are
+  unaffected, because their borders are stored in the model and the clamp is
+  retained for them.
 - **Thread count could change the trained model.** Partition gradient
   statistics were reduced in chunks whose width was derived from
   `rayon::current_num_threads()`, so the summation order -- and therefore node

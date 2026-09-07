@@ -25,7 +25,7 @@ def _max_data_bin_for_max_bins(max_bins):
 def _nan_bin_for_max_bins(max_bins):
     """Return the NaN sentinel bin index for a given max_bins setting."""
     return max_bins - 1
-_MIN_CONTINUOUS_QUANTIZED_BINS = 2
+_MIN_CONTINUOUS_QUANTIZED_BINS = 3
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
 # Per-round boosting strategies.  "standard" is the default v0.7.5
 # behaviour, "goss" (v0.8.0+) is LightGBM-style gradient-based one-side

@@ -1,0 +1,20 @@
+{
+  "reviewed_commit": "126a0694b5c02dcba8d454a45e65eb3beb4739f3",
+  "wheel_sha256": "5d352b37ef121f8d1021aaeac71fc9b19960200a915d3ee28286510ac5443c86",
+  "extension_sha256": "4de2d8cad48690a36a7d238af27bf372582fbccd86b77055c00386c2dbe27c02",
+  "extension_path": "/tmp/alloygbm-review-20260906-runtime/alloygbm/_alloygbm.abi3.so",
+  "build_command": "maturin build --release --interpreter .venv/bin/python --out /tmp/alloygbm-review-20260906-wheels",
+  "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+  "python": "3.13.5 (main, Jun 12 2025, 12:22:43) [Clang 20.1.4 ]",
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "libraries": {
+    "numpy": "2.5.0",
+    "lightgbm": "4.6.0",
+    "xgboost": "3.2.0",
+    "catboost": "1.2.10"
+  },
+  "thread_environment": "OMP/BLAS/RAYON=1 before imports; quantile-budget threads10 arm overrides estimator only; Alloy fit-local pool sets n_jobs",
+  "profiling": false,
+  "method": "Existing deep_scaling_comparison.make_dataset/build_factories and auto_policy_benchmark.derive_candidate_params, small diagnostic drivers; no production changes; sequential fits",
+  "limitations": "One fit per configuration per dataset seed. Accuracy diagnosis; not competitiveness performance gate. Linear256 selected after observing original seed; two extra seeds confirm same generator, no claim of broader generalization."
+}

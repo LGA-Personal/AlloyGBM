@@ -38,6 +38,7 @@ link it both ways.
 
 | Review | Version | Reviewer | Status |
 |---|---|---|---|
+| [Competitiveness review](2026-09-06-v1.0.0-competitiveness.md) — quantile-budget accuracy diagnosis, three-seed peer comparison, ranked CPU experiments | v1.0.0 | Codex | Open; diagnostic evidence collected |
 | [Core review](2026-07-02-v0.12.10-core.md) — whole-workspace design/efficiency/accuracy | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-core-resolutions.md) |
 | [Special-modes review](2026-07-02-v0.12.10-special-modes.md) — MorphBoost, DRO, PL trees, neutralization, objectives, DART/GOSS (incl. 2 correctness bugs) | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-special-modes-resolutions.md) |
 | [Cross-machine portability](2026-09-02-cross-machine-portability.md) — what LightGBM/XGBoost/CatBoost do to adapt to unseen hosts; tile-floor ceiling fixed, row-block histograms open | v1.0.0-prep | Claude Fable 5 | One fix landed; one open decision |

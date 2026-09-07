@@ -64,6 +64,7 @@ fn train_regression_artifact_impl(
         None,  // custom_loss_fn
         None,  // custom_metric_fn
         0,     // max_cat_threshold
+        None,  // init_continuous_feature_quantile_cuts
     )
     .map(|result| result.artifact_bytes)
 }
@@ -154,6 +155,7 @@ fn dense_training_preparation_uses_column_major_u8_bins() {
         None,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("u8 training matrices should prepare");
 
@@ -176,6 +178,7 @@ fn dense_training_preparation_uses_column_major_u16_bins() {
         None,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("u16 training matrices should prepare");
 
@@ -214,6 +217,7 @@ fn direct_column_major_quantization_matches_dual_layout() {
                 None,
                 false,
                 layout,
+                None,
             )
             .expect("training matrices should prepare")
         };
@@ -258,6 +262,7 @@ fn quantile_upper_tail_does_not_collide_with_missing_bin() {
             None,
             false,
             layout,
+            None,
         )
         .expect("quantile training matrices should prepare");
 
@@ -285,6 +290,7 @@ fn prepare_quantile_fixture(
         sketch_max_rows,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("quantile training matrices should prepare")
 }
@@ -334,6 +340,7 @@ fn integer_sample_weights_match_repeated_row_quantile_cuts() {
         None,
         false,
         BinnedLayout::ColumnMajor,
+        None,
     )
     .expect("weighted quantile preparation succeeds");
     let repeated = prepare_quantile_fixture(&repeated_values, repeated_values.len(), 1, None);
@@ -742,6 +749,7 @@ fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targ
         None,
         None,
         0,
+        None,
     )
     .expect("bridge training succeeds")
     .artifact_bytes;
@@ -949,4 +957,92 @@ fn train_bridge_can_store_node_debug_stats_section() {
             .iter()
             .any(|section| section.descriptor.kind == ModelSectionKind::NodeDebugStats)
     );
+}
+
+#[test]
+fn quantile_cuts_reserve_the_missing_bin_slot() {
+    // 255 data bins need 254 cuts. Asking for 255 data bins must not emit
+    // 255 cuts, which would address 256 intervals and force the caller to
+    // clamp the top one into its neighbour.
+    let values: Vec<f32> = (1..=100_000).map(|value| value as f32).collect();
+    let cuts = crate::quantization::quantile_cuts_from_sorted_values(&values, 255);
+    assert_eq!(cuts.len(), 254, "255 data bins are delimited by 254 cuts");
+
+    let weighted: Vec<(f32, f32)> = values.iter().map(|value| (*value, 1.0)).collect();
+    let weighted_cuts = crate::quantization::quantile_cuts_from_weighted_values(&weighted, 255);
+    assert_eq!(weighted_cuts.len(), 254);
+}
+
+#[test]
+fn quantile_binning_spreads_rows_evenly_across_the_top_bins() {
+    // The defect's signature: with the budget off by one, the highest data
+    // bin absorbs two quantile intervals and holds roughly twice its share.
+    // Assert the top bin is close to its neighbours instead.
+    let values: Vec<f32> = (1..=100_000).map(|value| value as f32).collect();
+    let max_data_bin: u16 = 254;
+    let cuts = crate::quantization::quantile_cuts_from_sorted_values(&values, 255);
+
+    let mut counts = vec![0usize; usize::from(max_data_bin) + 1];
+    for value in &values {
+        let bin = cuts
+            .partition_point(|probe| *probe <= *value)
+            .min(usize::from(max_data_bin));
+        counts[bin] += 1;
+    }
+
+    let top = counts[usize::from(max_data_bin)];
+    let neighbour = counts[usize::from(max_data_bin) - 1];
+    assert!(
+        top <= neighbour * 3 / 2,
+        "top bin holds {top} rows against {neighbour} in its neighbour, which \
+         means two quantile intervals collapsed into it"
+    );
+    assert!(
+        counts.iter().all(|count| *count > 0),
+        "every data bin must be reachable"
+    );
+}
+
+#[test]
+fn quantize_quantile_value_still_clamps_for_models_trained_before_the_fix() {
+    // Models trained before this change persist 255 cuts. The clamp must stay
+    // so those models keep mapping their top interval to `max_data_bin`
+    // instead of overflowing into the missing-value sentinel.
+    let legacy_cuts: Vec<f32> = (1..=255).map(|value| value as f32).collect();
+    let bin = crate::quantization::quantize_quantile_value(1_000.0, &legacy_cuts, 254);
+    assert_eq!(
+        bin, 254,
+        "legacy 255-cut models must clamp, not reach the NaN bin"
+    );
+}
+
+#[test]
+fn derived_cuts_leave_a_free_slot_for_the_missing_bin() {
+    // End-to-end through the real derivation path: with max_bins = 256 the
+    // caller must ask for 255 data bins, so no feature may produce more than
+    // 254 cuts. Before the fix this produced 255 and the top interval was
+    // clamped away.
+    let row_count = 20_000usize;
+    let feature_count = 2usize;
+    let mut values = Vec::with_capacity(row_count * feature_count);
+    for row in 0..row_count {
+        values.push(row as f32);
+        values.push((row_count - row) as f32);
+    }
+    let (cuts, _names) = crate::quantization::derive_dense_feature_quantile_cuts(
+        &values,
+        row_count,
+        feature_count,
+        256,
+        None,
+        None,
+    );
+    for (feature_index, feature_cuts) in cuts.iter().enumerate() {
+        assert!(
+            feature_cuts.len() <= 254,
+            "feature {feature_index} produced {} cuts; 256 total bins leave room \
+             for only 254 once the missing slot is reserved",
+            feature_cuts.len()
+        );
+    }
 }
