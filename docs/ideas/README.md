@@ -6,7 +6,8 @@ Active work:
 
 - [`single-thread-optimization-board.md`](single-thread-optimization-board.md) — open,
   multi-author board for closing AlloyGBM's per-core throughput gap. Seeded with one
-  measured win and seven hypotheses; contributions welcome. Read
+  measured win and seven hypotheses; Codex added feedback and experiments (9–12);
+  Antigravity added commentary, hypotheses (13–16), and structural comparison. Read
   [the problem statement](../reviews/2026-09-06-single-thread-throughput.md) first.
 
 Useful starting points:

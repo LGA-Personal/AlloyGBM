@@ -3963,3 +3963,101 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
         "fixture cannot distinguish position indexing from row indexing"
     );
 }
+
+#[test]
+fn zero_count_missing_residue_still_evaluates_both_nan_directions() {
+    // The dense fast path skips the `default_left = false` scan when a feature
+    // has no missing rows. The guard tests all three missing statistics, not
+    // the count alone, because histogram subtraction (parent minus sibling)
+    // can leave floating-point residue in a bin whose count is exactly zero.
+    // That residue is real gradient mass and must still be routed, so a
+    // count-only guard would skip a pass that is not redundant.
+    //
+    // This constructs exactly that state -- missing bin with count 0 but
+    // nonzero grad/hess -- and asserts the second direction still runs, by
+    // making right-routing the materially better choice.
+    let missing_bin_index = 4usize;
+    let bin = |grad: f32, hess: f32, count: u32| HistogramBin {
+        grad_sum: grad,
+        hess_sum: hess,
+        grad_sq_sum: 0.0,
+        count,
+    };
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            bin(-8.0, 4.0, 4),
+            bin(-6.0, 4.0, 4),
+            bin(6.0, 4.0, 4),
+            bin(8.0, 4.0, 4),
+            // Missing slot: zero rows, but subtraction residue left behind.
+            // Positive, matching the sign of the upper bins, so routing it
+            // right maximises |G_right| and beats routing it left.
+            bin(12.0, 6.0, 0),
+        ],
+    };
+    let options = SplitSelectionOptions {
+        missing_bin_index,
+        min_rows_per_leaf: 1,
+        min_child_hessian: 0.0,
+        ..SplitSelectionOptions::default()
+    };
+
+    let candidate = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 7, options)
+    })
+    .expect("a split exists for this fixture");
+
+    // Gain grows with |G| on either side, so the residue is best routed to the
+    // side whose sign it shares -- here, right. Concretely, at the midpoint
+    // threshold: routing right gives 14^2/8 + 26^2/14 = 72.8, routing left
+    // gives 2^2/14 + 14^2/8 = 24.8. If the `default_left = false` pass had been
+    // skipped, the only reachable answer would be `default_left = true`.
+    assert!(
+        !candidate.default_left,
+        "zero-count missing residue must still be routed by evaluating both \
+         directions; got default_left = true, which means the second scan was \
+         skipped on a feature whose missing mass is not actually absent"
+    );
+}
+
+#[test]
+fn dense_feature_without_missing_mass_routes_nan_left_by_tie_break() {
+    // Complement of the test above. With no missing rows the two direction
+    // passes compute identical gains, and `gain_materially_exceeds` never lets
+    // an equal gain displace the incumbent -- so `default_left = true` (visited
+    // first) is the answer, with or without the skip. This pins the tie-break
+    // that makes skipping the second pass safe.
+    let bin = |grad: f32, hess: f32, count: u32| HistogramBin {
+        grad_sum: grad,
+        hess_sum: hess,
+        grad_sq_sum: 0.0,
+        count,
+    };
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            bin(-8.0, 4.0, 4),
+            bin(-6.0, 4.0, 4),
+            bin(6.0, 4.0, 4),
+            bin(8.0, 4.0, 4),
+            bin(0.0, 0.0, 0), // missing slot, genuinely empty
+        ],
+    };
+    let options = SplitSelectionOptions {
+        missing_bin_index: 4,
+        min_rows_per_leaf: 1,
+        min_child_hessian: 0.0,
+        ..SplitSelectionOptions::default()
+    };
+
+    let candidate = with_histogram_feature(&feature, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 7, options)
+    })
+    .expect("a split exists for this fixture");
+    assert!(
+        candidate.default_left,
+        "with no missing mass both directions tie, and the first-visited \
+         direction must win the `gain_materially_exceeds` comparison"
+    );
+}
