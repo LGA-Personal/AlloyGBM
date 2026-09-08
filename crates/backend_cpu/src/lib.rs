@@ -731,27 +731,6 @@ impl CpuBackend {
                 (0.0_f32, 0.0_f32, 0_u32)
             };
 
-        let mut total_grad = 0.0_f32;
-        let mut total_hess = 0.0_f32;
-        let mut total_count = 0_u32;
-        for index in 0..feature_histogram.len() {
-            total_grad += grad_sums[index];
-            total_hess += hess_sums[index];
-            total_count += counts[index];
-        }
-
-        if total_hess <= options.min_child_hessian {
-            return None;
-        }
-
-        let nm_total_grad = total_grad - missing_grad;
-        let nm_total_hess = total_hess - missing_hess;
-        let nm_total_count = total_count.saturating_sub(missing_count);
-
-        let parent_denom = total_hess + options.l2_lambda + EPSILON;
-        let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
-        let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
-
         let scan_limit = feature_histogram.len().min(missing_bin_idx);
         if scan_limit == 0 {
             return None;
@@ -760,8 +739,27 @@ impl CpuBackend {
         with_split_scan_scratch(
             scan_limit,
             |cum_left_grad, cum_left_hess, cum_left_count| {
-                // Pre-compute scalar cumulative left-side stats. The prefix scan is
-                // inherently sequential, so we keep it in scalar code.
+                // One ordered pass fills the prefix arrays and the running
+                // totals together. Previously the bins were summed twice: once
+                // for the totals over the whole histogram, then again for the
+                // non-missing prefix.
+                //
+                // The accumulation order is unchanged, which is what keeps this
+                // bit-identical. Totals were summed `0..len` sequentially; here
+                // the same sequence is `0..scan_limit` (which also emits the
+                // prefixes) followed by `scan_limit..len`. Floating-point
+                // addition is order-sensitive but not step-count-sensitive, so
+                // the resulting totals are the same bits. `nm_total_*` is still
+                // obtained by subtracting the missing statistics from the
+                // totals rather than by summing the non-missing bins directly,
+                // because `sum(all) - missing` and `sum(non-missing)` are not
+                // the same value in floating point.
+                //
+                // The total-Hessian rejection now happens after the scratch is
+                // borrowed rather than before. A node that fails it does a
+                // little wasted prefix work, but nodes reaching split-finding
+                // have already passed the `2 x min_rows_per_leaf` screen, so
+                // that case is rare.
                 let mut g = 0.0_f32;
                 let mut h = 0.0_f32;
                 let mut c = 0_u32;
@@ -773,6 +771,27 @@ impl CpuBackend {
                     cum_left_hess[i] = h;
                     cum_left_count[i] = c;
                 }
+
+                let mut total_grad = g;
+                let mut total_hess = h;
+                let mut total_count = c;
+                for index in scan_limit..feature_histogram.len() {
+                    total_grad += grad_sums[index];
+                    total_hess += hess_sums[index];
+                    total_count += counts[index];
+                }
+
+                if total_hess <= options.min_child_hessian {
+                    return None;
+                }
+
+                let nm_total_grad = total_grad - missing_grad;
+                let nm_total_hess = total_hess - missing_hess;
+                let nm_total_count = total_count.saturating_sub(missing_count);
+
+                let parent_denom = total_hess + options.l2_lambda + EPSILON;
+                let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
+                let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
 
                 // Per-NaN-direction broadcast values.
                 let l1_alpha = options.l1_alpha;
