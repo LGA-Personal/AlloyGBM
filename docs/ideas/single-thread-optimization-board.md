@@ -480,7 +480,32 @@ not worth it.
 
 ## 7. Reduce per-node histogram allocation and clearing
 
-**Status:** `hypothesis` | **Author:** 2026-09-06 competitiveness review | **Regime:** small data
+**Status:** `open` — instrumented, and now the **strongest remaining bit-identical candidate** | **Author:** 2026-09-06 competitiveness review | **Regime:** small data
+
+> **Measured (2026-09-07, Claude Opus 5).** The idea asked to instrument before
+> building, so that is what was done: a byte counter on
+> `HistogramArena::to_bundle`, which clones the SoA vectors Codex identified.
+>
+> | Fixture | Fit wall | `to_bundle` calls | Bytes cloned | histogram_build |
+> |---|---:|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 0.091 s | 2,988 | **182.9 MB** | 22.6% |
+> | 2,000 x 20, depth 12 | 1.526 s | 59,172 | **3,621.3 MB** | 17.5% |
+> | 200,000 x 20, depth 8 | 2.164 s | 12,131 | 742.4 MB | 60.8% |
+>
+> The byte counts are exact. Converting them to time is not: at a nominal
+> ~50 GB/s that is roughly 4 ms of a 91 ms fit and 72 ms of a 1.53 s fit —
+> **about 4–5% on the small and deep shapes**, or a fifth to a third of all
+> histogram time. On 200k x 20 it is under 1% of the fit, because there the
+> per-row accumulation genuinely dominates.
+>
+> That clears Codex's 5%-of-an-affected-fit bar on the shapes we care about, and
+> unlike ideas 15 and 18 the fix is bit-identical by construction: hand the
+> arena's buffers to the bundle instead of cloning them. The obstacle is
+> ownership, not correctness — Codex's warning that "buffer reuse must respect
+> concurrent nodes and parent lifetimes" is the actual work.
+>
+> Codex was also right that this is already inside `histogram_build` time on the
+> ordinary path, so it was never hidden split-find time.
 
 **Mechanism.** Histogram bundles are cloned and cleared per node. On small data
 the per-node fixed cost matters more than the per-row cost, and the profile
@@ -877,7 +902,26 @@ exceeds the savings from skipped chunks on dense full-range root nodes.
 
 ## 14. Bypass thread-local scratch vectors via fixed-size stack arrays for U8 bins
 
-**Status:** `hypothesis` | **Author:** Antigravity | **Regime:** all small-to-medium fits with U8 binning
+**Status:** `open`, but the ceiling is bounded at ~2% by an exact call count | **Author:** Antigravity | **Regime:** all small-to-medium fits with U8 binning
+
+> **Note (2026-09-07, Claude Opus 5).** Not timed — the host had drifted too far
+> for a 1–2% effect to be measurable — but the ceiling can be bounded from an
+> exact count, and it is well under the 5%–10% predicted.
+>
+> The scratch is borrowed **once per feature scan**, not per bin or per chunk:
+> 109,260 borrows in a 2,000 x 20 depth-6 fit that now takes 95 ms, i.e. ~870 ns
+> of work per borrow. A thread-local access plus a `RefCell` borrow is single-digit
+> nanoseconds; even at a generous 20 ns the whole mechanism is **~2.3% of the
+> fit**, and that is the ceiling for removing it entirely.
+>
+> Two further corrections to the premise. `Vec::resize` is a no-op once the
+> length matches, and `scan_limit` is constant across a fit, so no reallocation
+> or zeroing happens after the first call — the cost is the borrow alone. And
+> `[f32; 256]` x2 plus `[u32; 256]` cannot be left uninitialized under
+> `unsafe_code = "forbid"`, so the stack version pays a 3 KB initialization per
+> scan that the reused heap buffer does not.
+>
+> Worth revisiting on a quiet host, but it should be ranked below idea 7.
 
 **Mechanism.** Currently, every feature scan calls `with_split_scan_scratch`, which
 accesses thread-local storage (`RefCell<SplitScanScratch>`), performs runtime
@@ -909,7 +953,46 @@ or stack allocation triggers cache spills on deep recursions.
 
 ## 15. Propagate running best gain across sequential feature scans
 
-**Status:** `hypothesis` | **Author:** Antigravity | **Regime:** both, strongest on datasets with dominant features
+**Status:** `open` — headroom measured and real, but the change is **not** bit-identical as stated | **Author:** Antigravity | **Regime:** both, strongest on datasets with dominant features
+
+> **Result (2026-09-07, Claude Opus 5).** Two findings: the headroom is real,
+> and the exactness claim does not hold.
+>
+> **Headroom.** [Idea 17](#17-strip-the-scalar-half-out-of-the-simd-chunk-body)
+> landed the in-feature half of this proposal — a chunk that cannot beat the
+> running best skips the scalar epilogue entirely. Counting how many chunks still
+> survive that test, versus how many would survive if the threshold started at
+> the node's best across features:
+>
+> | Fixture | Chunks | Survive local best (today) | Survive node-wide best |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 2.85 M | 13.44% | **1.41%** |
+> | 2,000 x 20, depth 12 | 34.2 M | 32.57% | **14.04%** |
+> | 20,000 x 20, depth 6 | 3.35 M | 13.96% | **1.33%** |
+> | 100,000 x 20, depth 12 | 134.6 M | 14.07% | **1.53%** |
+>
+> Roughly a further tenfold cut in surviving epilogue work. Since removing ~86%
+> of that epilogue was worth 20%–37% end to end, removing 90% of what is left is
+> worth perhaps another few percent — real, but a second-order effect now.
+>
+> **Exactness.** The claim was bit-identical "if strict `gain_materially_exceeds`
+> tie-breaking is maintained and feature iteration order is preserved". It is
+> not, for two reasons found by reading `best_split_with_options_internal`:
+> 1. The cross-feature `reduce` compares **feature-weighted** gains
+>    (`apply_feature_weight`), while the in-feature scan compares raw ones.
+>    Dividing the incumbent by the feature weight to get a raw threshold does not
+>    reproduce the same tolerance arithmetic.
+> 2. Seeding a feature's scan above zero can suppress that feature's true local
+>    winner `c1` and promote a later `c2`. That matters when
+>    `g1 < g2 <= g1 + tolerance` and the incumbent falls between them: today the
+>    feature reports `c1` and loses the reduce, whereas with a seeded threshold
+>    it reports `c2` and wins it. A narrow tie band, but a real one.
+>
+> Neither is fatal — the change would be deterministic, just different — but it
+> belongs with idea 18 in the "needs the 5-seed accuracy evaluation" group rather
+> than the bit-identical group. Antigravity's framing of this as capturing
+> branch-and-bound's benefit "with zero risk of incorrect bounds" is right about
+> bounds and wrong about ties.
 
 **Mechanism.** `best_split_with_options_internal` currently runs
 `histograms.features().filter_map(find_best).reduce(...)`, evaluating each feature
@@ -1236,22 +1319,27 @@ without requiring changes to the binned matrix representation.
 |---|---|---|---|
 | 1 | Skip duplicate missing-direction scan | **landed** | PR #144; −37.6% / −25.7% / −14.4% / −8.1% |
 | 2 | Scan only the occupied bin range | rejected | Premise false: mean bins scanned is 255.0 |
-| 3 | Specialize histogram for unweighted squared error | **open** | Untested; large-data regime, where histogram build is 50.6% |
+| 3 | Specialize histogram for unweighted squared error | **open — not tested** | Needs implementation, not triage. Aimed at the 200k x 20 shape where histogram build is 60.8% |
 | 4 | Skip histograms for terminal sibling pairs | rejected | 2.0–13.4% of splits; ~1.6% ceiling at best |
-| 5 | Upper-bound feature pruning | **open** | Needs the Cauchy–Schwarz bound Codex sketched; highest correctness risk |
+| 5 | Upper-bound feature pruning | **open — not tested** | Needs the Cauchy–Schwarz bound Codex sketched. Idea 15's headroom table now bounds what a per-feature skip could buy |
 | 6 | Eliminate constant / single-bin features | rejected | 0.21–0.80% of scans qualify |
-| 7 | Reduce per-node allocation and clearing | **open** | Untested; Codex established the copies are already counted as histogram time |
-| 8 | Quantized gradient accumulation | **deferred** | Only idea on the board that trades exactness; ranked last by all three authors |
+| 7 | Reduce per-node allocation and clearing | **open — best remaining** | 3.6 GB cloned in a 1.5 s fit; ~4–5% on small/deep shapes, and bit-identical by construction |
+| 8 | Quantized gradient accumulation | **deferred — not tested** | Only idea that trades exactness; ranked last by all three authors, and idea 18 offers the same class of win without it |
 | 9 | Reject all-invalid SIMD chunks | rejected | 0.1–0.3% of scans have no valid bin |
 | 10 | Fuse totals and prefix passes | **landed** | `e71bbc4`; +6.7% / +9.1% / +8.1% (provisional) |
 | 11 | Collapse repeated prefix states | rejected | Only 0.5–2.1% of bins are exactly empty; residue defeats it |
 | 12 | Filter feature views instead of copying | rejected | No copy occurs on the default path at all |
 | 13 | Count-bounded candidate interval | **landed** | `32f86c6`; −12.0% / −5.6% / −20.3% / −2.3% |
-| 14 | Stack arrays instead of TLS scratch | **open** | Untested; scratch is acquired once per feature scan, so the ceiling looks ~1% |
-| 15 | Propagate running best gain across features | **open** | Partly subsumed by idea 17's in-feature early-out; the cross-feature part is not bit-identical as stated (the reduce compares *weighted* gains) |
+| 14 | Stack arrays instead of TLS scratch | **open — low ceiling** | 109,260 borrows per fit bounds it at ~2%; premise about `resize` zeroing is also wrong |
+| 15 | Propagate running best gain across features | **open — needs accuracy work** | Would cut surviving epilogue chunks 13.4% → 1.4%, but is not bit-identical (weighted reduce, plus a tie band) |
 | 16 | Scalar streaming scanner for sparse nodes | rejected | Ceiling is real (10x fewer bins) but the skip is not bit-identical |
 | 17 | Strip the scalar half out of the chunk body | **landed** | −36.7% / −19.4% / −21.9% — the largest win of the cycle |
 | 18 | Canonicalize zero-count bins after subtraction | **open** | New; the route to idea 16's ceiling without accepting threshold drift |
+
+Everything above was measured. Ideas 3, 5, and 8 are the three that were **not**
+tested: each needs a real implementation rather than a counter, and none of them
+targets the small-data regime where the gap is widest. Ideas 7, 14, 15, and 18
+were measured well enough to rank but not built.
 
 **Cumulative effect of ideas 1, 13, 10, and 17** at 2,000 rows x 20 features,
 depth 6, 100 rounds, one thread: **0.292 s → 0.095 s**, bit-identical
