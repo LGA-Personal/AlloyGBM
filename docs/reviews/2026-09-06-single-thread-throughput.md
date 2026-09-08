@@ -116,6 +116,28 @@ That is necessary but not sufficient. Even with it, split-finding remains
 roughly 87% of a small fit, and 2,000 rows goes from 5.3x behind LightGBM to
 about 3.5x.
 
+### Progress against this statement (2026-09-07)
+
+Four bit-identical changes have since landed, all inside the split scanner:
+
+| Change | 2,000 x 20, depth 6 |
+|---|---:|
+| Baseline at `a35bc42` | 0.292 s |
+| + idea 1 — skip the duplicate missing-direction scan | 0.183 s |
+| + idea 13 — confine the scan to the count-feasible interval | 0.160 s |
+| + idea 10 — fuse the totals and prefix passes | 0.150 s |
+| + idea 17 — strip the scalar half out of the chunk body | **0.095 s** |
+
+Artifacts, quantile cuts, and prediction bytes are unchanged throughout (16
+probes, `n_jobs` 1 and 4). Against the LightGBM figure in the table above
+(0.051 s) that fixture moves from **5.3x behind to under 2x**.
+
+The diagnosis held up: every one of these is in split-finding, which the profile
+identified as 93% of that fit. The one prediction that did *not* hold up is that
+deep-node rows would be sparse in bin space — measured, the mean feature still
+occupies 14.4 distinct bins at a 22-row node, which is what killed ideas 2, 6,
+and 11.
+
 ---
 
 ## 3. What we are trying to achieve

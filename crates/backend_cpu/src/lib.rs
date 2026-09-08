@@ -906,17 +906,40 @@ impl CpuBackend {
                         let chunk_len = chunk_end - chunk_start;
 
                         // Load 8 lanes of cumulative left stats (zero-pad the tail).
-                        let mut lg_arr = [0.0_f32; 8];
-                        let mut lh_arr = [0.0_f32; 8];
-                        let mut lc_arr = [0.0_f32; 8];
-                        for j in 0..chunk_len {
-                            lg_arr[j] = cum_left_grad[chunk_start + j];
-                            lh_arr[j] = cum_left_hess[chunk_start + j];
-                            lc_arr[j] = cum_left_count[chunk_start + j] as f32;
-                        }
-                        let lg_v = f32x8::from(lg_arr);
-                        let lh_v = f32x8::from(lh_arr);
-                        let lc_v = f32x8::from(lc_arr);
+                        //
+                        // A full chunk is copied as one 8-wide block so the
+                        // compiler can emit a single vector load; only the tail
+                        // chunk needs the element-at-a-time path with padding.
+                        // The counts still convert lane by lane because they are
+                        // `u32` in the scratch and `f32` in the scan.
+                        let (lg_v, lh_v, lc_v) = if chunk_len == 8 {
+                            let lg: [f32; 8] = cum_left_grad[chunk_start..chunk_start + 8]
+                                .try_into()
+                                .expect("full chunk is 8 lanes");
+                            let lh: [f32; 8] = cum_left_hess[chunk_start..chunk_start + 8]
+                                .try_into()
+                                .expect("full chunk is 8 lanes");
+                            let counts_chunk = &cum_left_count[chunk_start..chunk_start + 8];
+                            let mut lc = [0.0_f32; 8];
+                            for (slot, &count) in lc.iter_mut().zip(counts_chunk) {
+                                *slot = count as f32;
+                            }
+                            (f32x8::from(lg), f32x8::from(lh), f32x8::from(lc))
+                        } else {
+                            let mut lg_arr = [0.0_f32; 8];
+                            let mut lh_arr = [0.0_f32; 8];
+                            let mut lc_arr = [0.0_f32; 8];
+                            for j in 0..chunk_len {
+                                lg_arr[j] = cum_left_grad[chunk_start + j];
+                                lh_arr[j] = cum_left_hess[chunk_start + j];
+                                lc_arr[j] = cum_left_count[chunk_start + j] as f32;
+                            }
+                            (
+                                f32x8::from(lg_arr),
+                                f32x8::from(lh_arr),
+                                f32x8::from(lc_arr),
+                            )
+                        };
 
                         // Right-side stats (before NaN routing).
                         let rg_v = nm_total_grad_v - lg_v;
@@ -984,6 +1007,24 @@ impl CpuBackend {
                         } else {
                             valid_mask.blend(gain_v, neg_inf_v)
                         };
+
+                        // Nothing in this chunk can win unless some lane already
+                        // exceeds the incumbent. `best_gain` starts at 0.0 and only
+                        // rises, so it is never negative, and the tolerance in
+                        // `gain_materially_exceeds` is strictly positive -- a lane
+                        // that fails `gain > best_gain` cannot pass
+                        // `gain > best_gain + tolerance`. The masks applied below
+                        // only ever lower a lane to NEG_INFINITY, so testing before
+                        // them cannot admit a lane that would later be rejected.
+                        //
+                        // This is worth a branch because the chunk body's scalar
+                        // half -- the lane extract and three 8-iteration loops --
+                        // costs more than the vector math it follows, and most
+                        // chunks lose to an incumbent found earlier in the scan.
+                        if !final_gain.cmp_gt(f32x8::splat(best_gain)).any() {
+                            chunk_start = chunk_end;
+                            continue;
+                        }
 
                         // Extract gain to scalar for tail-masking, edge-threshold
                         // rejection, and horizontal argmax. The lane-extract overhead

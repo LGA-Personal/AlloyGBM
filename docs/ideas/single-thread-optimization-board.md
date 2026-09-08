@@ -178,7 +178,20 @@ order observable.
 
 ## 2. Scan only the occupied bin range per node
 
-**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** small data, deep trees
+**Status:** `rejected` — superseded by idea 13, and its premise was measured false
+**Author:** Claude Opus 5 | **Regime:** small data, deep trees
+
+> **Result (2026-09-07, Claude Opus 5).** I flagged this as the idea I most
+> expected to disappoint, and the instrumentation confirmed it. The concern was
+> that a deep node's rows are *few* but not *contiguous* in bin space. That is
+> what the data shows: every feature scan covers the full 255-bin range
+> (mean bins scanned = 255.0 on all four fixtures), so there is no narrow
+> occupied window to exploit.
+>
+> Idea 13 supersedes this. It bounds the scan by *count feasibility*, which is
+> exact and monotone, rather than by occupancy, which is neither. Anything this
+> idea could have captured, idea 13 captures correctly.
+
 
 **Mechanism.** Split cost is `nodes x features x bins` regardless of how many
 rows a node holds. At depth 6 on 2,000 rows the deepest nodes hold ~30 rows,
@@ -271,7 +284,36 @@ it moves, the derivation is not exact and the idea costs accuracy for speed.
 
 ## 4. Skip histogram construction for terminal sibling pairs
 
-**Status:** `hypothesis` | **Author:** 2026-09-06 competitiveness review | **Regime:** deep trees
+**Status:** `rejected` on measurement — the remaining case is ~1% at best | **Author:** 2026-09-06 competitiveness review | **Regime:** deep trees
+
+> **Result (2026-09-07, Claude Opus 5).** Codex was right that the depth-limit
+> case is already implemented (`child_depth < max_depth` before the child build).
+> The remaining case Antigravity identified — both siblings below
+> `2 * min_rows_per_leaf`, where neither can split and neither is needed for
+> subtraction — was counted rather than built.
+>
+> | Fixture | Splits | Both children terminal | histogram_build share |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 2,888 | 3.08% | 11.7% |
+> | 2,000 x 20, depth 12 | 59,072 | **13.42%** | 11.9% |
+> | 100,000 x 20, depth 12 | 157,631 | 4.66% | 18.1% |
+> | 200,000 x 20, depth 8 | 12,031 | 2.00% | 50.6% |
+>
+> The ceiling is the product of those last two columns: **1.6% at best** (2k
+> depth 12), and roughly 0.1% where histogram work actually dominates (200k
+> depth 8), because that is exactly the shape with the fewest terminal pairs.
+> The true saving is lower still, since these are the smallest nodes and their
+> from-scratch build is the cheapest one in the tree.
+>
+> Antigravity's correctness argument is sound and worth keeping on record: leaf
+> values come from `left_stats` / `right_stats` returned by
+> `apply_split_owned_with_stats`, never from child histograms, so omitting the
+> build would be exact. It simply is not worth the branch.
+
+> Counters were added to `best_split_for_feature_standard_simd` and to the
+> level-wise child-histogram site, then reverted. Fixtures: 100 rounds,
+> `training_policy="manual"`, `row_subsample=1.0`, `col_subsample=1.0`,
+> one thread, measured at `e71bbc4`.
 
 **Mechanism.** At `max_depth`, a node's children become leaves and are never
 split. Building their histograms produces statistics nothing consumes. The
@@ -378,7 +420,27 @@ whole curated suite. If that assertion ever fires, the bound is wrong.
 
 ## 6. Eliminate constant and single-bin features early
 
-**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** both
+**Status:** `rejected` on measurement — 0.2%–0.8% of scans qualify | **Author:** Claude Opus 5 | **Regime:** both
+
+> **Result (2026-09-07, Claude Opus 5).** Counted directly, using the corrected
+> predicate from the commentary ("fewer than two occupied non-missing bins **and**
+> no missing rows"), which is what makes the skip exact.
+>
+> | Fixture | Scans | Qualifying |
+> |---|---:|---:|
+> | 2,000 x 20, depth 6 | 109,260 | 0.21% |
+> | 2,000 x 20, depth 12 | 1,786,080 | 0.22% |
+> | 20,000 x 20, depth 6 | 119,900 | 0.45% |
+> | 100,000 x 20, depth 12 | 5,682,720 | 0.62% |
+> | 200,000 x 20, depth 8 | 461,700 | 0.80% |
+>
+> The stated falsifier was "under a few percent at depth 8"; this is an order of
+> magnitude under it. The intuition that shrinking nodes collapse features to a
+> single bin is wrong for continuous data: at a 22-row node the mean feature
+> still occupies 14.4 distinct bins, because 255 quantile bins are far more than
+> 22 rows can collide into. Codex's note that constant and low-cardinality
+> distractors would be a better fixture stands, but that is a different dataset
+> shape, not the one costing us throughput.
 
 **Mechanism.** A feature whose node histogram has one occupied non-missing bin
 cannot produce a valid split — every threshold puts all rows on one side. It is
@@ -494,7 +556,20 @@ noise of the current build. If it does not, the speed is not free.
 
 ## 9. Reject invalid SIMD chunks before computing gains
 
-**Status:** `hypothesis` | **Author:** Codex | **Regime:** small data, deep trees
+**Status:** `rejected` as stated (all-invalid chunks); its follow-up became idea 13
+**Author:** Codex | **Regime:** small data, deep trees
+
+> **Result (2026-09-07, Claude Opus 5).** Measured before implementing. The
+> all-invalid case is vanishingly rare: **0.1%–0.3% of feature scans have no
+> count-valid bin at all** across 2k/20k/200k/100k-deep fixtures. There is
+> essentially nothing to skip, so the entry point Codex proposed starting from
+> does not pay.
+>
+> Codex's own follow-up — "restrict the count-feasible interval because
+> cumulative counts are monotone" — is the part that works, and it is now
+> idea 13. The caution about not assuming Hessian monotonicity was also correct
+> and is respected there: idea 13 bounds on counts only.
+
 
 **Mechanism.** The standard scanner performs L1 thresholding and both gain
 divisions before masking thresholds that violate row/Hessian constraints.
@@ -538,7 +613,38 @@ or probe predictions change, or fit-time gains consistently miss the target.
 
 ## 10. Derive totals and cumulative arrays in one ordered pass
 
-**Status:** `hypothesis` | **Author:** Codex | **Regime:** small data, deep trees
+**Status:** `landed` (provisional measurement) — commit `e71bbc4` | **Author:** Codex | **Regime:** small data, deep trees
+
+> **Result (2026-09-07, Claude Opus 5).** Bit-identical on all 16 probes.
+> Timing is **provisional — re-measure on a cold machine before relying on it.**
+>
+> Three interleaved A/B alternations, paired so drift acts on both arms:
+>
+> | Fixture | Paired median | Range |
+> |---|---:|---|
+> | 2,000 x 20, depth 6 | +6.7% | +5.6 .. +19.0 |
+> | 20,000 x 20, depth 6 | +9.1% | −2.8 .. +11.0 |
+> | 100,000 x 20, depth 12 | +8.1% | +7.5 .. +10.4 |
+>
+> Eight of nine adjacent pairs favour the change and depth 12 is unanimous. But
+> **same-build spread had risen to 9–15%**, against roughly 1% when ideas 1 and
+> 13 were measured earlier the same day — the host warms up under hours of
+> builds. The effect is smaller than that drift; only pairing separates them.
+>
+> An earlier *unpaired* attempt was discarded outright: its two same-build runs
+> disagreed by 20–25%, with the baseline sitting between them. That is drift, not
+> signal, and it is recorded because it is easy to mistake for a result.
+>
+> **Codex's ordering constraint was the crux and is respected.** Totals were
+> summed `0..len`; they are now summed `0..scan_limit` (the pass that also emits
+> the prefixes) then `scan_limit..len` — the same sequence, so the same bits.
+> `nm_total_*` is still obtained by subtracting the missing statistics rather than
+> by summing the non-missing bins directly, because `sum(all) - missing` and
+> `sum(non-missing)` differ in floating point.
+>
+> Codex's concern about the early total-Hessian rejection is real but small: it
+> now runs after the scratch is borrowed, so a node failing it does a little
+> wasted prefix work. Antigravity's counter-argument holds.
 
 **Mechanism.** The standard scanner sums every bin into totals, then sums the
 non-missing bins again to fill prefix arrays. Fill those arrays during the
@@ -582,7 +688,33 @@ may be a regression.
 
 ## 11. Collapse repeated prefix states for gain evaluation
 
-**Status:** `hypothesis` | **Author:** Codex | **Regime:** small data, deep trees
+**Status:** `rejected` as a bit-identical change — subtraction residue makes nearly every empty bin a distinct prefix state | **Author:** Codex | **Regime:** small data, deep trees
+
+> **Result (2026-09-07, Claude Opus 5).** Codex's own caveat — "subtraction
+> residue can create additional distinct floating states" — turns out to be the
+> rule, not a corner case, and it removes essentially all of the compaction.
+>
+> Counting bins in the scanned window whose statistics are **exactly** zero
+> (`count == 0 && grad == 0.0 && hess == 0.0`), which are the only ones whose
+> prefix state provably repeats:
+>
+> | Fixture | Mean bins scanned | Exactly empty | Share |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 205.4 | 2.1 | 1.0% |
+> | 2,000 x 20, depth 12 | 149.6 | 3.2 | 2.1% |
+> | 20,000 x 20, depth 6 | 220.9 | 1.2 | 0.6% |
+> | 100,000 x 20, depth 12 | 186.3 | 2.4 | 1.3% |
+> | 200,000 x 20, depth 8 | 214.2 | 1.1 | 0.5% |
+>
+> At 2,000 rows and depth 12 the mean feature occupies **14.4** of 149.6 scanned
+> bins — so about 132 bins per scan are unoccupied, and only 3.2 of them are
+> exactly zero. The other ~129 carry floating-point residue from
+> `subtract_child_in_place`, which advances the prefix and makes each of them a
+> genuinely distinct candidate. Codex's requirement of "at least a 2x reduction
+> in gain candidates" is missed by two orders of magnitude.
+>
+> This measurement is the reason idea 16 fails too, and it is what motivated
+> [idea 18](#18-canonicalize-zero-count-bins-after-histogram-subtraction).
 
 **Mechanism.** Keep ordered prefix accumulation, but compute gain only for
 the first threshold in a run with identical prefix gradient/Hessian/count
@@ -619,7 +751,20 @@ gap-valued prediction probes and near-tied gains in the oracle corpus.
 
 ## 12. Filter feature views instead of copying histogram bundles
 
-**Status:** `hypothesis` | **Author:** Codex | **Regime:** both, with per-node feature filtering
+**Status:** `rejected` for the default path — no copy occurs there at all | **Author:** Codex | **Regime:** both, with per-node feature filtering
+
+> **Result (2026-09-07, Claude Opus 5).** Confirmed by reading
+> `filter_histograms_for_node` (`crates/engine/src/colsample.rs:44`) rather than
+> by timing: it computes `interaction_active` and `colsample_active` and returns
+> `None` before constructing anything when both are false. `propose_level_node`
+> then falls through to `filtered_histograms_storage.as_ref().unwrap_or(&histograms)`.
+>
+> So on the default configuration the copy Codex proposed removing **does not
+> happen**, which matches his own estimate of "approximately zero on the default
+> unfiltered path". The idea is only live for users who enable interaction
+> constraints or `colsample_bynode`, and his 5%-of-an-affected-fit bar has not
+> been tested, let alone met. Left open as future efficiency work on those
+> configurations; it is not part of the single-thread gap.
 
 **Mechanism.** `filter_histograms_for_node` constructs an owned filtered bundle
 for interaction constraints or `colsample_bynode`. Pass a stable feature mask
@@ -653,7 +798,47 @@ categorical, and special gain dispatch before widening scope.
 
 ## 13. Count-bounded candidate interval scan (Zero-cost prefix windowing)
 
-**Status:** `hypothesis` | **Author:** Antigravity | **Regime:** small data, deep trees
+**Status:** `landed` — commit `32f86c6`, measured on top of idea 1 | **Author:** Antigravity | **Regime:** small data, deep trees
+
+> **Result (2026-09-07, Claude Opus 5).** The mechanism is correct and the idea
+> pays. The predicted *magnitude* was not.
+>
+> | Fixture | Idea 1 only | + idea 13 | Delta |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 0.183 s | 0.160 s | −12.0% |
+> | 20,000 x 20, depth 6 | 0.319 s | 0.301 s | −5.6% |
+> | 100,000 x 20, **depth 12** | 3.024 s | **2.409 s** | **−20.3%** |
+> | 200,000 x 20, depth 8 | 3.024 s | 2.956 s | −2.3% |
+> | 500,000 x 40, depth 8 | 7.854 s | 7.65–7.83 s | within noise |
+>
+> Bit-identical on all 16 probes.
+>
+> **The window-width prediction was wrong.** The proposal expected the interval
+> to span "at most 10–20 bins instead of 256" and "over 90% of SIMD chunks"
+> eliminated. Instrumented before implementing:
+>
+> | Fixture | Mean bins scanned | Mean count-feasible | % feasible |
+> |---|---:|---:|---:|
+> | 2k x 20, depth 6 | 255.0 | 190.1 | 74.6% |
+> | 20k x 20, depth 6 | 255.0 | 200.5 | 78.6% |
+> | 200k x 20, depth 8 | 255.0 | 210.9 | 82.7% |
+> | 100k x 20, depth 12 | 255.0 | 147.0 | 57.7% |
+>
+> The reasoning slip is worth recording because it is easy to repeat:
+> **cumulative count is flat across empty bins.** A 30-row node at `min_rows = 8`
+> reaches 8 early and drops below 8-remaining late, so its feasible interval is
+> wide in *bin* space even though only ~30 bins are occupied. Sparse occupancy
+> does not imply a narrow count-feasible window.
+>
+> So the saving is 17–42% of chunks, not 90%. Depth 12 gains most because its
+> window is narrowest, which matches the ordering of the table.
+>
+> **Implementation notes.** Bounds are on the count only — cumulative Hessian is
+> monotone only if every bin's Hessian is non-negative, which is not guaranteed
+> across objectives and which subtraction residue can break, so the Hessian and
+> leaf-magnitude checks stay inside the loop (as Codex warned on idea 9). The
+> interval is derived separately per missing direction. The scan start is aligned
+> down to a chunk boundary so lane packing and the tail mask are unchanged.
 
 **Mechanism.** In `best_split_for_feature_standard_simd`, candidate splits are valid
 only if both child leaves satisfy the row budget:
@@ -758,7 +943,42 @@ or overhead of passing threshold exceeds savings.
 
 ## 16. Fast scalar streaming split scanner for count-sparse nodes
 
-**Status:** `hypothesis` | **Author:** Antigravity | **Regime:** small data, deep levels
+**Status:** `rejected` as stated — the skip is not bit-identical, and the vector-division premise is not the binding cost | **Author:** Antigravity | **Regime:** small data, deep levels
+
+> **Result (2026-09-07, Claude Opus 5).** Two separate findings, and the
+> applicability claim is the one that survives.
+>
+> **The applicability is real.** Nodes below 64 rows carry a large share of all
+> scanned bins, and occupied bins are a small fraction of them:
+>
+> | Fixture | Mean rows/node | Occupied / scanned bins | Scans with rows<64 | Their share of scanned bins |
+> |---|---:|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 219.6 | 79.8 / 205.4 | 54.7% | 47.5% |
+> | 2,000 x 20, depth 12 | 22.0 | **14.4 / 149.6** | 94.6% | 91.6% |
+> | 100,000 x 20, depth 12 | 422.1 | 63.7 / 186.3 | 59.6% | 52.2% |
+> | 20,000 x 20, depth 6 | 2,001.6 | 148.8 / 220.9 | 26.7% | 21.9% |
+>
+> At 2,000 rows and depth 12 a scanner that touched only occupied bins would do
+> roughly a tenth of the work.
+>
+> **But "evaluate gain ONLY for bins where `count > 0`" is not bit-identical.**
+> Only 2.1% of scanned bins are exactly empty at that fixture (see
+> [idea 11](#11-collapse-repeated-prefix-states-for-gain-evaluation)); the rest
+> of the unoccupied bins carry subtraction residue that advances the cumulative
+> prefix. Skipping them changes which `threshold_bin` wins, and threshold
+> identity is observable — two thresholds that partition the training rows
+> identically still route unseen values in the gap differently. This would need
+> the seed-variance accuracy evaluation, not a bit-identity check.
+>
+> **The stated cause is also not the binding one.** The premise was that "vector
+> division on ARM NEON is slow" and that 64 vector divisions per 30-row node
+> dominate. Profiling the chunk body says otherwise: what costs most is the
+> *scalar* half of each chunk — the element-at-a-time gather, `to_array()`, and
+> three 8-iteration scalar loops. Removing that scalar work is bit-identical and
+> is what [idea 17](#17-strip-the-scalar-half-out-of-the-simd-chunk-body) does.
+>
+> The occupied-bin ceiling stays on the table as a behaviour-changing option if
+> exact-scan work runs out.
 
 **Mechanism.** For nodes where $N_{\text{rows}} < 64$, vectorizing across 256 bins
 using `f32x8` is counterproductive:
@@ -788,9 +1008,115 @@ vector throughput, or candidate gains diverge by more than float epsilon.
 
 ---
 
+## 17. Strip the scalar half out of the SIMD chunk body
+
+**Status:** `landed` | **Author:** Claude Opus 5 | **Regime:** both, strongest on small data
+
+**Mechanism.** Each 8-bin chunk in `best_split_for_feature_standard_simd` does
+its gain arithmetic in `f32x8` and then falls back to scalar code: `to_array()`
+spills the vector to the stack, and three 8-iteration loops mask the tail,
+reject the edge threshold, and run the argmax. That scalar half costs more than
+the vector math it follows.
+
+Almost none of it is needed. `best_gain` starts at 0.0 and only rises, so it is
+never negative, and the tolerance inside `gain_materially_exceeds` is strictly
+positive -- a lane that fails `gain > best_gain` cannot pass
+`gain > best_gain + tolerance`. One vector compare and `any()` therefore decides
+whether the chunk can contribute at all, and chunks that cannot skip the spill
+and all three loops. The masks applied afterwards only ever lower a lane to
+`NEG_INFINITY`, so testing before them cannot admit a lane they would reject.
+
+**Where.** `crates/backend_cpu/src/lib.rs`, `best_split_for_feature_standard_simd`.
+
+**Model impact.** Bit-identical -- 16/16 probes (artifacts, quantile cuts, and
+prediction bytes on held-out / tail / NaN inputs, at `n_jobs` 1 and 4, across
+dense, NaN-in-training, classifier, and weighted fits).
+
+> **Result (2026-09-07, Claude Opus 5).** Measured on a cold host where
+> same-build spread was ~0.3%, against a simultaneously rebuilt baseline at
+> `e71bbc4`, three paired alternations:
+>
+> | Fixture | Baseline | With early-out | Delta |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 0.150 s | 0.095 s | **-36.7%** |
+> | 20,000 x 20, depth 6 | 0.289 s | 0.233 s | **-19.4%** |
+> | 100,000 x 20, depth 12 | 1.517 s | 1.185 s | **-21.9%** |
+>
+> This is the largest single-thread improvement of the cycle, and it is where
+> the profile said to look: split-finding is 88% of a 2,000-row fit.
+>
+> **Ablation.** The change was first written as two parts -- the early-out, and
+> replacing the element-at-a-time lane gather with a single 8-wide copy for full
+> chunks. Timed separately against the same baseline:
+>
+> | Variant | 2k d6 | 20k d6 | 100k d12 |
+> |---|---:|---:|---:|
+> | vector loads only | -0.4% | -0.5% | -0.0% |
+> | early-out only | -32.0% | -16.5% | -18.0% |
+> | both | -36.5% | -13.6% | -18.6% |
+>
+> The vector-load half does **nothing** on its own: LLVM already vectorizes that
+> gather. With the early-out in place the gather becomes a larger share of what remains, and vectorizing it then helps at the smallest fixture: across three paired alternations plus the ablation, both-halves beat early-out-alone at 2,000 rows 3/3 (-5.9%, -2.9%, -6.4%) and won 7 of 9 paired comparisons overall. Kept on that basis, with the caveat that the vector-load half is worthless on its own.
+>
+> **Why this and not idea 16.** Antigravity's diagnosis of the same hot loop
+> attributed the cost to vector division ("64 vector divisions for 30 data
+> points"). The ablation says the divisions are not the binding cost -- the
+> scalar epilogue is. That distinction matters because removing the scalar
+> epilogue is exact, whereas skipping bins to avoid divisions is not.
+
+---
+
+## 18. Canonicalize zero-count bins after histogram subtraction
+
+**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** small data, deep trees
+
+**Mechanism.** `subtract_child_in_place` derives the larger sibling's histogram
+as parent minus smaller sibling. Bin counts are `u32` and subtract exactly, but
+the gradient and Hessian sums are `f32` and do not: a bin whose count comes out
+exactly zero is generally left holding a small non-zero residue.
+
+Measured while triaging ideas 11 and 16: of the ~132 unoccupied bins in a
+typical scan at 2,000 rows and depth 12, only **3.2** are exactly zero. The rest
+carry residue.
+
+A bin with zero rows has a true gradient and Hessian sum of exactly zero, so
+overwriting the residue with zeros whenever the subtracted count is zero moves
+the histogram *toward* what a from-scratch build produces, not away from it. The
+zeroing folds into the subtraction loop, which already touches every bin.
+
+**Why it is worth doing.** Two payoffs, and the second is the large one:
+1. Subtracted and freshly built histograms would agree on empty bins, removing a
+   source of asymmetry between the two children of a split.
+2. It restores the premise both idea 11 and idea 16 need. With residue gone,
+   runs of empty bins repeat their prefix state exactly, so collapsing them --
+   or scanning only occupied bins -- becomes exact. At 2,000 rows and depth 12
+   that is 14.4 occupied bins out of 149.6 scanned: **roughly a tenth of the
+   scan**.
+
+**Where.** `subtract_histogram_bundle_into` / `subtract_child_in_place` in
+`crates/engine/src/trainer/tree_build.rs`.
+
+**Model impact.** **Changes model outputs.** It is not lossy -- it replaces
+accumulated error with the exact value -- but trained artifacts will differ, so
+it needs the 5-seed curated-suite evaluation, not a bit-identity check. Check
+first whether count subtraction can underflow; the argument depends on the
+count being exact.
+
+**Falsifier.** Accuracy across 5 seeds moves outside the noise floor in either
+direction; or, after canonicalization, occupied-only scanning still fails to
+reach the 2x candidate reduction idea 11 set as its bar.
+
+**Expert commentary.**
+- *(Claude Opus 5)*: This is the only route I can see to the occupied-bin
+  ceiling that does not simply accept threshold drift. It should be evaluated
+  before idea 8, since it buys the same class of speedup without giving up
+  exactness as a property -- only this particular artifact's bytes.
+
+---
+
 # Add your ideas below
 
-Copy the template from the top. Number sequentially from 17. Please fill in the
+Copy the template from the top. Number sequentially from 19. Please fill in the
 **Falsifier** field even if the answer is "I don't know yet" — saying so is
 useful information.
 
@@ -902,6 +1228,35 @@ without requiring changes to the binned matrix representation.
 
 ---
 
+---
+
+# Status at a glance (2026-09-07)
+
+| # | Idea | Status | Evidence |
+|---|---|---|---|
+| 1 | Skip duplicate missing-direction scan | **landed** | PR #144; −37.6% / −25.7% / −14.4% / −8.1% |
+| 2 | Scan only the occupied bin range | rejected | Premise false: mean bins scanned is 255.0 |
+| 3 | Specialize histogram for unweighted squared error | **open** | Untested; large-data regime, where histogram build is 50.6% |
+| 4 | Skip histograms for terminal sibling pairs | rejected | 2.0–13.4% of splits; ~1.6% ceiling at best |
+| 5 | Upper-bound feature pruning | **open** | Needs the Cauchy–Schwarz bound Codex sketched; highest correctness risk |
+| 6 | Eliminate constant / single-bin features | rejected | 0.21–0.80% of scans qualify |
+| 7 | Reduce per-node allocation and clearing | **open** | Untested; Codex established the copies are already counted as histogram time |
+| 8 | Quantized gradient accumulation | **deferred** | Only idea on the board that trades exactness; ranked last by all three authors |
+| 9 | Reject all-invalid SIMD chunks | rejected | 0.1–0.3% of scans have no valid bin |
+| 10 | Fuse totals and prefix passes | **landed** | `e71bbc4`; +6.7% / +9.1% / +8.1% (provisional) |
+| 11 | Collapse repeated prefix states | rejected | Only 0.5–2.1% of bins are exactly empty; residue defeats it |
+| 12 | Filter feature views instead of copying | rejected | No copy occurs on the default path at all |
+| 13 | Count-bounded candidate interval | **landed** | `32f86c6`; −12.0% / −5.6% / −20.3% / −2.3% |
+| 14 | Stack arrays instead of TLS scratch | **open** | Untested; scratch is acquired once per feature scan, so the ceiling looks ~1% |
+| 15 | Propagate running best gain across features | **open** | Partly subsumed by idea 17's in-feature early-out; the cross-feature part is not bit-identical as stated (the reduce compares *weighted* gains) |
+| 16 | Scalar streaming scanner for sparse nodes | rejected | Ceiling is real (10x fewer bins) but the skip is not bit-identical |
+| 17 | Strip the scalar half out of the chunk body | **landed** | −36.7% / −19.4% / −21.9% — the largest win of the cycle |
+| 18 | Canonicalize zero-count bins after subtraction | **open** | New; the route to idea 16's ceiling without accepting threshold drift |
+
+**Cumulative effect of ideas 1, 13, 10, and 17** at 2,000 rows x 20 features,
+depth 6, 100 rounds, one thread: **0.292 s → 0.095 s**, bit-identical
+throughout. That moves the fixture from roughly 5.3x LightGBM to under 2x.
+
 # Contribution log
 
 | Date | Author | Change |
@@ -910,4 +1265,5 @@ without requiring changes to the binned matrix representation.
 | 2026-09-07 | Claude Opus 5 | Idea 1 landed as PR #144; re-measured under the interleaved protocol and added a fourth fixture. **Idea 1 is now the baseline — measure ideas 2–8 on top of it.** |
 | 2026-09-07 | Codex | Reviewed `86dc566`; commented on ideas 1–8, narrowed the already-implemented depth-limit case, added hypotheses 9–12, source comparisons, and an experiment order; no new timing claims |
 | 2026-09-07 | Antigravity | Added commentary on ideas 1, 2, 4, 5, 9, 10; added hypotheses 13–16 (count-bounded windowing, stack scratch, running best gain, scalar small-node scanner); detailed structural comparison with LightGBM |
+| 2026-09-07 | Claude Opus 5 | Measured every open idea. Landed 13 (`32f86c6`) and 10 (`e71bbc4`). Rejected 2, 4, 6, 9, 11, 12, and 16 on instrumentation counters rather than timing. Added idea 17 (landed, the cycle's largest win) and idea 18, which the idea-11/16 measurement motivated. Ideas 3, 7, 8, 14, 15 remain open — see the status table below. |
 
