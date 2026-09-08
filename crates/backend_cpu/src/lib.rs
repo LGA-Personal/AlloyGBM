@@ -833,10 +833,57 @@ impl CpuBackend {
                 };
                 for &default_left in directions {
                     let nan_left_mask = default_left;
+
+                    // Restrict the scan to the count-feasible interval.
+                    //
+                    // `cum_left_count` is monotone non-decreasing, so
+                    // `eff_lc >= min_rows` holds from some index onward and
+                    // `eff_rc >= min_rows` holds up to some index. The valid
+                    // region is therefore a contiguous interval, and every bin
+                    // outside it fails the count mask and scores
+                    // NEG_INFINITY -- which can never win, since `best_gain`
+                    // starts at 0.0. Skipping those bins is exact.
+                    //
+                    // Bounds are taken on the count only. Cumulative Hessian is
+                    // monotone only when every bin's Hessian is non-negative,
+                    // which is not guaranteed for all objectives, and histogram
+                    // subtraction can leave negative residue. The Hessian and
+                    // leaf-magnitude checks therefore stay inside the loop.
+                    //
+                    // Measured window widths (mean feasible bins out of 255):
+                    // 190 at 2k rows depth 6, 147 at 100k rows depth 12. The
+                    // saving is real but is roughly a quarter of the scan, not
+                    // the bulk of it.
+                    let min_rows_u = options.min_rows_per_leaf as u32;
+                    let nm_total_u = nm_total_count;
+                    let (lo_need, hi_allow) = if nan_left_mask {
+                        (
+                            min_rows_u.saturating_sub(missing_count),
+                            nm_total_u.saturating_sub(min_rows_u),
+                        )
+                    } else {
+                        (
+                            min_rows_u,
+                            nm_total_u
+                                .saturating_add(missing_count)
+                                .saturating_sub(min_rows_u),
+                        )
+                    };
+                    let counts = &cum_left_count[..scan_limit];
+                    let feasible_start = counts.partition_point(|count| *count < lo_need);
+                    let feasible_end = counts.partition_point(|count| *count <= hi_allow);
+                    if feasible_start >= feasible_end {
+                        continue;
+                    }
+                    // Align down to the SIMD chunk boundary so lane packing and
+                    // the tail mask behave exactly as before.
+                    let scan_from = feasible_start - (feasible_start % 8);
+                    let scan_to = feasible_end;
+
                     // For each chunk-of-8 starting at `chunk_start`:
-                    let mut chunk_start = 0usize;
-                    while chunk_start < scan_limit {
-                        let chunk_end = (chunk_start + 8).min(scan_limit);
+                    let mut chunk_start = scan_from;
+                    while chunk_start < scan_to {
+                        let chunk_end = (chunk_start + 8).min(scan_to);
                         let chunk_len = chunk_end - chunk_start;
 
                         // Load 8 lanes of cumulative left stats (zero-pad the tail).
