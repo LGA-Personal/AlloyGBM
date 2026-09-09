@@ -242,7 +242,7 @@ idea is dead and the instrumentation cost a few minutes.
 
 ## 3. Specialize the histogram for unweighted squared error
 
-**Status:** `hypothesis` | **Author:** 2026-09-06 competitiveness review | **Regime:** large data
+**Status:** `landed` — commit `2901fd3` | **Author:** 2026-09-06 competitiveness review | **Regime:** large data
 
 **Mechanism.** For unweighted squared-error regression the Hessian is exactly
 1.0 for every row. The histogram currently accumulates a hess sum per bin
@@ -279,6 +279,61 @@ it moves, the derivation is not exact and the idea costs accuracy for speed.
   alone does not shrink it. Measure a compact eligible layout separately from
   Hessian derivation, retaining the SoA scanner interface. Reciprocal
   multiplication is not an exact replacement for division.
+
+> **Result (2026-09-08, Claude Opus 5).** Landed. This is the first change of
+> the cycle aimed at the histogram-bound regime rather than split finding.
+>
+> **The ceiling was measured before the correctness machinery was written.** An
+> unguarded probe — hessian accumulation deleted outright, wrong for anything but
+> unit hessians — established what the idea could be worth at all, against a
+> baseline stable to 0.6%:
+>
+> | Fixture | r1 | r2 | r3 | Median |
+> |---|---:|---:|---:|---:|
+> | 200,000 x 20, depth 8 | −6.7% | −6.3% | −6.5% | **−6.5%** |
+> | 400,000 x 40, depth 8 | −8.3% | −8.4% | −7.8% | **−8.3%** |
+>
+> Worth doing, so it was done properly. (The probe also broke exactly one of the
+> 16 bit-identity probes — the classifier — which is the eligibility boundary
+> showing up as a test failure rather than as an argument.)
+>
+> **Codex's two constraints both drove the design.**
+> - *Scope eligibility to the effective hessians.* The check reads the gradient
+>   buffer (`node_has_unit_hessians`) rather than inferring from the objective,
+>   because GOSS amplification and sample weights scale the hessian without
+>   changing which objective is selected. A parameter-based test would have to
+>   enumerate every such path correctly forever; a runtime test cannot fall out
+>   of date. It costs O(rows) once per tile against the O(rows × features) it
+>   guards.
+> - *Repeated f32 additions of 1 stop advancing above 2^24.* Handled by deriving
+>   from the exact `u32` count rather than an accumulated float, plus a row bound
+>   at 2^24 — below which both forms produce the same integer, which is what
+>   makes this bit-identical rather than merely close.
+>
+> Codex was also right that `BinAccumulator` stays 16 bytes, so this removes an
+> instruction, not a cache line. The compact-layout variant he suggested
+> measuring separately remains untested.
+>
+> **Guarded measurement (weaker than the ceiling probe — read the range).**
+> The third alternation was discarded: its baseline arm had drifted 4%–7% slower,
+> and it is the only run in which any fixture regressed. Across the ten clean
+> paired comparisons, every one favours the change:
+>
+> | Fixture | r1 | r2 |
+> |---|---:|---:|
+> | 200,000 x 20, depth 8 | −4.8% | −3.9% |
+> | 400,000 x 40, depth 8 | −8.7% | −4.0% |
+> | 2,000 x 20, depth 6 | −1.7% | −0.7% |
+> | 20,000 x 20, depth 6 | −3.7% | −4.2% |
+> | 100,000 x 20, depth 12 | −1.1% | −1.8% |
+>
+> The gap between the ceiling and the guarded result is the eligibility scan,
+> and it is proportionally larger at 20 features than at 40 — which is what an
+> O(rows) cost amortized over `tile_feature_count` should look like.
+>
+> Three tests were added. The one that matters asserts the fast and general
+> kernels **differ** on non-unit hessians: without it, the eligibility check
+> could rot and nothing would notice.
 
 ---
 
@@ -1380,7 +1435,7 @@ without requiring changes to the binned matrix representation.
 |---|---|---|---|
 | 1 | Skip duplicate missing-direction scan | **landed** | PR #144; −37.6% / −25.7% / −14.4% / −8.1% |
 | 2 | Scan only the occupied bin range | rejected | Premise false: mean bins scanned is 255.0 |
-| 3 | Specialize histogram for unweighted squared error | **open — not tested** | Needs implementation, not triage. Aimed at the 200k x 20 shape where histogram build is 60.8% |
+| 3 | Specialize histogram for unweighted squared error | **landed** | `2901fd3`; ceiling −6.5% / −8.3%, guarded −4% / −4 to −9%. First change aimed at the histogram-bound regime |
 | 4 | Skip histograms for terminal sibling pairs | rejected | 2.0–13.4% of splits; ~1.6% ceiling at best |
 | 5 | Upper-bound feature pruning | **open — not tested** | Needs the Cauchy–Schwarz bound Codex sketched. Idea 15's headroom table now bounds what a per-feature skip could buy |
 | 6 | Eliminate constant / single-bin features | rejected | 0.21–0.80% of scans qualify |
@@ -1397,10 +1452,14 @@ without requiring changes to the binned matrix representation.
 | 17 | Strip the scalar half out of the chunk body | **landed** | −36.7% / −19.4% / −21.9% — the largest win of the cycle |
 | 18 | Canonicalize zero-count bins after subtraction | **open** | New; the route to idea 16's ceiling without accepting threshold drift |
 
-Everything above was measured. Ideas 3, 5, and 8 are the three that remain
-**not tested**: each needs a real implementation rather than a counter. Ideas 15
-and 18 are measured well enough to rank, but both change model outputs, so they
-need the 5-seed curated-suite evaluation rather than a bit-identity check.
+Every idea on this board has now been measured. What remains open falls into two
+groups. **Ideas 15 and 18 change model outputs**, so they need the 5-seed
+curated-suite evaluation rather than a bit-identity check — 18 is the more
+promising of the two, since it is the route to idea 16's tenfold ceiling.
+**Idea 5 needs a proof before it needs an implementation**: a per-feature gain
+bound that is genuinely an upper bound. **Idea 8** stays deferred by the
+agreement of all three authors, and idea 18 would buy the same class of speedup
+without giving up exactness.
 
 **Cumulative effect of ideas 1, 13, 10, 17, and 7** at 2,000 rows x 20 features,
 depth 6, 100 rounds, one thread: **0.292 s → 0.092 s**, bit-identical
