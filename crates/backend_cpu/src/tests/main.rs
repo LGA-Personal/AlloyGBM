@@ -889,12 +889,12 @@ fn histogram_tile_strategies_are_equivalent() {
         &mut per_feature_arena,
     );
     let per_feature = per_feature_arena
-        .to_bundle(0, 0)
+        .take_bundle(0, 0)
         .expect("per-feature histogram bundle");
 
     let mut arena = HistogramArena::new(2, bin_count, true);
     CpuBackend::build_tile_histograms_row_first(&matrix, &gradients, &node, 0, 2, &mut arena);
-    let row_first = arena.to_bundle(0, 0).expect("row-first histogram bundle");
+    let row_first = arena.take_bundle(0, 0).expect("row-first histogram bundle");
 
     assert_eq!(per_feature, row_first);
 }
@@ -1039,7 +1039,7 @@ fn unrolled_row_first_histograms_match_per_feature() {
         &mut per_feature_arena,
     );
     let per_feature = per_feature_arena
-        .to_bundle(0, 0)
+        .take_bundle(0, 0)
         .expect("per-feature histogram bundle");
 
     let mut unrolled_arena = HistogramArena::new(matrix.feature_count, bin_count, true);
@@ -1052,7 +1052,7 @@ fn unrolled_row_first_histograms_match_per_feature() {
         &mut unrolled_arena,
     );
     let unrolled = unrolled_arena
-        .to_bundle(0, 0)
+        .take_bundle(0, 0)
         .expect("unrolled histogram bundle");
 
     assert_eq!(per_feature, unrolled);
@@ -3926,7 +3926,7 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
         feature_count,
         &mut gathered_arena,
     );
-    let gathered = gathered_arena.to_bundle(0, 0).expect("gathered bundle");
+    let gathered = gathered_arena.take_bundle(0, 0).expect("gathered bundle");
 
     // Reference: the row-indexed oracle kernel, which looks up `gradients[row]`
     // directly and so is independent of the gather.
@@ -3939,7 +3939,7 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
         feature_count,
         &mut reference_arena,
     );
-    let reference = reference_arena.to_bundle(0, 0).expect("reference bundle");
+    let reference = reference_arena.take_bundle(0, 0).expect("reference bundle");
     assert_eq!(
         gathered, reference,
         "gathering gradients into node order must not change the histogram"
@@ -3957,7 +3957,9 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
         feature_count,
         &mut mismatched_arena,
     );
-    let mismatched = mismatched_arena.to_bundle(0, 0).expect("mismatched bundle");
+    let mismatched = mismatched_arena
+        .take_bundle(0, 0)
+        .expect("mismatched bundle");
     assert_ne!(
         mismatched, reference,
         "fixture cannot distinguish position indexing from row indexing"

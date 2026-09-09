@@ -360,7 +360,7 @@ impl CpuBackend {
                 ),
             }
             arena
-                .to_bundle(node.node_id, start_feature)
+                .take_bundle(node.node_id, start_feature)
                 .map_err(EngineError::from)
         })
     }
@@ -427,7 +427,7 @@ impl CpuBackend {
                 }
             }
             arena
-                .to_bundle(node.node_id, start_feature)
+                .take_bundle(node.node_id, start_feature)
                 .map_err(EngineError::from)
         })
     }
