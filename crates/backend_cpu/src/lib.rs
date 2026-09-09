@@ -132,6 +132,25 @@ impl CpuBackend {
         }
     }
 
+    /// Whether every hessian in this node is exactly 1.0, so a bin's hessian sum
+    /// can be derived from its row count instead of accumulated.
+    ///
+    /// This is a *runtime* test of the gradients actually in hand, not an
+    /// inference from which knobs are set. That matters: unweighted squared
+    /// error is the motivating case, but GOSS amplification, sample weights, and
+    /// any objective with a non-unit hessian all break the identity, and a check
+    /// phrased in terms of parameters would have to enumerate every such path
+    /// correctly forever. The scan is O(rows) once per tile, against the
+    /// O(rows x features) it guards, so it costs a few percent of one feature.
+    ///
+    /// The row bound keeps the derivation exact. `f32` represents integers
+    /// exactly up to 2^24; above that, `count as f32` rounds while repeated
+    /// addition of 1.0 stalls, and the two stop agreeing.
+    fn node_has_unit_hessians(node_gradients: &[GradientPair]) -> bool {
+        node_gradients.len() <= (1usize << 24)
+            && node_gradients.iter().all(|gradient| gradient.hess == 1.0)
+    }
+
     /// Accumulate one row's gradient into a histogram bin.
     #[inline(always)]
     fn accumulate_bin<const INCLUDE_GRAD_SQ: bool>(
@@ -151,7 +170,7 @@ impl CpuBackend {
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
     /// [`gather_node_gradients`]. Reading by position keeps this loop's
     /// gradient access sequential; only the bin lookup still gathers.
-    fn build_tile_histograms_per_feature<const INCLUDE_GRAD_SQ: bool>(
+    fn build_tile_histograms_per_feature<const INCLUDE_GRAD_SQ: bool, const UNIT_HESSIANS: bool>(
         binned_matrix: &BinnedMatrix,
         node_gradients: &[GradientPair],
         node: &NodeSlice,
@@ -184,7 +203,12 @@ impl CpuBackend {
                     let gradient = node_gradients[position];
                     let slot = &mut arena.scratch[bin_index];
                     slot.grad += gradient.grad;
-                    slot.hess += gradient.hess;
+                    // When every hessian is exactly 1.0 the bin's hessian sum is
+                    // its row count, which `slot.count` already tracks exactly,
+                    // so the fold below derives it and this add is pure overhead.
+                    if !UNIT_HESSIANS {
+                        slot.hess += gradient.hess;
+                    }
                     if INCLUDE_GRAD_SQ {
                         slot.grad_sq += gradient.grad * gradient.grad;
                     }
@@ -194,7 +218,14 @@ impl CpuBackend {
                     let slot = arena.scratch[bin_index];
                     let target = base + bin_index;
                     arena.grad_sums[target] += slot.grad;
-                    arena.hess_sums[target] += slot.hess;
+                    // Bit-identical, not approximate: `count as f32` and summing
+                    // 1.0 that many times both produce the same exact integer
+                    // below 2^24, and the eligibility check enforces that bound.
+                    arena.hess_sums[target] += if UNIT_HESSIANS {
+                        slot.count as f32
+                    } else {
+                        slot.hess
+                    };
                     if INCLUDE_GRAD_SQ {
                         arena.grad_sq_sums.as_mut().expect("DRO arena")[target] += slot.grad_sq;
                     }
@@ -325,8 +356,9 @@ impl CpuBackend {
                 ),
                 HistogramKernelPath::TinyNodeScalar | HistogramKernelPath::BinHeavyPerFeatureScalar
             ) || binned_matrix.has_col_major();
-            match (use_per_feature, include_grad_sq) {
-                (true, false) => Self::build_tile_histograms_per_feature::<false>(
+            let unit_hessians = Self::node_has_unit_hessians(node_gradients);
+            match (use_per_feature, include_grad_sq, unit_hessians) {
+                (true, false, false) => Self::build_tile_histograms_per_feature::<false, false>(
                     binned_matrix,
                     node_gradients,
                     node,
@@ -334,7 +366,7 @@ impl CpuBackend {
                     end_feature,
                     &mut arena,
                 ),
-                (true, true) => Self::build_tile_histograms_per_feature::<true>(
+                (true, false, true) => Self::build_tile_histograms_per_feature::<false, true>(
                     binned_matrix,
                     node_gradients,
                     node,
@@ -342,7 +374,7 @@ impl CpuBackend {
                     end_feature,
                     &mut arena,
                 ),
-                (false, false) => Self::build_tile_histograms_row_first_unrolled::<false>(
+                (true, true, false) => Self::build_tile_histograms_per_feature::<true, false>(
                     binned_matrix,
                     node_gradients,
                     node,
@@ -350,7 +382,23 @@ impl CpuBackend {
                     end_feature,
                     &mut arena,
                 ),
-                (false, true) => Self::build_tile_histograms_row_first_unrolled::<true>(
+                (true, true, true) => Self::build_tile_histograms_per_feature::<true, true>(
+                    binned_matrix,
+                    node_gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    &mut arena,
+                ),
+                (false, false, _) => Self::build_tile_histograms_row_first_unrolled::<false>(
+                    binned_matrix,
+                    node_gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    &mut arena,
+                ),
+                (false, true, _) => Self::build_tile_histograms_row_first_unrolled::<true>(
                     binned_matrix,
                     node_gradients,
                     node,

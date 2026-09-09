@@ -873,6 +873,135 @@ fn build_histograms_is_tile_partition_invariant() {
 }
 
 #[test]
+fn unit_hessian_kernel_matches_the_general_one_when_hessians_are_one() {
+    // The derivation `hess_sum == count` is only exact when every hessian is
+    // exactly 1.0. Here it is, so the two kernels must agree bit for bit.
+    let matrix = sample_binned_matrix();
+    let node = sample_node();
+    let bin_count = matrix.max_bin as usize + 1;
+    let gradients: Vec<GradientPair> = sample_gradients()
+        .into_iter()
+        .map(|pair| GradientPair {
+            grad: pair.grad,
+            hess: 1.0,
+        })
+        .collect();
+
+    let mut general_arena = HistogramArena::new(2, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true, false>(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        2,
+        &mut general_arena,
+    );
+    let general = general_arena.take_bundle(0, 0).expect("general bundle");
+
+    let mut derived_arena = HistogramArena::new(2, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true, true>(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        2,
+        &mut derived_arena,
+    );
+    let derived = derived_arena.take_bundle(0, 0).expect("derived bundle");
+
+    assert_eq!(general, derived);
+    assert!(CpuBackend::node_has_unit_hessians(&gradients));
+}
+
+#[test]
+fn non_unit_hessians_are_rejected_so_the_derivation_never_runs() {
+    // This is the test that matters: the fast kernel is *wrong* for these
+    // gradients, and the only thing standing between it and a corrupted
+    // histogram is the eligibility check. Assert both halves -- that the check
+    // says no, and that it would indeed have been wrong.
+    let matrix = sample_binned_matrix();
+    let node = sample_node();
+    let bin_count = matrix.max_bin as usize + 1;
+    let gradients: Vec<GradientPair> = sample_gradients()
+        .into_iter()
+        .enumerate()
+        .map(|(index, pair)| GradientPair {
+            grad: pair.grad,
+            // A binary-cross-entropy-shaped hessian: positive, but not 1.0.
+            hess: 0.25 + 0.05 * index as f32,
+        })
+        .collect();
+
+    assert!(
+        !CpuBackend::node_has_unit_hessians(&gradients),
+        "non-unit hessians must not be eligible for the count derivation"
+    );
+
+    let mut general_arena = HistogramArena::new(2, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true, false>(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        2,
+        &mut general_arena,
+    );
+    let general = general_arena.take_bundle(0, 0).expect("general bundle");
+
+    let mut derived_arena = HistogramArena::new(2, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true, true>(
+        &matrix,
+        &gradients,
+        &node,
+        0,
+        2,
+        &mut derived_arena,
+    );
+    let derived = derived_arena.take_bundle(0, 0).expect("derived bundle");
+
+    assert_ne!(
+        general, derived,
+        "fixture cannot demonstrate why the eligibility check is needed"
+    );
+}
+
+#[test]
+fn weighted_and_amplified_gradients_are_not_eligible() {
+    // Sample weights and GOSS amplification both scale the hessian, and neither
+    // is visible from the objective alone -- which is why the check reads the
+    // gradients rather than the parameters.
+    let weighted = vec![
+        GradientPair {
+            grad: 0.5,
+            hess: 2.0,
+        },
+        GradientPair {
+            grad: -0.5,
+            hess: 1.0,
+        },
+    ];
+    assert!(!CpuBackend::node_has_unit_hessians(&weighted));
+
+    let amplified = vec![GradientPair {
+        grad: 1.0,
+        hess: 1.000_001,
+    }];
+    assert!(!CpuBackend::node_has_unit_hessians(&amplified));
+
+    let unit = vec![
+        GradientPair {
+            grad: 0.5,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: -0.5,
+            hess: 1.0,
+        },
+    ];
+    assert!(CpuBackend::node_has_unit_hessians(&unit));
+}
+
+#[test]
 fn histogram_tile_strategies_are_equivalent() {
     let matrix = sample_binned_matrix();
     let gradients = sample_gradients();
@@ -880,7 +1009,7 @@ fn histogram_tile_strategies_are_equivalent() {
     let bin_count = matrix.max_bin as usize + 1;
 
     let mut per_feature_arena = HistogramArena::new(2, bin_count, true);
-    CpuBackend::build_tile_histograms_per_feature::<true>(
+    CpuBackend::build_tile_histograms_per_feature::<true, false>(
         &matrix,
         &gradients,
         &node,
@@ -1030,7 +1159,7 @@ fn unrolled_row_first_histograms_match_per_feature() {
     let bin_count = matrix.max_bin as usize + 1;
 
     let mut per_feature_arena = HistogramArena::new(matrix.feature_count, bin_count, true);
-    CpuBackend::build_tile_histograms_per_feature::<true>(
+    CpuBackend::build_tile_histograms_per_feature::<true, false>(
         &matrix,
         &gradients,
         &node,
@@ -3918,7 +4047,7 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
     let node_gradients = CpuBackend::gather_node_gradients(&gradients, &node.row_indices);
 
     let mut gathered_arena = HistogramArena::new(feature_count, bin_count, true);
-    CpuBackend::build_tile_histograms_per_feature::<true>(
+    CpuBackend::build_tile_histograms_per_feature::<true, false>(
         &matrix,
         &node_gradients,
         &node,
@@ -3949,7 +4078,7 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
     // against: feeding the row-indexed array to a position-indexing kernel
     // must produce a different histogram.
     let mut mismatched_arena = HistogramArena::new(feature_count, bin_count, true);
-    CpuBackend::build_tile_histograms_per_feature::<true>(
+    CpuBackend::build_tile_histograms_per_feature::<true, false>(
         &matrix,
         &gradients,
         &node,
