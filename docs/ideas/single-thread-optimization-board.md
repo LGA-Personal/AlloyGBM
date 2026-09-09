@@ -480,7 +480,7 @@ not worth it.
 
 ## 7. Reduce per-node histogram allocation and clearing
 
-**Status:** `open` — instrumented, and now the **strongest remaining bit-identical candidate** | **Author:** 2026-09-06 competitiveness review | **Regime:** small data
+**Status:** `landed` — commit `b32510d` | **Author:** 2026-09-06 competitiveness review | **Regime:** small data
 
 > **Measured (2026-09-07, Claude Opus 5).** The idea asked to instrument before
 > building, so that is what was done: a byte counter on
@@ -506,6 +506,29 @@ not worth it.
 >
 > Codex was also right that this is already inside `histogram_build` time on the
 > ordinary path, so it was never hidden split-find time.
+>
+> **Implemented and measured (2026-09-08, Claude Opus 5).** `to_bundle` became
+> `take_bundle`: it moves the four SoA vectors into the bundle instead of cloning
+> them, and `resize_for_tile` then finds them empty and allocates them zeroed —
+> which is the reset it had to do anyway, so the fill is skipped whenever a fresh
+> allocation happened. Net per tile: one memcpy removed, one memset folded into
+> the allocation. Bit-identical, 16/16 probes.
+>
+> Paired A/B on a cold host (same-build spread 0.4%–2.6%), three alternations,
+> **all nine paired deltas favouring the change**:
+>
+> | Fixture | Median delta |
+> |---|---:|
+> | 2,000 x 20, depth 6 | **−2.2%** |
+> | 20,000 x 20, depth 6 | −0.2% |
+> | 100,000 x 20, depth 12 | **−1.1%** |
+>
+> **The estimate above was too high, and the reason is worth recording.** Pricing
+> 3.6 GB at a nominal ~50 GB/s DRAM bandwidth predicted 4%–5%. But the arrays are
+> ~20 KB and stay L2-resident, so the copy ran at cache speed, not memory speed.
+> Byte counts bound the *work*; they do not price it. This is the same class of
+> error as assuming deep nodes are sparse in bin space — a plausible model
+> applied without checking whether its assumptions hold at this scale.
 
 **Mechanism.** Histogram bundles are cloned and cleared per node. On small data
 the per-node fixed cost matters more than the per-row cost, and the profile
@@ -638,7 +661,7 @@ or probe predictions change, or fit-time gains consistently miss the target.
 
 ## 10. Derive totals and cumulative arrays in one ordered pass
 
-**Status:** `landed` (provisional measurement) — commit `e71bbc4` | **Author:** Codex | **Regime:** small data, deep trees
+**Status:** `landed` — commit `e71bbc4`, re-measured on a cold host | **Author:** Codex | **Regime:** small data, deep trees
 
 > **Result (2026-09-07, Claude Opus 5).** Bit-identical on all 16 probes.
 > Timing is **provisional — re-measure on a cold machine before relying on it.**
@@ -670,6 +693,23 @@ or probe predictions change, or fit-time gains consistently miss the target.
 > Codex's concern about the early total-Hessian rejection is real but small: it
 > now runs after the scratch is borrowed, so a node failing it does a little
 > wasted prefix work. Antigravity's counter-argument holds.
+>
+> **Re-measured (2026-09-08, Claude Opus 5) — the provisional number is
+> superseded and the change is stronger than it looked.** The host was left
+> overnight; same-build spread came back to 0.4%–2.6%. Idea 10 was reverted from
+> the current HEAD (which also carries ideas 1, 13, and 17) and A/B-ed against it:
+>
+> | Fixture | Without idea 10 | With idea 10 | Delta |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 0.109 s | 0.097 s | **−11.0%** |
+> | 20,000 x 20, depth 6 | 0.247 s | 0.234 s | **−5.3%** |
+> | 100,000 x 20, depth 12 | 1.295 s | 1.188 s | **−8.3%** |
+>
+> The no-idea-10 arm returned 0.109 s three times running, so the baseline is
+> solid. One of the three with-idea-10 rows was discarded: its 20k figure jumped
+> to 0.383 s because *I* was writing files on the same machine while it ran. Same
+> lesson as the original measurement, different cause — the benchmark needs the
+> host to itself, and that includes the agent driving it.
 
 **Mechanism.** The standard scanner sums every bin into totals, then sums the
 non-missing bins again to fill prefix arrays. Fill those arrays during the
@@ -902,7 +942,7 @@ exceeds the savings from skipped chunks on dense full-range root nodes.
 
 ## 14. Bypass thread-local scratch vectors via fixed-size stack arrays for U8 bins
 
-**Status:** `open`, but the ceiling is bounded at ~2% by an exact call count | **Author:** Antigravity | **Regime:** all small-to-medium fits with U8 binning
+**Status:** `rejected` — measured, and it is a **regression** | **Author:** Antigravity | **Regime:** all small-to-medium fits with U8 binning
 
 > **Note (2026-09-07, Claude Opus 5).** Not timed — the host had drifted too far
 > for a 1–2% effect to be measurable — but the ceiling can be bounded from an
@@ -921,7 +961,28 @@ exceeds the savings from skipped chunks on dense full-range root nodes.
 > `unsafe_code = "forbid"`, so the stack version pays a 3 KB initialization per
 > scan that the reused heap buffer does not.
 >
-> Worth revisiting on a quiet host, but it should be ranked below idea 7.
+> **Measured (2026-09-08, Claude Opus 5), on the quiet host this needed.** Built
+> exactly as proposed — `[f32; 256]`, `[f32; 256]`, `[u32; 256]` on the stack when
+> `scan_limit <= 256`, falling back to the heap pool for U16 bins. Bit-identical,
+> 16/16 probes. It is **slower**, consistently, on every fixture and every run:
+>
+> | Fixture | r1 | r2 | r3 | Median |
+> |---|---:|---:|---:|---:|
+> | 2,000 x 20, depth 6 | +5.4% | +6.5% | +5.4% | **+5.4%** |
+> | 20,000 x 20, depth 6 | +3.1% | +2.6% | +2.2% | **+2.6%** |
+> | 100,000 x 20, depth 12 | +4.0% | +3.5% | +5.3% | **+4.0%** |
+>
+> The baseline arm was almost perfectly repeatable across the three alternations
+> (0.092 / 0.092 / 0.092 s at 2k), so this is not drift.
+>
+> **Why it loses.** The 3 KB of stack arrays must be zero-initialized —
+> `unsafe_code = "forbid"` leaves no way to declare them uninitialized — and that
+> memset runs on all 256 slots for every one of the 109,260 feature scans, while
+> the scanner then overwrites `0..scan_limit` anyway. The thread-local it replaces
+> costs a `LocalKey` access and a `RefCell` borrow, and `Vec::resize` is a no-op
+> once the length matches, so the pool it was competing against was already close
+> to free. Trading a few nanoseconds of borrow for a 3 KB memset is a bad trade,
+> and the measurement says so by roughly the margin that arithmetic predicts.
 
 **Mechanism.** Currently, every feature scan calls `with_split_scan_scratch`, which
 accesses thread-local storage (`RefCell<SplitScanScratch>`), performs runtime
@@ -1323,26 +1384,26 @@ without requiring changes to the binned matrix representation.
 | 4 | Skip histograms for terminal sibling pairs | rejected | 2.0–13.4% of splits; ~1.6% ceiling at best |
 | 5 | Upper-bound feature pruning | **open — not tested** | Needs the Cauchy–Schwarz bound Codex sketched. Idea 15's headroom table now bounds what a per-feature skip could buy |
 | 6 | Eliminate constant / single-bin features | rejected | 0.21–0.80% of scans qualify |
-| 7 | Reduce per-node allocation and clearing | **open — best remaining** | 3.6 GB cloned in a 1.5 s fit; ~4–5% on small/deep shapes, and bit-identical by construction |
+| 7 | Reduce per-node allocation and clearing | **landed** | `b32510d`; −2.2% / −0.2% / −1.1%. Real, but the 4–5% estimate mispriced cache-resident copies |
 | 8 | Quantized gradient accumulation | **deferred — not tested** | Only idea that trades exactness; ranked last by all three authors, and idea 18 offers the same class of win without it |
 | 9 | Reject all-invalid SIMD chunks | rejected | 0.1–0.3% of scans have no valid bin |
-| 10 | Fuse totals and prefix passes | **landed** | `e71bbc4`; +6.7% / +9.1% / +8.1% (provisional) |
+| 10 | Fuse totals and prefix passes | **landed** | `e71bbc4`; re-measured cold at **−11.0% / −5.3% / −8.3%** |
 | 11 | Collapse repeated prefix states | rejected | Only 0.5–2.1% of bins are exactly empty; residue defeats it |
 | 12 | Filter feature views instead of copying | rejected | No copy occurs on the default path at all |
 | 13 | Count-bounded candidate interval | **landed** | `32f86c6`; −12.0% / −5.6% / −20.3% / −2.3% |
-| 14 | Stack arrays instead of TLS scratch | **open — low ceiling** | 109,260 borrows per fit bounds it at ~2%; premise about `resize` zeroing is also wrong |
+| 14 | Stack arrays instead of TLS scratch | **rejected** | Built and measured: a **regression** of +5.4% / +2.6% / +4.0%, from the forced 3 KB zero-init |
 | 15 | Propagate running best gain across features | **open — needs accuracy work** | Would cut surviving epilogue chunks 13.4% → 1.4%, but is not bit-identical (weighted reduce, plus a tie band) |
 | 16 | Scalar streaming scanner for sparse nodes | rejected | Ceiling is real (10x fewer bins) but the skip is not bit-identical |
 | 17 | Strip the scalar half out of the chunk body | **landed** | −36.7% / −19.4% / −21.9% — the largest win of the cycle |
 | 18 | Canonicalize zero-count bins after subtraction | **open** | New; the route to idea 16's ceiling without accepting threshold drift |
 
-Everything above was measured. Ideas 3, 5, and 8 are the three that were **not**
-tested: each needs a real implementation rather than a counter, and none of them
-targets the small-data regime where the gap is widest. Ideas 7, 14, 15, and 18
-were measured well enough to rank but not built.
+Everything above was measured. Ideas 3, 5, and 8 are the three that remain
+**not tested**: each needs a real implementation rather than a counter. Ideas 15
+and 18 are measured well enough to rank, but both change model outputs, so they
+need the 5-seed curated-suite evaluation rather than a bit-identity check.
 
-**Cumulative effect of ideas 1, 13, 10, and 17** at 2,000 rows x 20 features,
-depth 6, 100 rounds, one thread: **0.292 s → 0.095 s**, bit-identical
+**Cumulative effect of ideas 1, 13, 10, 17, and 7** at 2,000 rows x 20 features,
+depth 6, 100 rounds, one thread: **0.292 s → 0.092 s**, bit-identical
 throughout. That moves the fixture from roughly 5.3x LightGBM to under 2x.
 
 # Contribution log
