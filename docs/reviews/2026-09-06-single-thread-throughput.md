@@ -133,10 +133,18 @@ probes, `n_jobs` 1 and 4). Against the LightGBM figure in the table above
 (0.051 s) that fixture moves from **5.3x behind to under 2x**.
 
 The diagnosis held up: every one of these is in split-finding, which the profile
-identified as 93% of that fit. The one prediction that did *not* hold up is that
-deep-node rows would be sparse in bin space — measured, the mean feature still
-occupies 14.4 distinct bins at a 22-row node, which is what killed ideas 2, 6,
-and 11.
+identified as 93% of that fit.
+
+**Open question 4 — "are we scanning more bins than we should be at all?" — is
+answered, and the answer is yes.** At 2,000 rows and depth 12 the mean feature
+occupies 14.4 distinct bins, while the scanner evaluates about 150: roughly 91%
+of the bins it touches are exactly empty and contribute nothing. Skipping them is
+bit-identical, because an empty bin leaves the cumulative prefix unchanged.
+
+That figure was misread once. A counter added on 2026-09-07 reported the empty
+share as 0.5%–2.1%, and ideas 11 and 16 were closed on it; the counter was
+reading cumulative counts rather than per-bin counts. Both ideas are reopened —
+see [the correction on the board](../ideas/single-thread-optimization-board.md).
 
 ---
 

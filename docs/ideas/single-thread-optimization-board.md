@@ -808,7 +808,7 @@ may be a regression.
 
 ## 11. Collapse repeated prefix states for gain evaluation
 
-**Status:** `rejected` as a bit-identical change — subtraction residue makes nearly every empty bin a distinct prefix state | **Author:** Codex | **Regime:** small data, deep trees
+**Status:** `reopened` — the rejection rested on a faulty counter; see the correction below | **Author:** Codex | **Regime:** small data, deep trees
 
 > **Result (2026-09-07, Claude Opus 5).** Codex's own caveat — "subtraction
 > residue can create additional distinct floating states" — turns out to be the
@@ -835,6 +835,43 @@ may be a regression.
 >
 > This measurement is the reason idea 16 fails too, and it is what motivated
 > [idea 18](#18-canonicalize-zero-count-bins-after-histogram-subtraction).
+
+> ### ⚠ CORRECTION (2026-09-10, Claude Opus 5) — the measurement above was wrong
+>
+> The counter that produced the "0.5%–2.1% of bins are exactly empty" figure read
+> the **cumulative** counts, not the per-bin counts. Idea 13's window logic
+> rebinds the name inside the direction loop:
+>
+> ```rust
+> let counts = &cum_left_count[..scan_limit];   // shadows feature_histogram.counts()
+> ```
+>
+> and the counter was inserted after that line. A cumulative count is zero only
+> for the leading bins before the first row, which is why it reported two or
+> three per scan regardless of what the histogram actually held.
+>
+> Re-measured against `feature_histogram.counts()` directly:
+>
+> | Fixture | Mean bins scanned | Occupied | **Exactly empty** | Share |
+> |---|---:|---:|---:|---:|
+> | 2,000 x 20, depth 12 | 149.6 | 14.4 | **135.7** | **90.7%** |
+> | 2,000 x 20, depth 6 | 205.4 | 79.8 | **125.6** | **61.1%** |
+> | 100,000 x 20, depth 12 | 186.3 | 63.7 | **122.4** | **65.7%** |
+>
+> **The conclusion inverts.** Empty bins are not full of subtraction residue —
+> the overwhelming majority are already exactly zero. The reasoning error behind
+> the original claim was assuming subtraction *creates* residue in empty bins,
+> but a bin empty in the parent is empty in the child too, and `0.0 - 0.0` is
+> exactly `0.0`. Residue only appears where the parent had rows in a bin and the
+> child took all of them, which is the rare case.
+>
+> Ideas 11 and 16 were rejected on this faulty number and are **reopened**. Their
+> premise — that runs of empty bins repeat their prefix state exactly — holds for
+> roughly 91% of scanned bins on the deep small-data fixture, and skipping them
+> is **bit-identical**: an exactly-empty bin leaves the cumulative prefix
+> unchanged, so its gain equals its predecessor's, and `gain_materially_exceeds`
+> already keeps the earlier of a tie.
+
 
 **Mechanism.** Keep ordered prefix accumulation, but compute gain only for
 the first threshold in a run with identical prefix gradient/Hessian/count
@@ -1142,7 +1179,7 @@ or overhead of passing threshold exceeds savings.
 
 ## 16. Fast scalar streaming split scanner for count-sparse nodes
 
-**Status:** `rejected` as stated — the skip is not bit-identical, and the vector-division premise is not the binding cost | **Author:** Antigravity | **Regime:** small data, deep levels
+**Status:** `reopened` — the "not bit-identical" rejection was based on a faulty counter | **Author:** Antigravity | **Regime:** small data, deep levels
 
 > **Result (2026-09-07, Claude Opus 5).** Two separate findings, and the
 > applicability claim is the one that survives.
@@ -1176,8 +1213,20 @@ or overhead of passing threshold exceeds savings.
 > three 8-iteration scalar loops. Removing that scalar work is bit-identical and
 > is what [idea 17](#17-strip-the-scalar-half-out-of-the-simd-chunk-body) does.
 >
-> The occupied-bin ceiling stays on the table as a behaviour-changing option if
-> exact-scan work runs out.
+> **⚠ CORRECTED (2026-09-10, Claude Opus 5).** The claim that skipping is "not
+> bit-identical" rested on the same broken counter as idea 11 (see the correction
+> there). With the counter fixed, **90.7% of scanned bins at 2,000 rows depth 12
+> are exactly empty** — zero count, zero gradient, zero hessian. Skipping those
+> *is* bit-identical, because an exactly-empty bin leaves the cumulative prefix
+> unchanged, so its gain equals its predecessor's and the tolerance comparator
+> already keeps the earlier one.
+>
+> What survives from the original critique is the diagnosis of *cost*: the
+> binding expense is the scalar epilogue, which [idea 17](#17-strip-the-scalar-half-out-of-the-simd-chunk-body)
+> already removed for chunks that cannot win. The remaining opportunity is to
+> avoid forming those chunks at all — compacting the ~14 occupied bins out of
+> ~150 scanned, which is idea 11's mechanism rather than a separate scalar
+> scanner. **Reopened on that basis.**
 
 **Mechanism.** For nodes where $N_{\text{rows}} < 64$, vectorizing across 256 bins
 using `f32x8` is counterproductive:
@@ -1267,7 +1316,7 @@ dense, NaN-in-training, classifier, and weighted fits).
 
 ## 18. Canonicalize zero-count bins after histogram subtraction
 
-**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** small data, deep trees
+**Status:** `rejected` on measurement — implemented, then reverted | **Author:** Claude Opus 5 | **Regime:** small data, deep trees
 
 **Mechanism.** `subtract_child_in_place` derives the larger sibling's histogram
 as parent minus smaller sibling. Bin counts are `u32` and subtract exactly, but
@@ -1310,6 +1359,36 @@ reach the 2x candidate reduction idea 11 set as its bar.
   ceiling that does not simply accept threshold drift. It should be evaluated
   before idea 8, since it buys the same class of speedup without giving up
   exactness as a property -- only this particular artifact's bytes.
+
+> **Result (2026-09-10, Claude Opus 5). Implemented, measured, reverted.**
+>
+> The idea was built: `canonicalize_empty_bins` on both subtraction paths,
+> zeroing gradient and hessian wherever the (exact `u32`) count came out zero,
+> with tests pinning that a subtracted histogram then matches a freshly built
+> one. It works, it is safe — count subtraction is underflow-guarded, so a zero
+> count provably means zero rows — and it preserves the cross-`n_jobs`
+> determinism guarantee. 814 cargo tests and 1024 pytest tests pass.
+>
+> **But it buys almost nothing, because the premise that motivated it was a
+> measurement bug.** Exactly-empty bins per scan, before and after:
+>
+> | Fixture | Baseline | With canonicalization | Gain |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 12 | 135.7 | 136.2 | +0.5 bins (+0.3%) |
+> | 2,000 x 20, depth 6 | 125.6 | 126.6 | +1.0 bins (+0.5%) |
+> | 100,000 x 20, depth 12 | 122.4 | 123.9 | +1.5 bins (+0.8%) |
+>
+> The residue it removes is real but rare: a bin empty in the parent is empty in
+> the child, and `0.0 - 0.0` is exactly `0.0`, so residue only arises where the
+> child takes every row the parent had in that bin.
+>
+> Since the change alters trained models — the reason it needed a seed-variance
+> campaign at all — and returns under 1% more skippable bins, there is nothing
+> for a campaign to justify. **Reverted rather than landed.** The accuracy run
+> was not performed, because the result could not change the decision.
+>
+> The useful part is what the corrected counter revealed: the empty-bin premise
+> was already true without any change to subtraction. See ideas 11 and 16.
 
 ---
 
@@ -1443,23 +1522,28 @@ without requiring changes to the binned matrix representation.
 | 8 | Quantized gradient accumulation | **deferred — not tested** | Only idea that trades exactness; ranked last by all three authors, and idea 18 offers the same class of win without it |
 | 9 | Reject all-invalid SIMD chunks | rejected | 0.1–0.3% of scans have no valid bin |
 | 10 | Fuse totals and prefix passes | **landed** | `e71bbc4`; re-measured cold at **−11.0% / −5.3% / −8.3%** |
-| 11 | Collapse repeated prefix states | rejected | Only 0.5–2.1% of bins are exactly empty; residue defeats it |
+| 11 | Collapse repeated prefix states | **reopened** | Rejection used a broken counter. **90.7%** of scanned bins at 2k d12 are exactly empty, and skipping them is bit-identical |
 | 12 | Filter feature views instead of copying | rejected | No copy occurs on the default path at all |
 | 13 | Count-bounded candidate interval | **landed** | `32f86c6`; −12.0% / −5.6% / −20.3% / −2.3% |
 | 14 | Stack arrays instead of TLS scratch | **rejected** | Built and measured: a **regression** of +5.4% / +2.6% / +4.0%, from the forced 3 KB zero-init |
 | 15 | Propagate running best gain across features | **open — needs accuracy work** | Would cut surviving epilogue chunks 13.4% → 1.4%, but is not bit-identical (weighted reduce, plus a tie band) |
-| 16 | Scalar streaming scanner for sparse nodes | rejected | Ceiling is real (10x fewer bins) but the skip is not bit-identical |
+| 16 | Scalar streaming scanner for sparse nodes | **reopened** | Same broken counter. The skip *is* bit-identical; ~14 occupied bins out of ~150 scanned |
 | 17 | Strip the scalar half out of the chunk body | **landed** | −36.7% / −19.4% / −21.9% — the largest win of the cycle |
-| 18 | Canonicalize zero-count bins after subtraction | **open** | New; the route to idea 16's ceiling without accepting threshold drift |
+| 18 | Canonicalize zero-count bins after subtraction | **rejected** | Built and measured: converts <1% more bins. Its motivating premise was the counter bug. Reverted |
 
-Every idea on this board has now been measured. What remains open falls into two
-groups. **Ideas 15 and 18 change model outputs**, so they need the 5-seed
-curated-suite evaluation rather than a bit-identity check — 18 is the more
-promising of the two, since it is the route to idea 16's tenfold ceiling.
-**Idea 5 needs a proof before it needs an implementation**: a per-feature gain
-bound that is genuinely an upper bound. **Idea 8** stays deferred by the
-agreement of all three authors, and idea 18 would buy the same class of speedup
-without giving up exactness.
+**The largest opportunity on this board is now ideas 11 and 16, and it is
+bit-identical.** Roughly 91% of scanned bins at 2,000 rows and depth 12 are
+exactly empty — zero count, zero gradient, zero hessian — so they leave the
+cumulative prefix untouched and can be skipped without changing a single bit of
+a trained model. Compacting the ~14 occupied bins out of ~150 is worth up to a
+tenfold reduction in gain evaluations on that shape. Both ideas were wrongly
+closed on 2026-09-07 by a counter that read cumulative rather than per-bin
+counts; see the correction under idea 11.
+
+Of the rest: **idea 15** changes model outputs and needs the 5-seed evaluation.
+**Idea 5** needs a proof before an implementation — a per-feature gain bound that
+is genuinely an upper bound. **Idea 8** stays deferred by the agreement of all
+three authors.
 
 **Cumulative effect of ideas 1, 13, 10, 17, and 7** at 2,000 rows x 20 features,
 depth 6, 100 rounds, one thread: **0.292 s → 0.092 s**, bit-identical
