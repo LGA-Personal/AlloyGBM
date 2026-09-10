@@ -136,15 +136,18 @@ The diagnosis held up: every one of these is in split-finding, which the profile
 identified as 93% of that fit.
 
 **Open question 4 — "are we scanning more bins than we should be at all?" — is
-answered, and the answer is yes.** At 2,000 rows and depth 12 the mean feature
-occupies 14.4 distinct bins, while the scanner evaluates about 150: roughly 91%
-of the bins it touches are exactly empty and contribute nothing. Skipping them is
-bit-identical, because an empty bin leaves the cumulative prefix unchanged.
+answered: yes, but it no longer costs us.** At 2,000 rows and depth 12 the mean
+feature occupies 14.4 distinct bins while the scanner visits about 150, so
+roughly 91% of what it touches is exactly empty. Skipping those is
+bit-identical, and it was built and measured — for **0%**. Idea 17's early-out
+already exits a losing chunk after a single vector compare, so a run of duplicate
+thresholds costs almost nothing to walk past.
 
-That figure was misread once. A counter added on 2026-09-07 reported the empty
-share as 0.5%–2.1%, and ideas 11 and 16 were closed on it; the counter was
-reading cumulative counts rather than per-bin counts. Both ideas are reopened —
-see [the correction on the board](../ideas/single-thread-optimization-board.md).
+That figure was misread once, and the record is worth keeping. A counter added on
+2026-09-07 put the empty share at 0.5%–2.1% because it read cumulative rather
+than per-bin counts, and ideas 11 and 16 were closed on it. Both were reopened
+and re-run once the counter was fixed; both are closed again, now on the correct
+premise. See [the board](../ideas/single-thread-optimization-board.md).
 
 ---
 
