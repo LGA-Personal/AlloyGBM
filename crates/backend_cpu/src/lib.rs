@@ -865,6 +865,7 @@ impl CpuBackend {
 
                 // Best result tracking — store as (gain, threshold_bin, default_left).
                 // Final SplitCandidate is built once at the end from the cumulative arrays.
+                let node_best_gain = NODE_BEST_GAIN.with(|cell| cell.get());
                 let mut best_gain = 0.0_f32;
                 let mut best_threshold: usize = usize::MAX;
                 let mut best_default_left = false;
@@ -1069,7 +1070,17 @@ impl CpuBackend {
                         // half -- the lane extract and three 8-iteration loops --
                         // costs more than the vector math it follows, and most
                         // chunks lose to an incumbent found earlier in the scan.
-                        if !final_gain.cmp_gt(f32x8::splat(best_gain)).any() {
+                        // The bar is the higher of this feature's incumbent and
+                        // the best gain any earlier feature produced for this
+                        // node. Raising it only ever suppresses candidates that
+                        // would lose the cross-feature reduce anyway, so the
+                        // split finally chosen is unchanged -- what changes is
+                        // that this feature may report a weaker candidate, or
+                        // none, in cases where its own winner was already beaten.
+                        if !final_gain
+                            .cmp_gt(f32x8::splat(best_gain.max(node_best_gain)))
+                            .any()
+                        {
                             chunk_start = chunk_end;
                             continue;
                         }
@@ -1882,6 +1893,12 @@ impl CpuBackend {
         categorical_features: &[CategoricalFeatureInfo],
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
+        // Propagation is only sound when a candidate's weighted gain equals its
+        // raw gain; otherwise the threshold would be compared against the wrong
+        // ordering. Unit weights are the overwhelmingly common case, and the
+        // fallback is simply to leave the threshold at zero.
+        let unit_feature_weights = feature_weights.iter().all(|weight| *weight == 1.0);
+        NODE_BEST_GAIN.with(|cell| cell.set(0.0));
         let find_best = |fh: HistogramFeatureView<'_>| -> Option<SplitCandidate> {
             let fi = fh.feature_index() as usize;
             if let Some(cat_info) = categorical_features.iter().find(|c| c.feature_index == fi) {
@@ -1895,6 +1912,15 @@ impl CpuBackend {
             } else {
                 Self::best_split_for_feature(fh, histograms.node_id, options, factor_context)
             }
+            .inspect(|candidate| {
+                if unit_feature_weights {
+                    NODE_BEST_GAIN.with(|cell| {
+                        if candidate.gain > cell.get() {
+                            cell.set(candidate.gain);
+                        }
+                    });
+                }
+            })
         };
 
         // Deliberately sequential across features.
@@ -2080,3 +2106,18 @@ impl CpuBackend {
 
 #[cfg(test)]
 mod tests;
+
+thread_local! {
+    /// Best raw gain seen so far while scanning the features of one node.
+    ///
+    /// Split search walks features sequentially and reduces their candidates
+    /// afterwards, so by the time a later feature is scanned the best gain from
+    /// the earlier ones is already known. Feeding it back lets the chunk
+    /// early-out reject work that the per-feature incumbent alone cannot.
+    ///
+    /// Held at 0.0 -- which disables the propagation entirely -- whenever the
+    /// feature weights are not all 1.0, because the cross-feature reduce
+    /// compares *weighted* gains while the scan compares raw ones, and the two
+    /// orderings are not interchangeable once a weight is applied.
+    static NODE_BEST_GAIN: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
