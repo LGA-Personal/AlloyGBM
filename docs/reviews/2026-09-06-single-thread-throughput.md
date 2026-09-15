@@ -126,11 +126,15 @@ Four bit-identical changes have since landed, all inside the split scanner:
 | + idea 1 — skip the duplicate missing-direction scan | 0.183 s |
 | + idea 13 — confine the scan to the count-feasible interval | 0.160 s |
 | + idea 10 — fuse the totals and prefix passes | 0.150 s |
-| + idea 17 — strip the scalar half out of the chunk body | **0.095 s** |
+| + idea 17 — strip the scalar half out of the chunk body | 0.095 s |
+| + idea 7 — move the arena's accumulators into the bundle | 0.093 s |
+| + idea 15 — carry the node's best gain across feature scans | **0.074 s** |
 
 Artifacts, quantile cuts, and prediction bytes are unchanged throughout (16
 probes, `n_jobs` 1 and 4). Against the LightGBM figure in the table above
-(0.051 s) that fixture moves from **5.3x behind to under 2x**.
+(0.051 s) that fixture moves from **5.3x behind to about 1.45x** — and idea 3
+additionally cut the histogram-bound shapes by 4%-9%, which is the regime none of
+the split-scan work touched.
 
 The diagnosis held up: every one of these is in split-finding, which the profile
 identified as 93% of that fit.

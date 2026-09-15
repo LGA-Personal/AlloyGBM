@@ -1151,7 +1151,7 @@ or stack allocation triggers cache spills on deep recursions.
 
 ## 15. Propagate running best gain across sequential feature scans
 
-**Status:** `open` — headroom measured and real, but the change is **not** bit-identical as stated | **Author:** Antigravity | **Regime:** both, strongest on datasets with dominant features
+**Status:** `landed` — commit `bbddfde`, and it *is* bit-identical | **Author:** Antigravity | **Regime:** both, strongest on datasets with dominant features
 
 > **Result (2026-09-07, Claude Opus 5).** Two findings: the headroom is real,
 > and the exactness claim does not hold.
@@ -1191,6 +1191,49 @@ or stack allocation triggers cache spills on deep recursions.
 > than the bit-identical group. Antigravity's framing of this as capturing
 > branch-and-bound's benefit "with zero risk of incorrect bounds" is right about
 > bounds and wrong about ties.
+
+> **Landed (2026-09-15, Claude Opus 5) — and the exactness objection dissolves
+> once the change is scoped differently.**
+>
+> Both problems above come from the *same* assumption: that the propagated gain
+> seeds the per-feature incumbent. It does not have to. The threshold can gate
+> the chunk early-out alone and never touch what a feature records.
+>
+> With that scoping the argument is simple. A chunk skipped because it cannot
+> beat the node incumbent could only have yielded a candidate that loses the
+> cross-feature reduce anyway. What changes is that a feature may report a weaker
+> candidate, or none, in cases where its own winner was already beaten — and
+> none of those reach the result. The tie band that made seeding unsafe never
+> arises, because the recorded incumbent is untouched.
+>
+> The feature-weight problem is sidestepped rather than solved: propagation
+> disables itself unless every weight is 1.0, leaving the threshold at zero.
+> Converting between weighted and raw orderings would reintroduce exactly the
+> rounding question that made the original proposal unsafe.
+>
+> **Bit-identical**, and verified past the usual 16 probes because the argument
+> is inductive: a randomized differential test over 36 configurations — shapes
+> from 500x5 to 15,000x60, depths 3 to 10, missing values, row and column
+> subsampling, classification, and weighted fits where the propagation must
+> switch itself off — produced identical artifacts throughout.
+>
+> | Fixture | Baseline | With idea 15 | Delta |
+> |---|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 0.093 s | 0.074 s | **−20.2%** |
+> | 20,000 x 20, depth 6 | 0.223 s | 0.203 s | **−9.3%** |
+> | 100,000 x 20, depth 12 | 1.164 s | 0.998 s | **−14.1%** |
+>
+> Three paired alternations, baseline stable to 1%, every one agreeing.
+>
+> **No accuracy campaign was run, and none was needed** — the reason this sat in
+> the output-changing group was the seeding assumption, not the mechanism.
+> Antigravity's original framing, that this captures branch-and-bound's benefit
+> with zero risk of incorrect bounds, turns out to be right after all.
+>
+> Note how this interacts with [ideas 11 and 16](#11-collapse-repeated-prefix-states-for-gain-evaluation),
+> which measured 0% the same week: those removed *chunks*, which idea 17 had
+> already made cheap. This removes the *epilogue* from chunks that still survive,
+> which is where the remaining cost actually was.
 
 **Mechanism.** `best_split_with_options_internal` currently runs
 `histograms.features().filter_map(find_best).reduce(...)`, evaluating each feature
@@ -1571,7 +1614,7 @@ without requiring changes to the binned matrix representation.
 | 12 | Filter feature views instead of copying | rejected | No copy occurs on the default path at all |
 | 13 | Count-bounded candidate interval | **landed** | `32f86c6`; −12.0% / −5.6% / −20.3% / −2.3% |
 | 14 | Stack arrays instead of TLS scratch | **rejected** | Built and measured: a **regression** of +5.4% / +2.6% / +4.0%, from the forced 3 KB zero-init |
-| 15 | Propagate running best gain across features | **open — needs accuracy work** | Would cut surviving epilogue chunks 13.4% → 1.4%, but is not bit-identical (weighted reduce, plus a tie band) |
+| 15 | Propagate running best gain across features | **landed** | `bbddfde`; **−20.2% / −9.3% / −14.1%**, bit-identical. Gating only the early-out avoids the tie band entirely |
 | 16 | Scalar streaming scanner for sparse nodes | **rejected (re-run)** | Same result as idea 11. Its tenfold ceiling was priced against pre-idea-17 costs |
 | 17 | Strip the scalar half out of the chunk body | **landed** | −36.7% / −19.4% / −21.9% — the largest win of the cycle |
 | 18 | Canonicalize zero-count bins after subtraction | **rejected** | Built and measured: converts <1% more bins. Its motivating premise was the counter bug. Reverted |
@@ -1591,10 +1634,16 @@ ideas 2 and 9 were measured before idea 13 introduced the shadow at all. Ideas 4
 and 12 rest on engine-side counters and on source reading. No other verdict on
 this board depends on the broken binding.
 
-What is left: **idea 15** changes model outputs and needs the 5-seed evaluation.
-**Idea 5** needs a proof before an implementation — a per-feature gain bound that
-is genuinely an upper bound. **Idea 8** stays deferred by the agreement of all
-three authors.
+What is left: **idea 5** needs a proof before an implementation — a per-feature
+gain bound that is genuinely an upper bound. **Idea 8** stays deferred by the
+agreement of all three authors, and nothing measured since has made the case for
+trading exactness away.
+
+A pattern worth carrying forward: two of the three ideas parked as
+"output-changing" turned out not to be. Idea 15 was exact once the propagated
+value gated the early-out instead of seeding the recorded incumbent, and idea 16's
+skip was exact all along. Before accepting that a change must alter models, it is
+worth asking which part of it actually does.
 
 **Cumulative effect of ideas 1, 13, 10, 17, and 7** at 2,000 rows x 20 features,
 depth 6, 100 rounds, one thread: **0.292 s → 0.092 s**, bit-identical
