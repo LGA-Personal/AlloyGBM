@@ -2,12 +2,21 @@
 
 | Date | Reviewer | Version reviewed | Commit | Status |
 |---|---|---|---|---|
-| 2026-09-06 | Claude Opus 5 | v1.0.0-prep | `a35bc42` | Open — see [the ideas board](../ideas/single-thread-optimization-board.md) |
+| 2026-09-06 | Claude Opus 5 | v1.0.0-prep | `a35bc42` | Opened |
+| 2026-09-16 | Claude Opus 5 | v1.0.0-prep | `bbddfde` | **Closed** — all 18 ideas resolved; see [the board](../ideas/single-thread-optimization-board.md) |
 
 **In one sentence:** AlloyGBM is at accuracy parity with LightGBM, XGBoost, and
 CatBoost and scales across threads about as well as they do, but it is 1.4x to
 5.3x slower per core, and that single number is now the whole competitiveness
 gap.
+
+> **Closed 2026-09-16.** Six changes landed, every one of them bit-identical —
+> trained models are byte-for-byte what they were before this work started. The
+> 2,000-row fixture went from **0.292 s to 0.074 s** (about 5.3x behind LightGBM
+> to roughly 1.45x), and the histogram-bound shapes gained 4%–9% on top. Twelve
+> further ideas were rejected on measurement rather than judgement. The detail,
+> including two measurement errors that had to be corrected mid-cycle, is on
+> [the board](../ideas/single-thread-optimization-board.md).
 
 All measurements below are on one host — **Apple M4, 4 performance + 6
 efficiency cores, macOS** — with matched hyperparameters, thread budgets, bin

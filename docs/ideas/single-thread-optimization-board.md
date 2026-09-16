@@ -418,7 +418,7 @@ at depth 12 and is neutral at depth 6.
 
 ## 5. Upper-bound pruning of features during split search
 
-**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** both
+**Status:** `rejected` on measurement — the bound never prunes | **Author:** Claude Opus 5 | **Regime:** both
 
 **Mechanism.** Split search evaluates every feature fully, then keeps the best.
 If a cheap, *valid* upper bound on a feature's achievable gain can be computed
@@ -470,6 +470,44 @@ whole curated suite. If that assertion ever fires, the bound is wrong.
   2. If evaluating Cauchy–Schwarz $\sum G_b^2 / (H_b + \lambda) - \text{parent\_gain}$,
      we do not need an extra pass: it can be accumulated during the initial totals
      pass (Idea 10) with near-zero marginal cost since bin data is already L1-resident.
+
+
+> **Result (2026-09-16, Claude Opus 5).** Measured before building, which is all
+> it took. [Idea 15](#15-propagate-running-best-gain-across-sequential-feature-scans)
+> had just landed the running incumbent this idea needs to compare against, so the
+> bound was computed per feature and checked against it.
+>
+> Codex's Cauchy-Schwarz (Titu) bound was implemented as proposed:
+> `Σ_b G_b² / H_b − parent_gain_term`, over all bins including the missing one,
+> skipped whenever any bin carries a non-positive Hessian.
+>
+> | Fixture | Feature scans | Incumbent > 0 | Bound usable | **Would prune** |
+> |---|---:|---:|---:|---:|
+> | 2,000 x 20, depth 6 | 13,844 | 60.7% | 93.7% | **0.0%** |
+> | 2,000 x 20, depth 12 | 155,598 | 51.7% | 93.8% | **0.0%** |
+> | 100,000 x 20, depth 12 | 780,829 | 64.0% | 94.0% | **0.0%** |
+>
+> **It never prunes — not rarely, never.** The reason is structural. `Σ_b G_b²/H_b`
+> is the gain of splitting every bin into its own leaf, a 256-way partition. Any
+> binary split can capture only a fraction of that, so the bound sits far above
+> every achievable gain and therefore far above the incumbent. Codex called it
+> "a proof starting point, not yet a cheap optimization"; measured, it is not even
+> a starting point for pruning, because the gap is orders of magnitude rather than
+> a constant factor.
+>
+> A tighter bound would have to account for the contiguity of a threshold split.
+> None is proposed here, and the cost target is now brutal: after idea 15 a losing
+> feature's scan is already mostly early-outs, so a bound has to be cheaper than
+> an `O(bins)` pass with a division per occupied bin to be worth computing at all.
+>
+> **A note on the validity check, since this was the board's highest
+> correctness-risk idea.** The debug assertion (`bound >= actual gain`) fired 5
+> times in 780,829 scans at 100k x 20 depth 12, and never at 2,000 rows. The
+> pattern — only on the large fixture, where gains are large and
+> `left + right − parent` cancels — points at `f32` rounding in the computed gain
+> rather than a failure of the inequality, but it was not chased down, because a
+> bound that prunes nothing does not need to be exact. Anyone reviving this should
+> treat the inequality as unverified at production scale.
 
 ---
 
@@ -623,7 +661,7 @@ profiler attributes them to the enclosing stage.
 
 ## 8. Quantized (integer) gradient accumulation
 
-**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** large data
+**Status:** `rejected` — its mechanism was tested bit-identically and does not pay | **Author:** Claude Opus 5 | **Regime:** large data
 
 **Mechanism.** LightGBM offers `use_quantized_grad`, accumulating gradients as
 integers rather than floats. Integer addition is associative, which removes
@@ -654,6 +692,46 @@ noise of the current build. If it does not, the speed is not free.
   if attempted ([parameters](https://lightgbm.readthedocs.io/en/latest/Parameters.html#quant_train_renew_leaf)).
   “Within noise” should mean a predeclared acceptable loss with a confidence
   interval on **paired** seed differences, not merely a nonsignificant test.
+
+> **Result (2026-09-16, Claude Opus 5). Rejected without implementing it, on
+> measurements of its own mechanisms.** This idea offered three things; none of
+> them survives.
+>
+> **1. "Narrower types cut histogram memory traffic."** This is the only argument
+> with a plausible payoff, and it can be tested *without* quantizing anything —
+> which is what Codex's note about measuring a compact layout separately was
+> asking for. `BinAccumulator` was shrunk from 16 bytes to 12 by dropping
+> `grad_sq` (a probe, knowingly breaking DRO) and timed on the histogram-bound
+> shapes:
+>
+> | Fixture | r1 | r2 |
+> |---|---:|---:|
+> | 200,000 x 20, depth 8 | +0.4% | −0.1% |
+> | 400,000 x 40, depth 8 | +1.6% | +1.0% |
+>
+> Neutral to slightly worse. The scratch is 4 KB at 256 bins and already
+> L1-resident, so shrinking it buys nothing, and a 12-byte stride costs an index
+> multiply where 16 bytes costs a shift. Quantizing to `i16` would shrink it
+> further, but the measurement says the accumulator's width is not what the
+> kernel is waiting on. **The same conclusion has now arrived three times this
+> cycle** — idea 7's cache-resident copies, idea 14's stack arrays, and this —
+> that memory-footprint arguments do not pay on a working set this small.
+>
+> **2. "Integer addition is associative, removing summation-order sensitivity."**
+> Real, and irrelevant here: AlloyGBM already produces bit-identical models
+> across `n_jobs`, exactly, and has since before this board existed. There is no
+> determinism left to buy.
+>
+> **3. "Integer adds are cheaper than float adds."** Idea 3 established that one
+> accumulate operation in that loop is worth 6.5%–8.3%, so the loop is genuinely
+> sensitive — but quantization does not *remove* an operation, it changes the
+> type of one, and integer and float addition have the same throughput on this
+> host.
+>
+> Against that: it is the largest change on the board, it is lossy, it needs a
+> seed-variance campaign to land, and it would permanently trade away the
+> exactness that XGBoost demonstrates is compatible with being fastest. Ranked
+> last by all three authors on judgement; now last on evidence too.
 
 ---
 
@@ -1604,10 +1682,10 @@ without requiring changes to the binned matrix representation.
 | 2 | Scan only the occupied bin range | rejected | Premise false: mean bins scanned is 255.0 |
 | 3 | Specialize histogram for unweighted squared error | **landed** | `2901fd3`; ceiling −6.5% / −8.3%, guarded −4% / −4 to −9%. First change aimed at the histogram-bound regime |
 | 4 | Skip histograms for terminal sibling pairs | rejected | 2.0–13.4% of splits; ~1.6% ceiling at best |
-| 5 | Upper-bound feature pruning | **open — not tested** | Needs the Cauchy–Schwarz bound Codex sketched. Idea 15's headroom table now bounds what a per-feature skip could buy |
+| 5 | Upper-bound feature pruning | **rejected** | Codex's bound implemented and measured: prunes **0.0%** of features. It bounds a 256-way split, not a binary one |
 | 6 | Eliminate constant / single-bin features | rejected | 0.21–0.80% of scans qualify |
 | 7 | Reduce per-node allocation and clearing | **landed** | `b32510d`; −2.2% / −0.2% / −1.1%. Real, but the 4–5% estimate mispriced cache-resident copies |
-| 8 | Quantized gradient accumulation | **deferred — not tested** | Only idea that trades exactness; ranked last by all three authors, and idea 18 offers the same class of win without it |
+| 8 | Quantized gradient accumulation | **rejected** | Its mechanisms tested bit-identically: narrower accumulators are neutral-to-worse, and the determinism it offers we already have exactly |
 | 9 | Reject all-invalid SIMD chunks | rejected | 0.1–0.3% of scans have no valid bin |
 | 10 | Fuse totals and prefix passes | **landed** | `e71bbc4`; re-measured cold at **−11.0% / −5.3% / −8.3%** |
 | 11 | Collapse repeated prefix states | **rejected (re-run)** | Built after the counter fix: bit-identical and cuts candidates 2-3x, but measures 0%. Idea 17 already made duplicate chunks nearly free |
@@ -1634,12 +1712,25 @@ ideas 2 and 9 were measured before idea 13 introduced the shadow at all. Ideas 4
 and 12 rest on engine-side counters and on source reading. No other verdict on
 this board depends on the broken binding.
 
-What is left: **idea 5** needs a proof before an implementation — a per-feature
-gain bound that is genuinely an upper bound. **Idea 8** stays deferred by the
-agreement of all three authors, and nothing measured since has made the case for
-trading exactness away.
+**Every idea on this board is now closed.** Six landed, all bit-identical; the
+rest are rejected on measurements rather than judgement. Nothing here was given
+up on for lack of evidence, and nothing landed that trades exactness away.
 
-A pattern worth carrying forward: two of the three ideas parked as
+Three patterns are worth carrying out of this cycle:
+
+1. **Memory-footprint arguments did not pay, three times.** Idea 7's copies were
+   cache-resident so the bytes were cheap; idea 14's stack arrays cost more in
+   forced initialization than the indirection they removed; idea 8's narrower
+   accumulator was neutral-to-worse. On a 4 KB working set, counting bytes
+   predicts nothing.
+2. **Price a change against what has already landed, not against the original
+   profile.** Ideas 11 and 16 were worth a tenfold cut in candidates when
+   proposed and worth 0% after idea 17 removed the cost they were removing.
+3. **Measure the ceiling before building the correctness machinery.** Idea 3 was
+   built because an unguarded probe showed −6.5%; idea 5 was dropped after a
+   probe showed it prunes 0.0%. Both decisions cost an hour rather than a day.
+
+A fourth, about scope: two of the three ideas parked as
 "output-changing" turned out not to be. Idea 15 was exact once the propagated
 value gated the early-out instead of seeding the recorded incumbent, and idea 16's
 skip was exact all along. Before accepting that a change must alter models, it is
