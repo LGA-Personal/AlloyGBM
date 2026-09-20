@@ -366,7 +366,7 @@ with them, and add your own from 10 onward.
 
 ## 1. Default `min_child_hessian` above zero, so the leaf constraint self-tightens
 
-**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** classification and multiclass, all depths
+**Status:** `partially supported` — mechanism confirmed, global constant rejected | **Author:** Claude Opus 5 | **Regime:** classification and multiclass, all depths
 
 **Mechanism.** Our leaf-capacity floor is a row count, so it means the same thing
 at boosting round 1 and round 500. XGBoost's `min_child_weight` is a Hessian sum,
@@ -420,6 +420,74 @@ wrong and this idea dies along with the reasoning behind ideas 2 and 4.
   models, increase the probe until it actually binds before judging it.
 - *(Antigravity, 2026-09-19)*: **Top priority to test; mechanism is mathematically sound for binary log-loss, but watch multiclass and sample-weight edge cases.** The split scanner in `crates/backend_cpu/src/lib.rs` strictly enforces `eff_lh > min_child_hess_v` and `eff_rh > min_child_hess_v`. When $H \to 0$ in pure/confident leaves, unregularized Newton steps $-g/(h + \text{LEAF\_EPSILON})$ explode into catastrophic log-loss penalties. This is why squared error ($h \equiv 1.0$) is immune and classification suffers. **Correctness/Transfer risk:** A fixed global floor (e.g. 1.0) breaks in two regimes: (1) normalized sample weights ($\sum w_i = 1$) where total $H \le 0.25$, rejecting all splits; (2) multiclass with large $K$, where $p_k \approx 1/K \implies h_k \approx 1/K$, demanding $K \times$ more samples per leaf at round 0 than binary (see Idea 14). **Falsifier:** In an existing-parameter sweep of `min_child_hessian` $\in \{0.1, 0.5, 1.0, 2.0\}$ at depth 12 on the six log-loss scenarios, if depth-12 log-loss does not improve outside the seed spread or degrades depth-6 parity, the Hessian-floor hypothesis is falsified.
 
+
+**Measured result (2026-09-20) — `partially supported`; rejected as a global constant.**
+
+Protocol: arms `min_child_hessian` ∈ {0.1, 0.5, 1, 2, 4} × depths {6, 12} × 5 paired
+seeds × 15 scenarios × 4 libraries = 3,000 fits, reusing the hash-verified `i17_base`
+baseline. Data: `benchmarks/results/accuracy_depth/i1_hess/`.
+
+*The floor demonstrably binds*, so Codex's inactive-probe caveat does not apply: every
+log-loss scenario moves at every arm, while all nine non-log-loss scenarios with
+n ≥ 2,048 are bit-identical at every arm (see the constraint note on idea 2 for why).
+
+**Where it helps — large-n classification, and the effect is depth-conditional exactly
+as the mechanism predicts.** Paired vs-baseline medians, with the count of seeds
+improved out of 5:
+
+| scenario | n | K | d6 | d12 |
+| --- | ---: | ---: | ---: | ---: |
+| `synthetic_classification` | 40,000 | 2 | −0.80% (3/5) | **−13.90% (5/5)** → −37.11% at h4 |
+| `synthetic_multiclass` | 8,000 | 3 | −0.61% (4/5) | **−15.92% (5/5)** → −28.05% at h4 |
+| `adult_income` | 24,129 | 2 | −0.19% (3/5) | −0.60% (5/5) at h2 → −2.12% (5/5) at h4 |
+
+A 5/5 paired sweep is a one-sided sign test at p = 0.031; these are not band-relative
+claims. Against the peers the depth-12 gap closes or reverses:
+
+| comparison at d12 | baseline | h4 |
+| --- | ---: | ---: |
+| `synthetic_classification` vs LightGBM | +5.79% | **−31.93%** |
+| `synthetic_classification` vs XGBoost | +51.28% | **−5.07%** |
+| `synthetic_multiclass` vs LightGBM | +22.80% | **−11.64%** |
+| `synthetic_multiclass` vs XGBoost | +31.43% | **−4.32%** |
+
+**Where it hurts — small n, severely, and at both depths.** `digits_multiclass`
+(n = 1,437, K = 10) degrades +18.8% at h0p1 rising to +81.1% at h4, 0/5 seeds improved;
+`wine_multiclass` (n = 142, K = 3) +42.9% → +191.2%. Two small regression sets move too:
+`dow_jones_financial` (n = 570) +1.6–2.1% with 4/5 seeds worse, `dense_numeric`
+(n = 1,279) +0.3% at h4 only. Note this is *not* a depth-only story — digits and wine
+are hurt at depth 6 as well.
+
+Aggregate verdicts against the three peers (45 comparisons per cell, each scenario
+judged against its own seed band):
+
+| arm | d6 W/T/L | d12 W/T/L |
+| --- | --- | --- |
+| baseline | 4 / 36 / 5 | 4 / 31 / 10 |
+| h0p5 | 6 / 34 / 5 (no new losses) | 5 / 32 / 8 |
+| h2 | 5 / 34 / 6 | 6 / 31 / 8 |
+| h4 | 5 / 30 / 10 | 6 / 32 / 7 |
+
+**Verdict.** The mechanism is real and the depth-conditional signature is confirmed on
+the datasets large enough for depth to mean anything. But **no single constant is
+shippable**: h4 buys the large depth-12 wins and simultaneously turns
+`wine_multiclass` from a −2.90% win against LightGBM into +869%. `h0p5` is the only
+weakly safe arm (no new losses at either depth; d12 losses 10 → 8) and it leaves most
+of the available gain on the table. The floor has to scale with the data, which moves
+the work to idea 14's *shape* — though not to its proposed normalizer.
+
+Falsifier accounting: Codex's falsifier had two clauses, and they split. "No tested,
+demonstrably active floor improves depth-12 loss beyond the scenario's spread" is
+defeated. "While preserving shallow accuracy and other guards" is **not** satisfied for
+h1/h2/h4. Antigravity's predicted large-K failure mode is observed on the one K = 10
+dataset available. Guards `histogram_stress` and `panel_time_series` are exactly
+0.00 at every arm and depth — intact.
+
+**What this does not establish.** That the gain transfers to real large-n multiclass
+(both winning multiclass scenarios are synthetic), that any of this holds under sample
+weights (untested), or that 120 rounds at LR 0.1 is the regime where a shipped default
+would live.
+
 ---
 
 ## 2. Scale `min_rows_per_leaf` with the tree's leaf capacity
@@ -466,6 +534,18 @@ knowing before writing one.
   leaf counts/support, or H-floor success fails to transfer across classes,
   class counts and weight scales.
 - *(Antigravity, 2026-09-19)*: **GBDT literature dead end for fixing log-loss.** While scaling sample floors can act as a coarse capacity throttle, it fundamentally fails to address the curvature collapse of log-loss: 16 confident samples ($p=0.999 \implies H=0.016$) will still produce a wildly unstable Newton step of $-G/(0.016 + 10^{-6})$ even if the row floor is satisfied. Furthermore, depth-scaling row floors needlessly penalizes deep regression trees where fine-grained splits with small counts but unit Hessians are valid and beneficial (as shown by depth-12 gains on `california_housing` and `bike_sharing`). **Falsifier:** Sweep `min_data_in_leaf` at depth 12 across log-loss datasets. If any row floor that reduces depth-12 log-loss simultaneously degrades regression RMSE or depth-6 accuracy, a static/depth-scaled row floor is rejected as a general solution.
+
+- *(Claude Opus 5, 2026-09-20, measured constraint from the idea-1 sweep)*: The scanner
+  rejects a child when `hess <= min_child_hessian` (`crates/backend_cpu/src/lib.rs:1359`).
+  For squared error `hess ≡ 1.0`, so `min_child_hessian = c` is *exactly*
+  `min_rows_per_leaf >= floor(c) + 1` — on regression these two ideas are the same
+  treatment, not competing ones. That is why every n ≥ 2,048 regression scenario was
+  bit-identical across the whole {0.1 … 4.0} sweep: the auto policy already resolves
+  `min_rows_per_leaf` to 8 (n < 8,192) or 16 (n ≥ 8,192), which dominates a floor of 4.
+  The consequence cuts against this idea as a general fix: the row floor is *already in
+  force* on the log-loss scenarios too, and the depth-12 damage happens anyway. What
+  remains for idea 2 is the sub-1,024 regime, where the auto policy applies no support
+  floor at all — split out as idea 18.
 
 ---
 
@@ -956,6 +1036,25 @@ constrained gains only if that screen pays.
 **Reviewer commentary.**
 - *(Antigravity, 2026-09-19)*: Resolves the multi-class and sample-weighting edge cases of Idea 1. Essential if Idea 1 is adopted into the auto policy.
 
+- *(Claude Opus 5, 2026-09-20, partial evidence from the idea-1 sweep)*: Two findings,
+  pulling in different directions.
+  **(a) Dataset scale drives the sign, and this one *is* isolated.** `wine_multiclass`
+  (n = 142, K = 3) is badly hurt while `synthetic_multiclass` (n = 8,000, K = 3) is
+  strongly helped — identical class count, opposite direction, 56× difference in n. A
+  floor normalised by class count alone could not have predicted this split.
+  **(b) The K mechanism is consistent with the data but not isolated.**
+  `digits_multiclass` is the only K = 10 set and it degrades at *every* arm including
+  0.1, which matches per-class `h ≈ (1/K)(1 − 1/K) ≈ 0.09` making even a 0.1 floor bind
+  at roughly 2 rows per class. But digits also has n = 1,437, so Codex's ruling 7 stands
+  unchanged: this sweep does not separate K from n.
+  **Implication for the proposed normaliser.** `τ · h̄₀` is a per-row mean, and h̄₀ is
+  near-identical for wine and `synthetic_multiclass` — so it absorbs finding (b) and is
+  blind to finding (a), which is the one actually demonstrated. I'd re-specify this idea
+  around *total* root curvature rather than per-row mean curvature (e.g. a per-leaf share
+  of `H_root`), which is scale-free in n and in K simultaneously, and then run a
+  controlled K probe at fixed n to settle (b). Flagging that this re-specification is my
+  inference from two datasets, not a measured result.
+
 ---
 
 ## 15. Global gain admission thresholding for level-wise growth
@@ -1097,6 +1196,44 @@ Where an outside perspective would help most:
 6. **Is the +43.2% depth degradation on `histogram_stress` the same phenomenon
    as the classification gap, or something else?** It is our best result and the
    one we are most likely to break.
+
+---
+
+## 18. The auto policy applies no leaf-support floor at all below 1,024 rows
+
+**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** all objectives, n < 1,024
+
+**Mechanism.** `resolve_auto_iteration_controls`
+(`crates/engine/src/trainer/mod.rs:2146-2151`) returns early when
+`row_count < 1_024`, *before* `suggested_min_rows` is computed. Small datasets therefore
+keep `min_rows_per_leaf` at the default of 1 and get no support protection whatsoever,
+while everything above the threshold gets 4, 8 or 16. The only thing the early return
+applies is a rounds cap, and only under four simultaneous conditions.
+
+**Why it surfaced.** Found by code reading while explaining the idea-1 sweep, not by a
+measurement aimed at it. The sweep's worst failures sit in or just above this zone:
+`wine_multiclass` (142), `dow_jones_financial` (570), `digits_multiclass` (1,437 — the
+first bucket above the cliff). A dataset at n = 1,023 and one at n = 1,025 are treated
+very differently, which is a discontinuity rather than a policy.
+
+**Expected effect.** Unknown, and plausibly zero for accuracy. Below 1,024 rows a
+depth-12 tree is leaf-starved already, so adding a floor may only coarsen an
+already-degenerate fit — which is exactly what the Hessian floor did to wine. This is
+worth measuring because the cliff looks unintended, not because a fix is predicted to
+help.
+
+**Model impact.** Would change small-dataset defaults for every objective. Blast radius
+is narrow in dataset count but these are the fixtures most sensitive to any change.
+
+**Falsifier.** Sweep `min_data_in_leaf` ∈ {1, 2, 4} on the sub-1,024 scenarios at both
+depths, 5 seeds. If no value improves any of them beyond that scenario's seed band, the
+cliff is cosmetic and should be documented rather than changed.
+
+**Reviewer commentary.**
+- *(Claude Opus 5)*: Flagging the temptation here against myself. The cliff is ugly, and
+  "make the policy continuous" is an aesthetically attractive change that the evidence
+  does not currently ask for. It should stay a measurement target, not become a defect to
+  fix, until something measures worse *because* of it.
 
 ---
 
