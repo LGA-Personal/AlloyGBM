@@ -1,5 +1,6 @@
 """Tests for auditable accuracy-at-depth measurement and replay."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -14,10 +15,16 @@ from accuracy_depth_sweep import (  # noqa: E402
     analyse_cells,
     build_runner_command,
     classify_verdict,
+    evidence_class_for,
     parse_arm_specs,
     parse_seeds,
     normalise_gap,
+    resolve_candidate_model,
+    run_sweep,
     _render_analysis_report,
+    analyse_saved_experiment,
+    _parser,
+    _validate_cli,
     validate_external_baseline,
     validate_records,
     verify_resume_compatibility,
@@ -134,6 +141,98 @@ def test_named_empty_arm_and_alloy_overrides_parse():
     assert arms["hess1"]["parsed_overrides"] == {"min_child_hessian": 1.0}
 
 
+def test_morph_can_be_selected_as_the_only_candidate_and_is_not_misclassified_as_peer():
+    candidate_model = resolve_candidate_model(
+        ["alloygbm_morph", "lightgbm"], explicit=None
+    )
+    assert candidate_model == "alloygbm_morph"
+    candidate = {
+        ("dense_numeric", "alloygbm_morph", 11): {"metric": "rmse", "value": 0.8},
+        ("dense_numeric", "alloygbm_morph", 12): {"metric": "rmse", "value": 0.9},
+        ("dense_numeric", "lightgbm", 11): {"metric": "rmse", "value": 1.0},
+        ("dense_numeric", "lightgbm", 12): {"metric": "rmse", "value": 1.1},
+    }
+    baseline = {
+        ("dense_numeric", "alloygbm_morph", 11): {"metric": "rmse", "value": 0.85},
+        ("dense_numeric", "alloygbm_morph", 12): {"metric": "rmse", "value": 0.95},
+    }
+    analysis = analyse_cells(
+        candidate,
+        baseline,
+        ["dense_numeric"],
+        ["alloygbm_morph", "lightgbm"],
+        [11, 12],
+        "baseline",
+        candidate_model=candidate_model,
+    )
+    assert analysis["candidate_model"] == "alloygbm_morph"
+    assert list(analysis["scenarios"]["dense_numeric"]["candidate_vs_peers"]) == [
+        "lightgbm"
+    ]
+    assert analysis["scenarios"]["dense_numeric"]["candidate_vs_baseline"][
+        "candidate"
+    ]["median"] == pytest.approx(0.85)
+
+
+def test_explicit_morph_candidate_does_not_compare_another_alloy_variant_as_peer():
+    candidate_model = resolve_candidate_model(
+        ["alloygbm", "alloygbm_morph", "lightgbm"], explicit="alloygbm_morph"
+    )
+    candidate = {
+        ("dense_numeric", model, seed): {"metric": "rmse", "value": value}
+        for model, values in {
+            "alloygbm": (0.7, 0.8),
+            "alloygbm_morph": (0.8, 0.9),
+            "lightgbm": (1.0, 1.1),
+        }.items()
+        for seed, value in zip((11, 12), values, strict=True)
+    }
+    analysis = analyse_cells(
+        candidate,
+        candidate,
+        ["dense_numeric"],
+        ["alloygbm", "alloygbm_morph", "lightgbm"],
+        [11, 12],
+        "baseline",
+        candidate_model=candidate_model,
+    )
+    assert list(analysis["scenarios"]["dense_numeric"]["candidate_vs_peers"]) == [
+        "lightgbm"
+    ]
+
+
+def test_cli_accepts_an_explicit_morph_candidate(tmp_path):
+    args = _parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--arm",
+            "baseline:",
+            "--scenarios",
+            "dense_numeric",
+            "--models",
+            "alloygbm_morph",
+            "lightgbm",
+            "--candidate-model",
+            "alloygbm_morph",
+        ]
+    )
+    _, _, parsed = _validate_cli(args)
+    assert parsed["config"]["candidate_model"] == "alloygbm_morph"
+
+
+def test_evidence_requires_exactly_five_seeds_and_both_guard_scenarios():
+    missing_guards = evidence_class_for(
+        seeds=[11, 12, 13, 14, 15], scenarios=["dense_numeric"]
+    )
+    assert missing_guards == ("smoke", "missing guard scenarios: histogram_stress, panel_time_series")
+    complete = evidence_class_for(
+        seeds=[11, 12, 13, 14, 15],
+        scenarios=["dense_numeric", "histogram_stress", "panel_time_series"],
+    )
+    assert complete == ("evidence", None)
+
+
 def test_seed_count_and_explicit_seed_list_are_unambiguous():
     assert parse_seeds("5", 20260919) == [20260919, 20260920, 20260921, 20260922, 20260923]
     assert parse_seeds("11,17,29", 20260919) == [11, 17, 29]
@@ -172,6 +271,145 @@ def test_runner_command_uses_shared_controls_and_alloy_only_overrides(tmp_path):
     ]
 
 
+def test_saved_result_replay_uses_persisted_task_identity_without_current_manifest(tmp_path):
+    import accuracy_depth_sweep as sweep
+    import hashlib
+
+    scenario = "archived_only_scenario"
+    manifest_path = Path(sweep.__file__).resolve().parent / scenario / "manifest.yaml"
+    assert not manifest_path.exists()
+    result_path = (
+        tmp_path
+        / "runs"
+        / "baseline"
+        / "d6"
+        / "s11"
+        / "model_comparison_latest.json"
+    )
+    result_path.parent.mkdir(parents=True)
+    payload = {
+        "run_id": "saved-run",
+        "params": {
+            "scenarios": [scenario],
+            "models_filter": ["alloygbm"],
+            "requested_alloy_param_overrides": {},
+            "profile_seeds": [11],
+            "profiles": [
+                {"name": "single", "learning_rate": 0.1, "max_depth": 6, "rounds": 120}
+            ],
+            "alloy_continuous_binning_strategy": "linear",
+            "alloy_continuous_binning_max_bins": 256,
+            "threads_per_library": 1,
+        },
+        "records": [_record(scenario, "alloygbm", 11, task="regression")],
+    }
+    encoded = json.dumps(payload)
+    result_path.write_text(encoded, encoding="utf-8")
+    experiment_manifest = {
+        "config": {
+            "depths": [6],
+            "seeds": [11],
+            "scenarios": [scenario],
+            "models": ["alloygbm"],
+            "rounds": 120,
+            "learning_rate": 0.1,
+            "threads": 1,
+            "binning_strategy": "linear",
+            "bin_count": 256,
+        },
+        "arms": {"baseline": {"parsed_overrides": {}}},
+        "dataset_identities": {scenario: {"task_type": "regression"}},
+        "units": {
+            "d6/baseline/s11": {
+                "status": "PASS",
+                "result_path": str(result_path.relative_to(tmp_path)),
+                "result_run_id": "saved-run",
+                "result_sha256": hashlib.sha256(encoded.encode()).hexdigest(),
+            }
+        },
+        "evidence_class": "evidence",
+    }
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(experiment_manifest), encoding="utf-8"
+    )
+    analysis = analyse_saved_experiment(
+        tmp_path,
+        baseline_arm="baseline",
+        external_baseline_path=None,
+        external_baseline_arm=None,
+    )
+    assert analysis["candidate_model"] == "alloygbm"
+    assert analysis["evidence_class"] == "smoke"
+    assert "seed count is 1" in analysis["evidence_reason"]
+    assert "histogram_stress, panel_time_series" in analysis["evidence_reason"]
+    assert analysis["results"]["d6"]["baseline"]["scenarios"][scenario][
+        "candidate_vs_baseline"
+    ]["candidate"]["median"] == 1.0
+
+
+def test_new_output_manifest_exists_before_preparation_logs_and_allows_resume(tmp_path, monkeypatch):
+    import accuracy_depth_sweep as sweep
+
+    output_dir = tmp_path / "fresh-experiment"
+    repo_root = tmp_path / "repo"
+    config = {
+        "depths": [6],
+        "seeds": [11],
+        "scenarios": ["dense_numeric"],
+        "models": ["alloygbm"],
+        "candidate_model": "alloygbm",
+        "rounds": 1,
+        "learning_rate": 0.1,
+        "threads": 1,
+        "binning_strategy": "linear",
+        "bin_count": 16,
+        "profile_name": "single",
+        "default_scenario_exclusions": {},
+    }
+    arms = {"baseline": {"overrides": [], "parsed_overrides": {}}}
+    monkeypatch.setattr(
+        sweep,
+        "source_identity",
+        lambda *_: {"git_sha": "abc", "source_fingerprint_sha256": "source"},
+    )
+    monkeypatch.setattr(
+        sweep,
+        "runtime_identity",
+        lambda: {
+            "python_executable": "python",
+            "python_version": "3.x",
+            "package_path": "pkg",
+            "package_sha256": "pkg-hash",
+            "native_module_path": "native",
+            "native_module_sha256": "native-hash",
+            "alloygbm_version": "test",
+        },
+    )
+
+    def fail_preparation(_repo_root, _scenario, target_root):
+        assert (target_root / "manifest.json").is_file()
+        log = target_root / "preparation" / "dense_numeric.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("partial preparation", encoding="utf-8")
+        raise RuntimeError("simulated preparation failure")
+
+    monkeypatch.setattr(sweep, "ensure_dataset", fail_preparation)
+    for resume in (False, True):
+        with pytest.raises(RuntimeError, match="simulated preparation failure"):
+            run_sweep(
+                output_dir=output_dir,
+                repo_root=repo_root,
+                config=config,
+                arms=arms,
+                baseline_arm="baseline",
+                resume=resume,
+                external_baseline_path=None,
+                external_baseline_arm=None,
+            )
+    manifest = json.loads((output_dir / "manifest.json").read_text())
+    assert manifest["status"] == "INITIALIZING"
+
+
 def test_missing_duplicate_failed_and_nonfinite_cells_are_rejected():
     one = _record("dense_numeric", "alloygbm", 11)
     with pytest.raises(ValueError, match="missing requested result cell"):
@@ -189,7 +427,16 @@ def test_missing_duplicate_failed_and_nonfinite_cells_are_rejected():
 def test_unknown_tasks_and_profile_mixing_are_rejected():
     unknown = _record("dense_numeric", "alloygbm", 11, task="ranking")
     with pytest.raises(ValueError, match="task_type mismatch"):
-        validate_records(_payload([unknown]), ["dense_numeric"], ["alloygbm"], 11, 6, 120, 0.1)
+        validate_records(
+            _payload([unknown]),
+            ["dense_numeric"],
+            ["alloygbm"],
+            11,
+            6,
+            120,
+            0.1,
+            expected_task_types={"dense_numeric": "regression"},
+        )
     mixed = _record("dense_numeric", "alloygbm", 11, profile_name="deep_low_lr")
     with pytest.raises(ValueError, match="unrequested profile"):
         validate_records(_payload([mixed]), ["dense_numeric"], ["alloygbm"], 11, 6, 120, 0.1)
@@ -210,6 +457,7 @@ def test_paired_seed_analysis_uses_per_scenario_spread_and_detects_guard_regress
         models=["alloygbm", "lightgbm"],
         seeds=[11, 12],
         baseline_arm="baseline",
+        candidate_model="alloygbm",
     )
     comparison = analysis["scenarios"]["histogram_stress"]["candidate_vs_baseline"]
     assert comparison["paired_absolute_deltas"] == [
@@ -230,7 +478,15 @@ def test_analyse_cells_preserves_raw_seed_metrics_and_zero_reference_absolute_ga
         ("dense_numeric", "alloygbm", 11): {"metric": "rmse", "value": 0.0},
         ("dense_numeric", "alloygbm", 12): {"metric": "rmse", "value": 0.0},
     }
-    summary = analyse_cells(candidate, baseline, ["dense_numeric"], ["alloygbm"], [11, 12], "baseline")
+    summary = analyse_cells(
+        candidate,
+        baseline,
+        ["dense_numeric"],
+        ["alloygbm"],
+        [11, 12],
+        "baseline",
+        candidate_model="alloygbm",
+    )
     row = summary["scenarios"]["dense_numeric"]["candidate_vs_baseline"]
     assert row["candidate"]["values_by_seed"] == {"11": 0.25, "12": 0.3}
     assert row["absolute_delta_median"] == pytest.approx(0.275)
@@ -264,6 +520,7 @@ def test_markdown_report_includes_candidate_peer_and_absolute_seed_spreads():
         ["alloygbm", "lightgbm"],
         [11, 12],
         "baseline",
+        candidate_model="alloygbm",
     )
     report = _render_analysis_report(
         {
@@ -272,6 +529,7 @@ def test_markdown_report_includes_candidate_peer_and_absolute_seed_spreads():
                 "seeds": [11, 12],
                 "scenarios": ["dense_numeric"],
                 "models": ["alloygbm", "lightgbm"],
+                "candidate_model": "alloygbm",
                 "depths": [6],
                 "rounds": 120,
                 "learning_rate": 0.1,
@@ -322,6 +580,12 @@ def test_external_baseline_requires_matched_configuration_and_datasets_but_allow
     treatment = validate_external_baseline(candidate, baseline, baseline_arm="baseline")
     assert treatment["source_changed"] is True
     assert treatment["native_module_changed"] is True
+    prior_candidate = _manifest(
+        config={**candidate["config"], "candidate_model": "alloygbm"}
+    )
+    assert validate_external_baseline(
+        prior_candidate, baseline, baseline_arm="baseline"
+    )["explicit_source_treatment"] is True
     with pytest.raises(ValueError, match="external baseline mismatch.*rounds"):
         bad_config = _manifest(config={**baseline["config"], "rounds": 400})
         validate_external_baseline(candidate, bad_config, baseline_arm="baseline")

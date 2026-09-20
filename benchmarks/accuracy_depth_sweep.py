@@ -194,6 +194,35 @@ def parse_depths(spec: str) -> list[int]:
     return depths
 
 
+def resolve_candidate_model(models: list[str], explicit: str | None) -> str:
+    """Choose the AlloyGBM implementation whose accuracy is being measured."""
+    alloy_models = [model for model in models if model.startswith("alloygbm")]
+    if explicit is not None:
+        if explicit not in models:
+            raise ValueError(f"candidate model {explicit!r} must be included in --models")
+        if not explicit.startswith("alloygbm"):
+            raise ValueError("--candidate-model must name an AlloyGBM model")
+        return explicit
+    if len(alloy_models) != 1:
+        raise ValueError(
+            "select exactly one AlloyGBM model in --models or specify --candidate-model"
+        )
+    return alloy_models[0]
+
+
+def evidence_class_for(
+    seeds: list[int] | tuple[int, ...], scenarios: list[str] | tuple[str, ...]
+) -> tuple[str, str | None]:
+    """Evidence needs five seeds and both required guard scenarios."""
+    reasons = []
+    if len(seeds) != 5:
+        reasons.append(f"seed count is {len(seeds)}, expected 5")
+    missing_guards = [scenario for scenario in GUARD_SCENARIOS if scenario not in scenarios]
+    if missing_guards:
+        reasons.append("missing guard scenarios: " + ", ".join(missing_guards))
+    return ("evidence", None) if not reasons else ("smoke", "; ".join(reasons))
+
+
 def build_runner_command(
     *,
     repo_root: Path,
@@ -241,15 +270,6 @@ def _metric_for_record(record: dict[str, Any]) -> str:
     return METRIC_FOR_TASK[task]
 
 
-def _scenario_task_type(scenario: str) -> str | None:
-    manifest_path = Path(__file__).resolve().parent / scenario / "manifest.yaml"
-    if not manifest_path.is_file():
-        return None
-    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    task_type = manifest.get("task_type", "regression")
-    return str(task_type)
-
-
 def validate_records(
     payload: dict[str, Any],
     scenarios: list[str] | tuple[str, ...],
@@ -259,6 +279,7 @@ def validate_records(
     rounds: int,
     learning_rate: float,
     expected_overrides: dict[str, Any] | None = None,
+    expected_task_types: dict[str, str] | None = None,
 ) -> dict[tuple[str, str, int], dict[str, Any]]:
     """Validate the exact one-profile result artifact and retain seed metrics."""
     unsupported = sorted(set(scenarios).intersection(KNOWN_UNSUPPORTED_SCENARIOS))
@@ -306,11 +327,19 @@ def validate_records(
         ):
             raise ValueError(f"learning_rate mismatch in result cell {key!r}")
         metric = _metric_for_record(record)
-        expected_task = _scenario_task_type(str(record.get("scenario")))
+        expected_task = (
+            expected_task_types.get(str(record.get("scenario")))
+            if expected_task_types is not None
+            else None
+        )
         if expected_task is not None and record.get("task_type") != expected_task:
             raise ValueError(
                 f"task_type mismatch in result cell {key!r}: "
                 f"{record.get('task_type')!r} != {expected_task!r}"
+            )
+        if expected_task_types is not None and expected_task is None:
+            raise ValueError(
+                f"saved task_type identity missing for scenario {record.get('scenario')!r}"
             )
         value = record.get(metric)
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -444,21 +473,30 @@ def analyse_cells(
     models: list[str],
     seeds: list[int],
     baseline_arm: str,
+    *,
+    candidate_model: str,
 ) -> dict[str, Any]:
     """Summarise raw seed values, paired deltas, peer comparisons, and guards."""
     output: dict[str, Any] = {
         "baseline_arm": baseline_arm,
+        "candidate_model": candidate_model,
         "scenarios": {},
         "guards": {},
     }
-    peer_models = [model for model in models if model != "alloygbm"]
+    if candidate_model not in models or not candidate_model.startswith("alloygbm"):
+        raise ValueError("candidate_model must be a selected AlloyGBM model")
+    peer_models = [
+        model
+        for model in models
+        if model != candidate_model and not model.startswith("alloygbm")
+    ]
     for scenario in scenarios:
-        metric, _ = _metric_values(candidate, scenario, "alloygbm", seeds)
+        metric, _ = _metric_values(candidate, scenario, candidate_model, seeds)
         scenario_entry: dict[str, Any] = {
             "metric": metric,
             "models": {},
             "candidate_vs_baseline": _comparison(
-                candidate, baseline, scenario, "alloygbm", "alloygbm", seeds
+                candidate, baseline, scenario, candidate_model, candidate_model, seeds
             ),
             "candidate_vs_peers": {},
         }
@@ -467,7 +505,7 @@ def analyse_cells(
             scenario_entry["models"][model] = _stats(model_metric, values)
         for model in peer_models:
             scenario_entry["candidate_vs_peers"][model] = _comparison(
-                candidate, candidate, scenario, "alloygbm", model, seeds
+                candidate, candidate, scenario, candidate_model, model, seeds
             )
         output["scenarios"][scenario] = scenario_entry
 
@@ -673,6 +711,7 @@ EXTERNAL_COMMON_CONFIG = (
     "seeds",
     "scenarios",
     "models",
+    "candidate_model",
     "rounds",
     "learning_rate",
     "threads",
@@ -692,7 +731,8 @@ def validate_external_baseline(
     mismatches = [
         key
         for key in EXTERNAL_COMMON_CONFIG
-        if candidate_config.get(key) != baseline_config.get(key)
+        if candidate_config.get(key, "alloygbm" if key == "candidate_model" else None)
+        != baseline_config.get(key, "alloygbm" if key == "candidate_model" else None)
     ]
     if candidate.get("dataset_identities") != baseline.get("dataset_identities"):
         mismatches.append("dataset identities")
@@ -735,6 +775,7 @@ def load_result_file(
     bin_count: int | None = None,
     threads: int | None = None,
     expected_overrides: dict[str, Any] | None = None,
+    expected_task_types: dict[str, str] | None = None,
     expected_sha256: str | None = None,
 ) -> tuple[dict[tuple[str, str, int], dict[str, Any]], str, str, dict[str, Any]]:
     if not result_path.is_file():
@@ -791,6 +832,7 @@ def load_result_file(
         rounds,
         learning_rate,
         expected_overrides=expected_overrides,
+        expected_task_types=expected_task_types,
     )
     return cells, str(run_id), digest, params
 
@@ -817,6 +859,15 @@ def _load_experiment_cells(
     depths: list[int],
 ) -> dict[tuple[str, int], dict[tuple[str, str, int], dict[str, Any]]]:
     config = manifest["config"]
+    dataset_identities = manifest.get("dataset_identities", {})
+    expected_task_types = {
+        scenario: identity["task_type"]
+        for scenario in config["scenarios"]
+        if (identity := dataset_identities.get(scenario))
+        and identity.get("task_type") is not None
+    }
+    if set(expected_task_types) != set(config["scenarios"]):
+        raise ValueError("saved dataset identities are missing task_type for replay")
     loaded: dict[tuple[str, int], dict[tuple[str, str, int], dict[str, Any]]] = {}
     units = manifest.get("units", {})
     for depth in depths:
@@ -841,6 +892,7 @@ def _load_experiment_cells(
                     bin_count=config["bin_count"],
                     threads=config["threads"],
                     expected_overrides=manifest["arms"][arm]["parsed_overrides"],
+                    expected_task_types=expected_task_types,
                     expected_sha256=unit.get("result_sha256"),
                 )
                 unit["result_run_id"] = run_id
@@ -872,6 +924,7 @@ def _render_analysis_report(
         "# Accuracy-at-depth sweep",
         "",
         f"Evidence class: **{evidence_class}** ({len(config['seeds'])} seeds).",
+        f"Candidate model: `{config['candidate_model']}`.",
         f"Scenarios: {', '.join(config['scenarios'])}.",
         f"Models: {', '.join(config['models'])}.",
         f"Depths: {', '.join(map(str, config['depths']))}; rounds={config['rounds']}; "
@@ -883,6 +936,8 @@ def _render_analysis_report(
         "an undefined relative verdict.",
         "",
     ]
+    if manifest.get("evidence_reason"):
+        lines.insert(4, f"Smoke reason: {manifest['evidence_reason']}.")
     if treatment is not None:
         lines.extend(
             [
@@ -970,10 +1025,13 @@ def _write_analysis(
                 config["models"],
                 config["seeds"],
                 reference_arm,
+                candidate_model=config["candidate_model"],
             )
     analysis = {
         "schema_version": MANIFEST_VERSION,
         "evidence_class": manifest.get("evidence_class", "smoke"),
+        "evidence_reason": manifest.get("evidence_reason"),
+        "candidate_model": config["candidate_model"],
         "source_state": manifest.get("source_state"),
         "runtime": manifest.get("runtime"),
         "dataset_identities": manifest.get("dataset_identities"),
@@ -1014,8 +1072,7 @@ def _validate_cli(args: argparse.Namespace) -> tuple[list[int], list[int], dict[
     unknown_models = sorted(set(models).difference(VALID_MODELS))
     if unknown_models:
         raise ValueError(f"unknown model(s): {unknown_models}")
-    if "alloygbm" not in models:
-        raise ValueError("--models must include alloygbm for candidate analysis")
+    candidate_model = resolve_candidate_model(models, args.candidate_model)
     if args.rounds <= 0:
         raise ValueError("--rounds must be positive")
     if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
@@ -1036,6 +1093,7 @@ def _validate_cli(args: argparse.Namespace) -> tuple[list[int], list[int], dict[
         "seeds": seeds,
         "scenarios": scenarios,
         "models": models,
+        "candidate_model": candidate_model,
         "rounds": args.rounds,
         "learning_rate": args.learning_rate,
         "threads": args.threads,
@@ -1056,6 +1114,9 @@ def _initial_manifest(
     datasets: dict[str, Any],
     environment: dict[str, str],
 ) -> dict[str, Any]:
+    evidence_class, evidence_reason = evidence_class_for(
+        config["seeds"], config["scenarios"]
+    )
     return {
         "schema_version": MANIFEST_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -1065,7 +1126,8 @@ def _initial_manifest(
         "runtime": runtime,
         "dataset_identities": datasets,
         "environment": environment,
-        "evidence_class": "evidence" if len(config["seeds"]) == 5 else "smoke",
+        "evidence_class": evidence_class,
+        "evidence_reason": evidence_reason,
         "completed_unit_count": 0,
         "units": {},
         "exclusions": KNOWN_UNSUPPORTED_SCENARIOS,
@@ -1106,23 +1168,26 @@ def run_sweep(
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / MANIFEST_NAME
-    datasets = {
-        scenario: ensure_dataset(repo_root, scenario, output_dir)
-        for scenario in config["scenarios"]
-    }
-    current = _initial_manifest(
-        config=config,
-        arms=arms,
-        source=source_identity(repo_root, config["scenarios"]),
-        runtime=runtime_identity(),
-        datasets=datasets,
-        environment=selected_environment(),
-    )
+    saved: dict[str, Any] | None = None
+    if manifest_path.exists():
+        if not resume:
+            raise ValueError(f"{manifest_path} already exists; pass --resume for a verified continuation")
+        saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+    elif any(output_dir.iterdir()):
+        raise ValueError(
+            f"output directory {output_dir} is non-empty and has no {MANIFEST_NAME}"
+        )
+
+    source = source_identity(repo_root, config["scenarios"])
+    runtime = runtime_identity()
+    environment = selected_environment()
     external_root: Path | None = None
     external_manifest: dict[str, Any] | None = None
     external_manifest_path: Path | None = None
     external_manifest_sha256: str | None = None
     treatment: dict[str, Any] | None = None
+    external_arm: str | None = None
+    external_reference: dict[str, Any] | None = None
     if external_baseline_path is not None:
         external_root = external_baseline_path.expanduser().resolve()
         external_manifest_path = external_root / MANIFEST_NAME
@@ -1131,31 +1196,94 @@ def run_sweep(
         external_manifest_sha256 = _hash_file(external_manifest_path)
         external_manifest = json.loads(external_manifest_path.read_text(encoding="utf-8"))
         external_arm = external_baseline_arm or "baseline"
-        treatment = validate_external_baseline(current, external_manifest, external_arm)
-        current["external_baseline"] = {
+        external_reference = {
             "path": str(external_root),
             "arm": external_arm,
             "manifest_sha256": external_manifest_sha256,
+        }
+
+    current = _initial_manifest(
+        config=config,
+        arms=arms,
+        source=source,
+        runtime=runtime,
+        datasets={},
+        environment=environment,
+    )
+    current["external_baseline"] = external_reference
+    current["status"] = "INITIALIZING"
+    if saved is not None:
+        # Preparation may have stopped partway through. Compare stable identity
+        # first, then check all saved dataset hashes once preparation completes.
+        saved_static = dict(saved)
+        current_static = dict(current)
+        saved_static["dataset_identities"] = {}
+        current_static["dataset_identities"] = {}
+        if saved.get("external_baseline") is not None:
+            saved_static["external_baseline"] = {
+                key: saved["external_baseline"].get(key)
+                for key in ("path", "arm", "manifest_sha256")
+            }
+        verify_resume_compatibility(saved_static, current_static)
+        if saved.get("arms") != arms:
+            raise ValueError("resume mismatch: arms")
+        manifest = saved
+        prior_status = saved.get("status", "READY")
+    else:
+        manifest = current
+        _save_json(manifest_path, manifest)
+        prior_status = None
+
+    prior_datasets = (saved or {}).get("dataset_identities", {})
+    manifest["status"] = "INITIALIZING"
+    _save_json(manifest_path, manifest)
+    datasets: dict[str, Any] = {}
+    for scenario in config["scenarios"]:
+        identity = ensure_dataset(repo_root, scenario, output_dir)
+        if scenario in prior_datasets and prior_datasets[scenario] != identity:
+            raise ValueError(f"resume mismatch: dataset identity changed for {scenario}")
+        datasets[scenario] = identity
+        manifest["dataset_identities"] = {**prior_datasets, **datasets}
+        _save_json(manifest_path, manifest)
+
+    current = _initial_manifest(
+        config=config,
+        arms=arms,
+        source=source,
+        runtime=runtime,
+        datasets=datasets,
+        environment=environment,
+    )
+    if external_manifest is not None and external_arm is not None:
+        treatment = validate_external_baseline(current, external_manifest, external_arm)
+        current["external_baseline"] = {
+            **(external_reference or {}),
             "treatment_identity": treatment,
         }
     else:
         current["external_baseline"] = None
-    if manifest_path.exists():
-        if not resume:
-            raise ValueError(f"{manifest_path} already exists; pass --resume for a verified continuation")
-        saved = json.loads(manifest_path.read_text(encoding="utf-8"))
-        verify_resume_compatibility(saved, current)
-        if saved.get("arms") != arms:
-            raise ValueError("resume mismatch: arms")
-        manifest = saved
+
+    if saved is not None:
+        if prior_status != "INITIALIZING":
+            verify_resume_compatibility(saved, current)
+        elif (saved.get("external_baseline") or {}).get("treatment_identity") not in (
+            None,
+            current.get("external_baseline", {}).get("treatment_identity"),
+        ):
+            raise ValueError("resume mismatch: external baseline")
+        manifest.update(
+            {
+                "dataset_identities": datasets,
+                "evidence_class": current["evidence_class"],
+                "evidence_reason": current["evidence_reason"],
+                "external_baseline": current["external_baseline"],
+                "status": "READY",
+            }
+        )
     else:
-        existing = list(output_dir.iterdir())
-        if existing:
-            raise ValueError(
-                f"output directory {output_dir} is non-empty and has no {MANIFEST_NAME}"
-            )
         manifest = current
-        _save_json(manifest_path, manifest)
+        manifest["status"] = "READY"
+    _save_json(manifest_path, manifest)
 
     for depth in config["depths"]:
         for arm_name, arm in arms.items():
@@ -1179,6 +1307,10 @@ def run_sweep(
                             bin_count=config["bin_count"],
                             threads=config["threads"],
                             expected_overrides=arm["parsed_overrides"],
+                            expected_task_types={
+                                scenario: datasets[scenario]["task_type"]
+                                for scenario in config["scenarios"]
+                            },
                             expected_sha256=unit.get("result_sha256"),
                         )
                         continue
@@ -1241,6 +1373,10 @@ def run_sweep(
                         bin_count=config["bin_count"],
                         threads=config["threads"],
                         expected_overrides=arm["parsed_overrides"],
+                        expected_task_types={
+                            scenario: datasets[scenario]["task_type"]
+                            for scenario in config["scenarios"]
+                        },
                     )
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     manifest["units"][unit_key]["status"] = "FAIL"
@@ -1332,6 +1468,14 @@ def analyse_saved_experiment(
         raise ValueError(f"analyze-only needs saved {MANIFEST_NAME} at {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     config = manifest["config"]
+    if "candidate_model" not in config:
+        # Earlier v1 manifests used literal alloygbm as their analysis candidate.
+        if "alloygbm" not in config.get("models", []):
+            raise ValueError("saved experiment has no candidate_model identity")
+        config["candidate_model"] = "alloygbm"
+    manifest["evidence_class"], manifest["evidence_reason"] = evidence_class_for(
+        config["seeds"], config["scenarios"]
+    )
     arms = list(manifest["arms"])
     loaded = _load_experiment_cells(manifest, output_dir, arms=arms, depths=config["depths"])
     reference_arm = baseline_arm
@@ -1399,6 +1543,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--scenarios", nargs="+", default=None)
     parser.add_argument("--models", nargs="+", default=None)
+    parser.add_argument(
+        "--candidate-model",
+        default=None,
+        help="selected AlloyGBM model to compare (derive only when one AlloyGBM model is selected)",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--baseline-arm", default="baseline")
     parser.add_argument("--external-baseline", type=Path)
