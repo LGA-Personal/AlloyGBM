@@ -44,3 +44,25 @@ Task 2 completed in `87cb2ed`, `b1aafac`, and `1d0877d`: the sweep driver record
 20. Ruling: Add one predeclared Task3 cap0.2 arm after the original1/2/5 arms, before any cap accuracy outcomes are inspected. Fresh five-seed uncapped accepted-child maxima show1/2 bind substantially only on syntheticbinary (plusAdult d6 for1);5 bindsnowhere. A ceiling0.2 post-LR equals2.0 unshrunk Newton units at the fixed LR0.1, and allsixclassification fixtures contain outputs above0.2. This is a binding moderate-update ceiling experiment, not proof of catastrophic outliers. Use the same full15-scenario/four-model/five-seed/d6+d12 protocol, source/native/patch and binding evidence, n_jobs checks, guards, and exact restoration. Keep original arms and clearly distinguish the added treatment from the original grid. Cost: one extra sequential build/campaign; no automatic production endorsement or further opportunistic grid expansion.
 
 21. Ruling: Guard reporting must separate change versus the reference baseline from current peer standing. A pre-existing panel_time_series deficit with exactly unchanged paired metrics is not a treatment regression. The driver’s status now measures baseline change; peer_status reports current standing. Review both detailed comparisons and any changed peer win/tie/loss outcomes before promotion; CLEAR baseline status alone is not production sign-off. The reporting-only correction is replayed from saved records, not refitted. Cost: schema gains an explicit field and earlier composite labels require reinterpretation/replay; metric values and scientific arms are unchanged.
+
+## Stopped at user request — 2026-09-20
+
+Tasks1–2 (override plumbing and sweep tooling) are implemented and reviewed through `6f91a33`; execution rulings are committed through `ab9605f`. Task3 is partial. Tasks4–14 have not been executed. No production training policy change has been selected or shipped.
+
+Completed Task3 evidence uses15 numeric scenarios, four libraries, five paired seeds, depths6/12,120 rounds, learning rate0.1, and one thread:
+
+| Arm | Completed evidence | Result |
+| --- | --- | --- |
+| Uncapped baseline |600 primary-metric cells;60 classification artifact diagnostics |Median of six deep/shallow log-loss median ratios:+15.770% AlloyGBM,+1.849% LightGBM,+1.818% XGBoost. Fresh depth6 vsLightGBM counts:1 win/13 ties/1 loss. |
+| Cap1 |600 cells;60 diagnostics plus representative cross-thread checks |No deep improvement beyond scenario spread. Synthetic binary d12 −2.0814% versus25.5141% band; Digits −5.5403% versus58.5562% band. Aggregate depth ratio improves partly because shallow Digits loss worsens; not a qualifying win. |
+| Cap2 |600 cells;60 diagnostics plus cross-thread checks |No deep improvement beyond spread. Only synthetic binary changed: d12 +0.3930% versus25.5141% band. Other five classification medians unchanged. |
+| Cap5 |600 cells;60 diagnostics plus cross-thread checks |All600 primary-metric cells exactly match uncapped baseline; all60 diagnostic artifacts match. Non-binding control. |
+| Cap0.2 |Temporary native build completed only |No diagnostics or accuracy sweep ran. Untested. |
+
+Completed cap arms preserved all AlloyGBM regression/ranking primary seed metrics. The panel_time_series peer deficit already exists in the baseline; the reviewed reporting fix separates it from treatment regression. Changes within seed-spread bands remain inconclusive. Caps1/2 did not satisfy the candidate gate; cap5 does not test an active regularizer.
+
+Raw evidence is retained locally under `benchmarks/results/accuracy_depth/i17_*` (ignored by Git), with each campaign's `analysis.json`, `manifest.json`, `report.md`, and raw run files. The diagnostic helper and its tests remain untracked and have not received their Task3 review. The full Task3 board write-up and compact evidence promotion are unfinished. Luna hit its usage limit after building cap0.2; no experiment process was active when the user requested the stop.
+
+The controller reversed only the saved temporary trainer patch and rebuilt the uncapped native extension as stop cleanup. No new probe or broad validation was started. Resume only by explicit user request; begin with the cap0.2 diagnostic/sweep and finish Task3 review, or choose a revised sequence.
+
+Stop cleanup verified: release rebuild exited0; trainer bytes exactly match committed uncapped source (SHA256 `4806d00ddbc6c8cb5c79443dba2bc204e153c41de5dcc6269b8ed38b6d60b332`). The loaded rebuilt native module has SHA256 `e445e8d66043d42177da1e7dc31665b0e08459aee72da2664a89fedbeb9a8877`. No experiment/build processes remain. No Rust source diff remains. No accuracy fits or broad tests were run during cleanup.

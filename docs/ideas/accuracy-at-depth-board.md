@@ -998,7 +998,7 @@ constrained gains only if that screen pays.
 
 ## 17. Leaf delta bounding (`max_delta_step`) for classification objectives
 
-**Status:** `hypothesis` | **Author:** Antigravity | **Regime:** binary/multiclass log-loss, deep trees
+**Status:** `rejected` — mechanism measured absent | **Author:** Antigravity | **Regime:** binary/multiclass log-loss, deep trees
 
 **Mechanism.** In logistic loss, the true negative log-likelihood is asymmetric: as the margin $z \to \infty$, loss approaches 0 linearly; as $z \to -\infty$, loss grows linearly. The second-order Taylor approximation $L(z + \delta) \approx L(z) + g \delta + \frac{1}{2} h \delta^2$ assumes quadratic curvature everywhere. In deep leaves with confident predictions, $h = p(1-p)$ becomes tiny ($< 0.001$). If a single misclassified sample is present ($g \approx 1.0$), the unregularized Newton solve produces $\delta = -g / (h + \text{LEAF\_EPSILON}) \approx -1000.0$. In AlloyGBM, `max_abs_leaf_value` defaults to $1\_000\_000.0$ (`crates/engine/src/trainer/mod.rs`), so a single leaf can shift logits by hundreds or thousands, driving predicted probabilities to $0.0$ or $1.0$. If a test sample of the opposite class falls into this leaf, log-loss incurs an astronomical penalty. XGBoost's `max_delta_step` (and AlloyGBM's own `poisson_max_delta_step = 0.7`) caps the absolute leaf update to $|\delta| \le M$ (e.g. $1.0$ or $2.0$), preventing Newton-Raphson overshoot in low-curvature leaves.
 
@@ -1012,6 +1012,66 @@ constrained gains only if that screen pays.
 
 **Reviewer commentary.**
 - *(Antigravity, 2026-09-19)*: Closely related to Idea 13, but specifically targets the Taylor-series curvature breakdown of logistic loss (overshoot) rather than sample-support filtering.
+
+> ### Result (2026-09-20) — rejected, and the premise was wrong
+>
+> Executed as Task 3 of the sequential probe plan by Codex, closed by Claude
+> Opus 5. Protocol: 15 numeric scenarios (see execution ruling 17), four
+> libraries, five paired seeds, depths 6 and 12, 120 rounds, learning rate 0.1,
+> one thread. Each cap arm is 600 primary-metric cells plus 60 classification
+> artifact diagnostics.
+>
+> **Accuracy outcome — no cap helped.**
+>
+> | Arm | Result |
+> |---|---|
+> | Uncapped baseline | Median of six deep/shallow log-loss ratios: **+15.770%** AlloyGBM, +1.849% LightGBM, +1.818% XGBoost. Depth-6 vs LightGBM: 1 win / 13 ties / 1 loss. |
+> | Cap 1.0 | No deep improvement beyond spread. Synthetic binary d12 −2.08% against a 25.51% band; Digits −5.54% against a 58.56% band. |
+> | Cap 2.0 | No deep improvement beyond spread; only synthetic binary changed at all. |
+> | Cap 5.0 | All 600 cells and all 60 diagnostic artifacts **exactly** match the uncapped baseline. Non-binding control. |
+> | Cap 0.2 | Not run — see below. |
+>
+> **Mechanism outcome — the overshoot does not occur.** The artifact diagnostics
+> measure the magnitude of every accepted child's terminal output
+> (post-learning-rate), across all 60 baseline fits:
+>
+> | depth | median q50 | median q90 | median q99 | **median max** | worst max | % with abs > 1 |
+> |---:|---:|---:|---:|---:|---:|---:|
+> | 6 | 0.0854 | 0.1268 | 0.2455 | **0.8745** | 3.4662 | 0.005% |
+> | 12 | 0.0911 | 0.1229 | 0.2216 | **0.5195** | 3.4662 | **0.000%** |
+>
+> The idea predicted logit steps "in the hundreds" from `-g / (h + 1e-6)` with
+> `lambda_l2 = 0.0`. The largest single leaf output observed anywhere in sixty
+> fits is **3.47**, and at depth 12 the median maximum is **0.52** — *smaller*
+> than at depth 6, which is the opposite of the predicted direction. Saturation
+> checks agree: a depth-12 classifier on 20,000 rows produced **0 saturated
+> predictions**, with the minimum probability at 3.0e-03.
+>
+> **Why the reasoning failed.** The step is `-lr * G / (H + lambda + eps)`, and
+> the blow-up argument only considered the denominator. For `H` to collapse,
+> every row in the leaf must be confidently predicted — but a confidently
+> *correct* row also has `g = p - y` near zero, so the numerator collapses with
+> it. A large ratio needs confidently *wrong* rows grouped together, which
+> boosting actively removes. Small `H` does not imply large `G/H`; Codex made
+> exactly this objection in execution ruling 2 before any of this was measured,
+> and the measurement confirms it.
+>
+> **Cap 0.2 was predeclared (ruling 20) and is not being run as an idea-17 test.**
+> With the distribution above, a 0.2 ceiling binds on essentially every leaf and
+> is a roughly 60% across-the-board shrinkage of leaf values — which is a
+> learning-rate treatment, not a test of catastrophic overshoot. Ruling 20 says
+> as much ("a binding moderate-update ceiling experiment, not proof of
+> catastrophic outliers"). Task 6 already tests learning-rate and round budgets
+> on a clean footing with five seeds, so that arm belongs there rather than here,
+> where its result would be read as evidence about a mechanism now shown absent.
+>
+> **What this says about the shape of the overfitting.** Depth 12 produces *more*
+> leaves each holding *smaller* values, and log-loss still degrades while AUC is
+> unchanged. So the damage accumulates from many small overconfident
+> contributions rather than a few catastrophic ones. That points at leaf
+> *support* — how few rows a leaf is allowed to fit — rather than at bounding the
+> value a leaf may emit. Ideas 1 and 14 are the direct expression of that, and
+> idea 2 is its row-count cousin.
 
 ---
 
