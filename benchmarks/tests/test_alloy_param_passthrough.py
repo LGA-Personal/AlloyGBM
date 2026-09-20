@@ -202,11 +202,23 @@ def test_learning_rate_and_round_overrides_are_marked_as_asymmetric():
 class _InspectableRegressionModel:
     def __init__(self) -> None:
         self.fit_timing_ = {}
+        self.resolved_training_policy_ = None
 
     def get_params(self) -> dict[str, object]:
         return {"max_depth": 12, "tree_growth": "leaf"}
 
     def fit(self, X, y):
+        self.resolved_training_policy_ = {
+            "requested_mode": "auto",
+            "requested_rounds": 120,
+            "effective_round_cap": 120,
+            "min_rows_per_leaf": 8,
+            "min_split_gain": 0.001,
+            "row_subsample": 0.9,
+            "col_subsample": 0.8,
+            "auto_split_l2_applied": False,
+            "effective_split_l2": 0.0,
+        }
         return self
 
     def predict(self, X):
@@ -233,10 +245,11 @@ def test_benchmark_record_preserves_requested_and_effective_parameters():
     )
 
     assert record.requested_alloy_param_overrides == requested
-    assert record.effective_estimator_params == {
+    assert record.constructed_estimator_params == {
         "max_depth": 12,
         "tree_growth": "leaf",
     }
+    assert record.resolved_training_policy["row_subsample"] == 0.9
     assert record.status == "PASS"
 
 
@@ -281,7 +294,36 @@ def test_output_json_keeps_parameter_provenance(tmp_path):
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert payload["params"]["requested_alloy_param_overrides"] == {"max_leaves": 10}
     assert payload["records"][0]["requested_alloy_param_overrides"] == {"max_leaves": 10}
-    assert payload["records"][0]["effective_estimator_params"] == {
+    assert payload["records"][0]["constructed_estimator_params"] == {
         "max_depth": 12,
         "tree_growth": "leaf",
     }
+    assert payload["records"][0]["resolved_training_policy"]["row_subsample"] == 0.9
+
+
+def test_fitted_auto_policy_is_recorded_separately_from_constructor_parameters():
+    import numpy as np
+    from alloygbm import GBMRegressor
+
+    rng = np.random.default_rng(73)
+    X = rng.standard_normal((2112, 32)).astype("float32")
+    y = (1.5 * X[:, 0] - 0.25 * X[:, 1]).astype("float32")
+    record = RUNNER._run_model(
+        model_name="alloygbm",
+        factory=lambda: GBMRegressor(n_estimators=5, training_policy="auto", seed=7),
+        x_train=X[:2048],
+        y_train=y[:2048],
+        x_test=X[2048:],
+        y_test=y[2048:],
+        scenario="dense_numeric",
+        profile=RUNNER.DEFAULT_PROFILES[0],
+        profile_index=1,
+        run_index=1,
+        seed=7,
+    )
+
+    assert record.status == "PASS", record.error
+    assert record.constructed_estimator_params["row_subsample"] == 1.0
+    assert record.resolved_training_policy["requested_mode"] == "auto"
+    assert record.resolved_training_policy["row_subsample"] == pytest.approx(0.9)
+    assert record.resolved_training_policy["row_subsample"] != record.constructed_estimator_params["row_subsample"]

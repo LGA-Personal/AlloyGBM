@@ -62,9 +62,14 @@ class _TrackingAlloyRegressor:
             "native_bridge_prepare_seconds": 0.02,
             "native_train_seconds": 0.03,
         }
+        self.resolved_training_policy_ = None
+
+    def get_params(self) -> dict[str, object]:
+        return self.kwargs
 
     def fit(self, X: object, y: object) -> "_TrackingAlloyRegressor":
         type(self).fit_input = X
+        self.resolved_training_policy_ = {"requested_mode": "manual"}
         return self
 
     def predict(self, X: object) -> list[float]:
@@ -85,8 +90,13 @@ class _TrackingAlloyClassifier:
             "native_bridge_prepare_seconds": 0.02,
             "native_train_seconds": 0.03,
         }
+        self.resolved_training_policy_ = None
+
+    def get_params(self) -> dict[str, object]:
+        return self.kwargs
 
     def fit(self, X: object, y: object) -> "_TrackingAlloyClassifier":
+        self.resolved_training_policy_ = {"requested_mode": "manual"}
         return self
 
     def predict_proba(self, X: object) -> np.ndarray:
@@ -107,8 +117,13 @@ class _TrackingAlloyRanker:
             "native_bridge_prepare_seconds": 0.02,
             "native_train_seconds": 0.03,
         }
+        self.resolved_training_policy_ = None
+
+    def get_params(self) -> dict[str, object]:
+        return self.kwargs
 
     def fit(self, X: object, y: object, group: object = None) -> "_TrackingAlloyRanker":
+        self.resolved_training_policy_ = {"requested_mode": "manual"}
         return self
 
     def predict(self, X: object) -> list[float]:

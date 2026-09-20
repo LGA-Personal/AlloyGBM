@@ -140,8 +140,8 @@ def _json_safe_dict(values: dict[str, object]) -> dict[str, object]:
     return {key: _json_safe(value) for key, value in values.items()}
 
 
-def _effective_estimator_params(model: object) -> dict[str, object] | None:
-    """Return the constructed estimator's parameters when it exposes them."""
+def _constructed_estimator_params(model: object) -> dict[str, object] | None:
+    """Return constructor parameters from the estimator's ``get_params``."""
     candidates = [model]
     nested_model = getattr(model, "_model", None)
     if nested_model is not None:
@@ -162,6 +162,20 @@ def _effective_estimator_params(model: object) -> dict[str, object] | None:
         if isinstance(params, dict):
             return _json_safe_dict(params)
     return None
+
+
+def _resolved_training_policy(
+    model: object, model_name: str
+) -> dict[str, object] | None:
+    """Capture AlloyGBM's post-fit resolved controls as distinct provenance."""
+    if not model_name.startswith("alloygbm"):
+        return None
+    policy = getattr(model, "resolved_training_policy_", None)
+    if not isinstance(policy, dict):
+        raise RuntimeError(
+            f"{model_name} did not expose resolved_training_policy_ after fit"
+        )
+    return _json_safe_dict(policy)
 
 
 @dataclass
@@ -194,7 +208,8 @@ class BenchmarkRecord:
     ndcg_10: float
     ndcg_full: float
     requested_alloy_param_overrides: dict[str, object]
-    effective_estimator_params: dict[str, object] | None
+    constructed_estimator_params: dict[str, object] | None
+    resolved_training_policy: dict[str, object] | None
     status: str
     error: str
 
@@ -586,10 +601,15 @@ def _run_model(
 ) -> BenchmarkRecord:
     nan = float("nan")
     requested_params = _json_safe_dict(requested_alloy_param_overrides or {})
-    effective_params: dict[str, object] | None = None
+    constructed_params: dict[str, object] | None = None
+    resolved_policy: dict[str, object] | None = None
     try:
         model = factory()
-        effective_params = _effective_estimator_params(model)
+        constructed_params = _constructed_estimator_params(model)
+        if model_name.startswith("alloygbm") and constructed_params is None:
+            raise RuntimeError(
+                f"{model_name} did not expose constructor parameters through get_params()"
+            )
         fit_kwargs = {}
         if model_name in FACTOR_NEUTRAL_MODEL_NAMES:
             fit_kwargs["factor_exposures"] = _synthesize_factor_exposures(x_train)
@@ -600,6 +620,7 @@ def _run_model(
         else:
             model.fit(x_train, y_train, **fit_kwargs)
         fit_seconds = time.perf_counter() - fit_start
+        resolved_policy = _resolved_training_policy(model, model_name)
 
         fit_timing = getattr(model, "fit_timing_", None)
         input_adaptation_seconds = float(
@@ -698,7 +719,8 @@ def _run_model(
             ndcg_10=ndcg_10_val,
             ndcg_full=ndcg_full_val,
             requested_alloy_param_overrides=requested_params,
-            effective_estimator_params=effective_params,
+            constructed_estimator_params=constructed_params,
+            resolved_training_policy=resolved_policy,
             status="PASS",
             error="",
         )
@@ -732,7 +754,8 @@ def _run_model(
             ndcg_10=nan,
             ndcg_full=nan,
             requested_alloy_param_overrides=requested_params,
-            effective_estimator_params=effective_params,
+            constructed_estimator_params=constructed_params,
+            resolved_training_policy=resolved_policy,
             status="FAIL",
             error=f"{type(exc).__name__}: {exc}",
         )
@@ -1901,7 +1924,8 @@ def main(argv: list[str]) -> int:
             accuracy=nan, log_loss_val=nan, auc=nan,
             ndcg_5=nan, ndcg_10=nan, ndcg_full=nan,
             requested_alloy_param_overrides=_json_safe_dict(alloy_param_overrides),
-            effective_estimator_params=None,
+            constructed_estimator_params=None,
+            resolved_training_policy=None,
             status="FAIL", error=error,
         )
 
