@@ -347,7 +347,9 @@ def test_saved_result_replay_uses_persisted_task_identity_without_current_manife
     ]["candidate"]["median"] == 1.0
 
 
-def test_new_output_manifest_exists_before_preparation_logs_and_allows_resume(tmp_path, monkeypatch):
+def test_failed_preparation_resume_can_finish_initialization_without_external_baseline(
+    tmp_path, monkeypatch
+):
     import accuracy_depth_sweep as sweep
 
     output_dir = tmp_path / "fresh-experiment"
@@ -386,28 +388,59 @@ def test_new_output_manifest_exists_before_preparation_logs_and_allows_resume(tm
         },
     )
 
-    def fail_preparation(_repo_root, _scenario, target_root):
-        assert (target_root / "manifest.json").is_file()
-        log = target_root / "preparation" / "dense_numeric.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text("partial preparation", encoding="utf-8")
-        raise RuntimeError("simulated preparation failure")
+    preparation_calls = 0
 
-    monkeypatch.setattr(sweep, "ensure_dataset", fail_preparation)
-    for resume in (False, True):
-        with pytest.raises(RuntimeError, match="simulated preparation failure"):
-            run_sweep(
-                output_dir=output_dir,
-                repo_root=repo_root,
-                config=config,
-                arms=arms,
-                baseline_arm="baseline",
-                resume=resume,
-                external_baseline_path=None,
-                external_baseline_arm=None,
-            )
+    def fail_then_prepare(_repo_root, _scenario, target_root):
+        nonlocal preparation_calls
+        preparation_calls += 1
+        assert (target_root / "manifest.json").is_file()
+        if preparation_calls == 1:
+            log = target_root / "preparation" / "dense_numeric.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("partial preparation", encoding="utf-8")
+            raise RuntimeError("simulated preparation failure")
+        return {
+            "manifest_path": "benchmarks/dense_numeric/manifest.yaml",
+            "manifest_sha256": "manifest-hash",
+            "prepared_path": "benchmarks/data/dense_numeric/prepared.csv",
+            "prepared_sha256": "prepared-hash",
+            "prepared_bytes": 1,
+            "task_type": "regression",
+        }
+
+    def stop_before_fit(_command, _repo_root, log_path):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("simulated child failure before fitting", encoding="utf-8")
+        return 1
+
+    monkeypatch.setattr(sweep, "ensure_dataset", fail_then_prepare)
+    monkeypatch.setattr(sweep, "_stream_child", stop_before_fit)
+    with pytest.raises(RuntimeError, match="simulated preparation failure"):
+        run_sweep(
+            output_dir=output_dir,
+            repo_root=repo_root,
+            config=config,
+            arms=arms,
+            baseline_arm="baseline",
+            resume=False,
+            external_baseline_path=None,
+            external_baseline_arm=None,
+        )
+    with pytest.raises(sweep.RunnerExitError, match="failed with exit 1"):
+        run_sweep(
+            output_dir=output_dir,
+            repo_root=repo_root,
+            config=config,
+            arms=arms,
+            baseline_arm="baseline",
+            resume=True,
+            external_baseline_path=None,
+            external_baseline_arm=None,
+        )
+    assert preparation_calls == 2
     manifest = json.loads((output_dir / "manifest.json").read_text())
-    assert manifest["status"] == "INITIALIZING"
+    assert manifest["status"] == "READY"
+    assert manifest["units"]["d6/baseline/s11"]["status"] == "FAIL"
 
 
 def test_missing_duplicate_failed_and_nonfinite_cells_are_rejected():

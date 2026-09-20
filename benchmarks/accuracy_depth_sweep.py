@@ -1268,7 +1268,7 @@ def run_sweep(
             verify_resume_compatibility(saved, current)
         elif (saved.get("external_baseline") or {}).get("treatment_identity") not in (
             None,
-            current.get("external_baseline", {}).get("treatment_identity"),
+            (current.get("external_baseline") or {}).get("treatment_identity"),
         ):
             raise ValueError("resume mismatch: external baseline")
         manifest.update(
