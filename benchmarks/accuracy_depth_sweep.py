@@ -1010,8 +1010,8 @@ def _render_analysis_report(
         [
             "## Guard results",
             "",
-            "Treatment status compares the candidate with the uncapped baseline: `REGRESSION` means the candidate is worse, `INCONCLUSIVE` means the relative comparison is undefined, and `CLEAR` means tie or improvement.",
-            "Peer status reports current candidate-versus-peer standing: `STANDING_DEFICIT` means the candidate loses to at least one selected peer beyond the scenario band, `INCONCLUSIVE` means at least one peer comparison is undefined and none is a loss, and `CLEAR` means all peer comparisons are ties or wins. Peer status is not a measure of change from the uncapped baseline.",
+            "Treatment status compares the candidate with the reference baseline arm: `REGRESSION` means the candidate loses beyond the scenario band, `INCONCLUSIVE` means the relative comparison is undefined, and `CLEAR` means tie or improvement.",
+            "Peer status reports current candidate-versus-peer standing: `STANDING_DEFICIT` means the candidate loses to at least one selected peer beyond the scenario band, `INCONCLUSIVE` means at least one peer comparison is undefined and none is a loss, and `CLEAR` means all peer comparisons are ties or wins. Peer status is not a measure of change from the reference baseline arm.",
             "",
         ]
     )

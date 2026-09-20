@@ -635,8 +635,9 @@ def test_markdown_report_includes_candidate_peer_and_absolute_seed_spreads():
     assert "Candidate median / spread" in report
     assert "| dense_numeric | probe | baseline | rmse |" in report
     assert "| dense_numeric | probe | lightgbm | rmse |" in report
-    assert "Treatment status compares the candidate with the uncapped baseline" in report
-    assert "Peer status is not a measure of change from the uncapped baseline" in report
+    assert "Treatment status compares the candidate with the reference baseline arm" in report
+    assert "`REGRESSION` means the candidate loses beyond the scenario band" in report
+    assert "Peer status is not a measure of change from the reference baseline arm" in report
     assert "current peer standing **" in report
     assert "0.1 (8.00%)" in report
 
