@@ -87,6 +87,83 @@ FACTOR_NEUTRAL_MODEL_NAMES = {
 }
 
 
+def parse_alloy_param_overrides(items: list[str]) -> dict[str, object]:
+    """Parse repeatable ``--alloy-param KEY=VALUE`` arguments."""
+    overrides: dict[str, object] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"--alloy-param expected KEY=VALUE, got {item!r}")
+        key, _, raw = item.partition("=")
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--alloy-param had an empty parameter name: {item!r}")
+        if key in overrides:
+            raise ValueError(f"--alloy-param parameter {key!r} was specified more than once")
+
+        raw = raw.strip()
+        if not raw:
+            raise ValueError(f"--alloy-param {key} requires a non-empty value")
+        try:
+            value: object = int(raw)
+        except ValueError:
+            try:
+                value = float(raw)
+            except ValueError:
+                if raw.lower() in ("true", "false"):
+                    value = raw.lower() == "true"
+                else:
+                    value = raw
+        if isinstance(value, float) and not np.isfinite(value):
+            raise ValueError(
+                f"--alloy-param {key} must be finite, got {raw!r}"
+            )
+        overrides[key] = value
+    return overrides
+
+
+def _json_safe(value: object) -> object:
+    """Convert estimator parameter values to stable JSON-compatible values."""
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, np.ndarray):
+        return [_json_safe(item) for item in value.tolist()]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return repr(value)
+
+
+def _json_safe_dict(values: dict[str, object]) -> dict[str, object]:
+    return {key: _json_safe(value) for key, value in values.items()}
+
+
+def _effective_estimator_params(model: object) -> dict[str, object] | None:
+    """Return the constructed estimator's parameters when it exposes them."""
+    candidates = [model]
+    nested_model = getattr(model, "_model", None)
+    if nested_model is not None:
+        candidates.append(nested_model)
+    for candidate in candidates:
+        get_params = getattr(candidate, "get_params", None)
+        if not callable(get_params):
+            continue
+        try:
+            params = get_params()
+        except TypeError:
+            try:
+                params = get_params(deep=False)
+            except Exception:  # noqa: BLE001
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(params, dict):
+            return _json_safe_dict(params)
+    return None
+
+
 @dataclass
 class BenchmarkRecord:
     scenario: str
@@ -116,6 +193,8 @@ class BenchmarkRecord:
     ndcg_5: float
     ndcg_10: float
     ndcg_full: float
+    requested_alloy_param_overrides: dict[str, object]
+    effective_estimator_params: dict[str, object] | None
     status: str
     error: str
 
@@ -503,10 +582,14 @@ def _run_model(
     task_type: str = "regression",
     group_train: np.ndarray | None = None,
     group_test: np.ndarray | None = None,
+    requested_alloy_param_overrides: dict[str, object] | None = None,
 ) -> BenchmarkRecord:
     nan = float("nan")
+    requested_params = _json_safe_dict(requested_alloy_param_overrides or {})
+    effective_params: dict[str, object] | None = None
     try:
         model = factory()
+        effective_params = _effective_estimator_params(model)
         fit_kwargs = {}
         if model_name in FACTOR_NEUTRAL_MODEL_NAMES:
             fit_kwargs["factor_exposures"] = _synthesize_factor_exposures(x_train)
@@ -614,6 +697,8 @@ def _run_model(
             ndcg_5=ndcg_5_val,
             ndcg_10=ndcg_10_val,
             ndcg_full=ndcg_full_val,
+            requested_alloy_param_overrides=requested_params,
+            effective_estimator_params=effective_params,
             status="PASS",
             error="",
         )
@@ -646,6 +731,8 @@ def _run_model(
             ndcg_5=nan,
             ndcg_10=nan,
             ndcg_full=nan,
+            requested_alloy_param_overrides=requested_params,
+            effective_estimator_params=effective_params,
             status="FAIL",
             error=f"{type(exc).__name__}: {exc}",
         )
@@ -665,21 +752,28 @@ def _make_alloygbm_morph(task_type, **kwargs):
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
            "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
-    return cls(training_mode="morph", **kwargs)
+    kwargs.setdefault("training_mode", "morph")
+    return cls(**kwargs)
 
 
 def _make_alloygbm_morph_cosine(task_type, **kwargs):
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
            "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
-    return cls(training_mode="morph", lr_schedule="warmup_cosine", lr_warmup_frac=0.1, **kwargs)
+    kwargs.setdefault("training_mode", "morph")
+    kwargs.setdefault("lr_schedule", "warmup_cosine")
+    kwargs.setdefault("lr_warmup_frac", 0.1)
+    return cls(**kwargs)
 
 
 def _make_alloygbm_dro(task_type, **kwargs):
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
            "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
-    return cls(leaf_solver="dro", dro_radius=0.05, dro_metric="wasserstein", **kwargs)
+    kwargs.setdefault("leaf_solver", "dro")
+    kwargs.setdefault("dro_radius", 0.05)
+    kwargs.setdefault("dro_metric", "wasserstein")
+    return cls(**kwargs)
 
 
 def _make_alloygbm_factor_neutral(cls: type, dro: bool = False, **kwargs):
@@ -691,9 +785,9 @@ def _make_alloygbm_factor_neutral(cls: type, dro: bool = False, **kwargs):
             for param in signature.parameters.values()
         )
         if "leaf_solver" in signature.parameters or accepts_kwargs:
-            params["leaf_solver"] = "dro"
+            params.setdefault("leaf_solver", "dro")
         if "dro_radius" in signature.parameters or accepts_kwargs:
-            params["dro_radius"] = 0.05
+            params.setdefault("dro_radius", 0.05)
     return cls(**params)
 
 
@@ -703,16 +797,27 @@ def _make_alloygbm_linear(task_type, **kwargs):
            "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
     # Linear leaves need weight regularisation to avoid divergence at high round counts.
     # Default lambda_l2=0.01 (from pl_trees_benchmark sweep); overridable via --linear-lambda-l2.
+    kwargs.setdefault("leaf_model", "linear")
     kwargs.setdefault("lambda_l2", 0.01)
-    return cls(leaf_model="linear", **kwargs)
+    return cls(**kwargs)
 
 
 def _make_alloygbm_morph_linear(task_type, **kwargs):
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
            "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
+    kwargs.setdefault("training_mode", "morph")
+    kwargs.setdefault("leaf_model", "linear")
     kwargs.setdefault("lambda_l2", 0.01)
-    return cls(training_mode="morph", leaf_model="linear", **kwargs)
+    return cls(**kwargs)
+
+
+def _with_linear_lambda_l2(
+    alloy_params: dict[str, object], linear_lambda_l2: float
+) -> dict[str, object]:
+    params = dict(alloy_params)
+    params.setdefault("lambda_l2", linear_lambda_l2)
+    return params
 
 
 def _model_factories(
@@ -726,45 +831,32 @@ def _model_factories(
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
     threads: int = 1,
+    alloy_param_overrides: dict[str, object] | None = None,
 ) -> dict:
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
 
-    alloy_signature = inspect.signature(gbm_regressor_cls.__init__)
-    alloy_params: dict[str, object] = {}
-    if "learning_rate" in alloy_signature.parameters:
-        alloy_params["learning_rate"] = learning_rate
-    if "max_depth" in alloy_signature.parameters:
-        alloy_params["max_depth"] = max_depth
-    if "n_estimators" in alloy_signature.parameters:
-        alloy_params["n_estimators"] = rounds
-    if "rounds" in alloy_signature.parameters:
-        alloy_params["rounds"] = rounds
-    if "row_subsample" in alloy_signature.parameters:
-        alloy_params["row_subsample"] = 0.8
-    if "col_subsample" in alloy_signature.parameters:
-        alloy_params["col_subsample"] = 0.8
-    if "seed" in alloy_signature.parameters:
-        alloy_params["seed"] = seed
-    if "deterministic" in alloy_signature.parameters:
-        alloy_params["deterministic"] = True
-    if "continuous_binning_strategy" in alloy_signature.parameters:
-        alloy_params["continuous_binning_strategy"] = alloy_continuous_binning_strategy
-    if "continuous_binning_max_bins" in alloy_signature.parameters:
-        alloy_params["continuous_binning_max_bins"] = alloy_continuous_binning_max_bins
-    # Fairness: same thread budget as every peer library (see _build_alloy_params).
-    if "n_jobs" in alloy_signature.parameters:
-        alloy_params["n_jobs"] = threads
+    alloy_params = _build_alloy_params(
+        gbm_regressor_cls,
+        seed,
+        learning_rate,
+        max_depth,
+        rounds,
+        alloy_continuous_binning_strategy,
+        alloy_continuous_binning_max_bins,
+        threads,
+        alloy_param_overrides,
+    )
 
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("regression", **alloy_params),
         "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_regressor_cls, **alloy_params),
         "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_regressor_cls, dro=True, **alloy_params),
-        "alloygbm_linear": lambda: _make_alloygbm_linear("regression", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("regression", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "alloygbm_morph": lambda: _make_alloygbm_morph("regression", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("regression", **alloy_params),
-        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("regression", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("regression", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "lightgbm": lambda: LGBMRegressor(
             objective="regression",
             learning_rate=learning_rate,
@@ -817,6 +909,7 @@ def _build_alloy_params(
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
     threads: int = 1,
+    alloy_param_overrides: dict[str, object] | None = None,
 ) -> dict[str, object]:
     sig = inspect.signature(cls.__init__)
     params: dict[str, object] = {}
@@ -845,6 +938,39 @@ def _build_alloy_params(
     # which inflated its measured fit speed by roughly its parallel speedup.
     if "n_jobs" in sig.parameters:
         params["n_jobs"] = threads
+
+    overrides = alloy_param_overrides or {}
+    shared_controls = {
+        "n_jobs": (threads, "--threads"),
+        "seed": (seed, "--seed"),
+        "max_depth": (max_depth, "--max-depth"),
+        "row_subsample": (0.8, "shared row_subsample"),
+        "col_subsample": (0.8, "shared col_subsample"),
+        "continuous_binning_strategy": (
+            alloy_continuous_binning_strategy,
+            "--alloy-continuous-binning-strategy",
+        ),
+        "continuous_binning_max_bins": (
+            alloy_continuous_binning_max_bins,
+            "--alloy-continuous-binning-max-bins",
+        ),
+    }
+    for name, value in overrides.items():
+        if name not in sig.parameters:
+            raise ValueError(
+                f"--alloy-param {name}= is not a parameter of {cls.__name__}; "
+                "check the spelling"
+            )
+        if isinstance(value, float) and not np.isfinite(value):
+            raise ValueError(f"--alloy-param {name} must be finite")
+        if name in shared_controls:
+            expected, control = shared_controls[name]
+            if value != expected:
+                raise ValueError(
+                    f"--alloy-param {name}={value!r} conflicts with shared CLI "
+                    f"control {control}={expected!r}; use the shared control"
+                )
+        params[name] = value
     return params
 
 
@@ -859,6 +985,7 @@ def _classifier_factories(
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
     threads: int = 1,
+    alloy_param_overrides: dict[str, object] | None = None,
 ) -> dict:
     from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
@@ -866,17 +993,17 @@ def _classifier_factories(
     alloy_params = _build_alloy_params(
         gbm_classifier_cls, seed, learning_rate, max_depth, rounds,
         alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
-        threads,
+        threads, alloy_param_overrides,
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("binary", **alloy_params),
         "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, **alloy_params),
         "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, dro=True, **alloy_params),
-        "alloygbm_linear": lambda: _make_alloygbm_linear("binary", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("binary", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "alloygbm_morph": lambda: _make_alloygbm_morph("binary", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("binary", **alloy_params),
-        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("binary", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("binary", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "lightgbm": lambda: LGBMClassifier(
             objective="binary",
             learning_rate=learning_rate,
@@ -933,6 +1060,7 @@ def _multiclass_classifier_factories(
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
     threads: int = 1,
+    alloy_param_overrides: dict[str, object] | None = None,
 ) -> dict:
     from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
@@ -940,17 +1068,17 @@ def _multiclass_classifier_factories(
     alloy_params = _build_alloy_params(
         gbm_classifier_cls, seed, learning_rate, max_depth, rounds,
         alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
-        threads,
+        threads, alloy_param_overrides,
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("multiclass", **alloy_params),
         "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, **alloy_params),
         "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, dro=True, **alloy_params),
-        "alloygbm_linear": lambda: _make_alloygbm_linear("multiclass", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("multiclass", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "alloygbm_morph": lambda: _make_alloygbm_morph("multiclass", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("multiclass", **alloy_params),
-        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("multiclass", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("multiclass", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "lightgbm": lambda: LGBMClassifier(
             objective="multiclass",
             num_class=n_classes,
@@ -1008,21 +1136,22 @@ def _ranker_factories(
     alloy_continuous_binning_max_bins: int,
     linear_lambda_l2: float = 0.01,
     threads: int = 1,
+    alloy_param_overrides: dict[str, object] | None = None,
 ) -> dict:
     alloy_params = _build_alloy_params(
         gbm_ranker_cls, seed, learning_rate, max_depth, rounds,
         alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
-        threads,
+        threads, alloy_param_overrides,
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("ranking", **alloy_params),
         "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_ranker_cls, **alloy_params),
         "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_ranker_cls, dro=True, **alloy_params),
-        "alloygbm_linear": lambda: _make_alloygbm_linear("ranking", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("ranking", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "alloygbm_morph": lambda: _make_alloygbm_morph("ranking", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("ranking", **alloy_params),
-        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("ranking", lambda_l2=linear_lambda_l2, **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("ranking", **_with_linear_lambda_l2(alloy_params, linear_lambda_l2)),
         "lightgbm": lambda: _LGBMRankerAdapter(
             objective="lambdarank",
             learning_rate=learning_rate,
@@ -1138,6 +1267,26 @@ def _resolve_profiles(
         rounds=args.rounds,
     )
     return [profile], [args.seed], False
+
+
+def _alloy_param_asymmetries(
+    overrides: dict[str, object], profiles: list[BenchmarkProfile]
+) -> dict[str, object]:
+    """Document Alloy-only learning-rate and round overrides against peers."""
+    asymmetries: dict[str, object] = {}
+    if "learning_rate" in overrides:
+        asymmetries["learning_rate"] = {
+            "alloy_value": overrides["learning_rate"],
+            "peer_parameter": "profile.learning_rate",
+            "peer_values": [profile.learning_rate for profile in profiles],
+        }
+    if "n_estimators" in overrides:
+        asymmetries["n_estimators"] = {
+            "alloy_value": overrides["n_estimators"],
+            "peer_parameter": "profile.rounds",
+            "peer_values": [profile.rounds for profile in profiles],
+        }
+    return asymmetries
 
 
 def _summarize_profiles(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1271,6 +1420,10 @@ def _render_results_markdown(
         f"- profile_mode: `{params['profile_mode']}`",
         f"- scenarios: `{', '.join(params['scenarios'])}`",
         f"- test_size: `{params['test_size']}`",
+        "- requested_alloy_param_overrides: "
+        f"`{json.dumps(params.get('requested_alloy_param_overrides', {}), sort_keys=True)}`",
+        "- alloy_parameter_asymmetries: "
+        f"`{json.dumps(params.get('alloy_parameter_asymmetries', {}), sort_keys=True)}`",
     ]
 
     if params["profile_mode"] == "single":
@@ -1591,6 +1744,16 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--force-prepare", action="store_true")
     parser.add_argument(
+        "--alloy-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "override an AlloyGBM estimator parameter for alloy* models "
+            "(repeatable); changes are recorded in result provenance"
+        ),
+    )
+    parser.add_argument(
         "--profile-grid",
         choices=["none", "default", "default_ultra"],
         default="none",
@@ -1637,6 +1800,22 @@ def main(argv: list[str]) -> int:
         default=Path("benchmarks") / "results",
     )
     args = parser.parse_args(argv)
+
+    try:
+        alloy_param_overrides = parse_alloy_param_overrides(args.alloy_param)
+    except ValueError as exc:
+        print(f"invalid --alloy-param: {exc}", file=sys.stderr)
+        return 2
+    if (
+        alloy_param_overrides
+        and args.models
+        and not any(model_name.startswith("alloygbm") for model_name in args.models)
+    ):
+        print(
+            "invalid --alloy-param: no selected AlloyGBM model will receive the overrides",
+            file=sys.stderr,
+        )
+        return 2
 
     if not (2 <= args.alloy_continuous_binning_max_bins <= 256):
         print(
@@ -1721,6 +1900,8 @@ def main(argv: list[str]) -> int:
             rmse=nan, mae=nan, r2=nan,
             accuracy=nan, log_loss_val=nan, auc=nan,
             ndcg_5=nan, ndcg_10=nan, ndcg_full=nan,
+            requested_alloy_param_overrides=_json_safe_dict(alloy_param_overrides),
+            effective_estimator_params=None,
             status="FAIL", error=error,
         )
 
@@ -1746,6 +1927,7 @@ def main(argv: list[str]) -> int:
                 alloy_continuous_binning_max_bins=args.alloy_continuous_binning_max_bins,
                 linear_lambda_l2=args.linear_lambda_l2,
                 threads=resolved_threads,
+                alloy_param_overrides=alloy_param_overrides,
             )
 
             for scenario in args.scenarios:
@@ -1759,37 +1941,41 @@ def main(argv: list[str]) -> int:
                 # Select factories for this task type.
                 # For multiclass_classification, factories are deferred until
                 # after _split_dataset because n_classes requires y_train.
-                if task_type == "classification":
-                    factories = _classifier_factories(
-                        gbm_classifier_cls=gbm_classifier_cls,
-                        catboost_classifier_cls=catboost_classifier_cls,
-                        **common_factory_args,
-                    )
-                    factories, missing_models = _apply_model_filter(factories)
-                elif task_type == "multiclass_classification":
-                    # Use a placeholder factory dict for error-record model names;
-                    # real factories are built after _split_dataset below.
-                    factories = _multiclass_classifier_factories(
-                        gbm_classifier_cls=gbm_classifier_cls,
-                        catboost_classifier_cls=catboost_classifier_cls,
-                        n_classes=2,  # placeholder; overwritten after split
-                        **common_factory_args,
-                    )
-                    factories, missing_models = _apply_model_filter(factories)
-                elif task_type == "ranking":
-                    factories = _ranker_factories(
-                        gbm_ranker_cls=gbm_ranker_cls,
-                        catboost_available=catboost_ranker_available,
-                        **common_factory_args,
-                    )
-                    factories, missing_models = _apply_model_filter(factories)
-                else:
-                    factories = _model_factories(
-                        gbm_regressor_cls=gbm_regressor_cls,
-                        catboost_regressor_cls=catboost_regressor_cls,
-                        **common_factory_args,
-                    )
-                    factories, missing_models = _apply_model_filter(factories)
+                try:
+                    if task_type == "classification":
+                        factories = _classifier_factories(
+                            gbm_classifier_cls=gbm_classifier_cls,
+                            catboost_classifier_cls=catboost_classifier_cls,
+                            **common_factory_args,
+                        )
+                        factories, missing_models = _apply_model_filter(factories)
+                    elif task_type == "multiclass_classification":
+                        # Use a placeholder factory dict for error-record model names;
+                        # real factories are built after _split_dataset below.
+                        factories = _multiclass_classifier_factories(
+                            gbm_classifier_cls=gbm_classifier_cls,
+                            catboost_classifier_cls=catboost_classifier_cls,
+                            n_classes=2,  # placeholder; overwritten after split
+                            **common_factory_args,
+                        )
+                        factories, missing_models = _apply_model_filter(factories)
+                    elif task_type == "ranking":
+                        factories = _ranker_factories(
+                            gbm_ranker_cls=gbm_ranker_cls,
+                            catboost_available=catboost_ranker_available,
+                            **common_factory_args,
+                        )
+                        factories, missing_models = _apply_model_filter(factories)
+                    else:
+                        factories = _model_factories(
+                            gbm_regressor_cls=gbm_regressor_cls,
+                            catboost_regressor_cls=catboost_regressor_cls,
+                            **common_factory_args,
+                        )
+                        factories, missing_models = _apply_model_filter(factories)
+                except ValueError as exc:
+                    print(f"invalid --alloy-param: {exc}", file=sys.stderr)
+                    return 2
 
                 for model_name in missing_models:
                     records.append(_make_fail_record(
@@ -1852,6 +2038,7 @@ def main(argv: list[str]) -> int:
                         task_type=task_type,
                         group_train=g_train,
                         group_test=g_test,
+                        requested_alloy_param_overrides=alloy_param_overrides,
                     )
                     records.append(record)
                     timing_str = (
@@ -1875,6 +2062,9 @@ def main(argv: list[str]) -> int:
                         print(f"  error: {record.error}")
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    alloy_asymmetries = _alloy_param_asymmetries(
+        alloy_param_overrides, profiles
+    )
     params = {
         "profile_mode": "matrix" if matrix_mode else "single",
         "profile_grid": args.profile_grid,
@@ -1886,6 +2076,10 @@ def main(argv: list[str]) -> int:
         "rounds": args.rounds,
         "alloy_continuous_binning_strategy": args.alloy_continuous_binning_strategy,
         "alloy_continuous_binning_max_bins": args.alloy_continuous_binning_max_bins,
+        "alloy_param_cli": args.alloy_param,
+        "requested_alloy_param_overrides": _json_safe_dict(alloy_param_overrides),
+        "alloy_only_parameter_treatments": _json_safe_dict(alloy_param_overrides),
+        "alloy_parameter_asymmetries": alloy_asymmetries,
         "test_size": args.test_size,
         "scenarios": args.scenarios,
         "models_filter": args.models,
@@ -1912,7 +2106,10 @@ def main(argv: list[str]) -> int:
                 "row/column subsampling, and seed. LightGBM additionally needs "
                 "subsample_freq>=1 for bagging to apply at all, and "
                 "num_leaves=2**max_depth so its leaf-wise growth reaches the "
-                "same capacity as the depth-wise peers."
+                "same capacity as the depth-wise peers. --alloy-param changes "
+                "apply only to AlloyGBM and are recorded per run; learning_rate "
+                "and n_estimators overrides are explicitly asymmetric against "
+                "the peer profile controls."
             ),
         },
     }
