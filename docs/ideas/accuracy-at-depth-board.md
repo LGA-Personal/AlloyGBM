@@ -19,6 +19,8 @@ closed 18 ideas, and the method that worked there is the method proposed here.
 
 ---
 
+Execution updates and source-verified corrections to the sequential probe plan are recorded in [execution oversight notes](accuracy-depth-execution-notes.md).
+
 ## 1. What we measured
 
 Full curated suite (16 scenarios, 4 libraries), five depths, one and ten threads,
