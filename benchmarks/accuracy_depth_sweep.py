@@ -514,20 +514,34 @@ def analyse_cells(
         if scenario_entry is None:
             output["guards"][guard] = {
                 "status": "NOT_RUN",
+                "peer_status": "NOT_RUN",
                 "candidate_vs_baseline": None,
                 "candidate_vs_peers": {},
             }
             continue
-        comparisons = [scenario_entry["candidate_vs_baseline"], *scenario_entry["candidate_vs_peers"].values()]
-        verdicts = [comparison["verdict"] for comparison in comparisons]
-        if any(verdict == "loss" for verdict in verdicts):
+        baseline_verdict = scenario_entry["candidate_vs_baseline"]["verdict"]
+        if baseline_verdict == "loss":
             status = "REGRESSION"
-        elif any(verdict is None for verdict in verdicts):
+        elif baseline_verdict is None:
             status = "INCONCLUSIVE"
         else:
             status = "CLEAR"
+
+        peer_verdicts = [
+            comparison["verdict"]
+            for comparison in scenario_entry["candidate_vs_peers"].values()
+        ]
+        if not peer_verdicts:
+            peer_status = "NOT_RUN"
+        elif any(verdict == "loss" for verdict in peer_verdicts):
+            peer_status = "STANDING_DEFICIT"
+        elif any(verdict is None for verdict in peer_verdicts):
+            peer_status = "INCONCLUSIVE"
+        else:
+            peer_status = "CLEAR"
         output["guards"][guard] = {
             "status": status,
+            "peer_status": peer_status,
             "candidate_vs_baseline": scenario_entry["candidate_vs_baseline"],
             "candidate_vs_peers": scenario_entry["candidate_vs_peers"],
         }
@@ -992,11 +1006,22 @@ def _render_analysis_report(
                         f"| {band_text} | {verdict} |"
                     )
         lines.append("")
-    lines.extend(["## Guard results", ""])
+    lines.extend(
+        [
+            "## Guard results",
+            "",
+            "Treatment status compares the candidate with the uncapped baseline: `REGRESSION` means the candidate is worse, `INCONCLUSIVE` means the relative comparison is undefined, and `CLEAR` means tie or improvement.",
+            "Peer status reports current candidate-versus-peer standing: `STANDING_DEFICIT` means the candidate loses to at least one selected peer beyond the scenario band, `INCONCLUSIVE` means at least one peer comparison is undefined and none is a loss, and `CLEAR` means all peer comparisons are ties or wins. Peer status is not a measure of change from the uncapped baseline.",
+            "",
+        ]
+    )
     for depth_key, arm_results in results.items():
         for arm_name, analysis in arm_results.items():
             for guard, entry in analysis["guards"].items():
-                lines.append(f"- {depth_key}, {arm_name}, {guard}: **{entry['status']}**.")
+                lines.append(
+                    f"- {depth_key}, {arm_name}, {guard}: treatment **{entry['status']}**; "
+                    f"current peer standing **{entry['peer_status']}**."
+                )
     lines.append("")
     return "\n".join(lines)
 

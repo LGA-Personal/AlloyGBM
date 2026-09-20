@@ -499,7 +499,67 @@ def test_paired_seed_analysis_uses_per_scenario_spread_and_detects_guard_regress
     ]
     assert comparison["verdict"] == "loss"
     assert analysis["guards"]["histogram_stress"]["status"] == "REGRESSION"
+    assert analysis["guards"]["histogram_stress"]["peer_status"] == "STANDING_DEFICIT"
     assert analysis["guards"]["panel_time_series"]["status"] == "NOT_RUN"
+    assert analysis["guards"]["panel_time_series"]["peer_status"] == "NOT_RUN"
+
+
+def test_unchanged_baseline_with_standing_peer_deficit_is_not_treatment_regression():
+    candidate = {}
+    for seed, alloy, peer in ((11, 1.0, 0.5), (12, 1.1, 0.6)):
+        candidate[("panel_time_series", "alloygbm", seed)] = {
+            "metric": "rmse",
+            "value": alloy,
+        }
+        candidate[("panel_time_series", "lightgbm", seed)] = {
+            "metric": "rmse",
+            "value": peer,
+        }
+    baseline = {
+        ("panel_time_series", "alloygbm", seed): {
+            "metric": "rmse",
+            "value": value,
+        }
+        for seed, value in ((11, 1.0), (12, 1.1))
+    }
+    analysis = analyse_cells(
+        candidate,
+        baseline,
+        ["panel_time_series"],
+        ["alloygbm", "lightgbm"],
+        [11, 12],
+        "uncapped",
+        candidate_model="alloygbm",
+    )
+    guard = analysis["guards"]["panel_time_series"]
+    assert guard["candidate_vs_baseline"]["verdict"] == "tie"
+    assert guard["candidate_vs_peers"]["lightgbm"]["verdict"] == "loss"
+    assert guard["status"] == "CLEAR"
+    assert guard["peer_status"] == "STANDING_DEFICIT"
+
+
+def test_guard_baseline_with_undefined_relative_comparison_is_inconclusive():
+    candidate = {
+        ("histogram_stress", "alloygbm", seed): {"metric": "rmse", "value": 1.0}
+        for seed in (11, 12)
+    }
+    baseline = {
+        ("histogram_stress", "alloygbm", seed): {"metric": "rmse", "value": 0.0}
+        for seed in (11, 12)
+    }
+    analysis = analyse_cells(
+        candidate,
+        baseline,
+        ["histogram_stress"],
+        ["alloygbm"],
+        [11, 12],
+        "uncapped",
+        candidate_model="alloygbm",
+    )
+    guard = analysis["guards"]["histogram_stress"]
+    assert guard["candidate_vs_baseline"]["verdict"] is None
+    assert guard["status"] == "INCONCLUSIVE"
+    assert guard["peer_status"] == "NOT_RUN"
 
 
 def test_analyse_cells_preserves_raw_seed_metrics_and_zero_reference_absolute_gap():
@@ -575,6 +635,9 @@ def test_markdown_report_includes_candidate_peer_and_absolute_seed_spreads():
     assert "Candidate median / spread" in report
     assert "| dense_numeric | probe | baseline | rmse |" in report
     assert "| dense_numeric | probe | lightgbm | rmse |" in report
+    assert "Treatment status compares the candidate with the uncapped baseline" in report
+    assert "Peer status is not a measure of change from the uncapped baseline" in report
+    assert "current peer standing **" in report
     assert "0.1 (8.00%)" in report
 
 
