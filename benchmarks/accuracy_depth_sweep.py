@@ -865,6 +865,197 @@ def _save_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
+def verify_reused_peers_by_refit(
+    *,
+    repo_root: Path,
+    output_dir: Path,
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+    reference_loaded: dict[tuple[str, int], dict[tuple[str, str, int], dict[str, Any]]],
+    reference_arm: str,
+) -> dict[str, Any]:
+    """Refit the reused peers for one cell and demand exact agreement.
+
+    The static provenance checks enumerate what could invalidate reuse; this one
+    does not have to. Peer library versions are not recorded in the manifest, so a
+    silent LightGBM or XGBoost upgrade between runs would pass every static check
+    while changing every reused number. Refitting one cell converts the assumption
+    into an observation, and a mismatch here means the whole reuse is unsound.
+    """
+    peers = _reused_peer_models(config)
+    depth = config["depths"][0]
+    seed = config["seeds"][0]
+    identities = manifest.get("dataset_identities") or {}
+    scenario = min(
+        config["scenarios"],
+        key=lambda name: (
+            (identities.get(name) or {}).get("prepared_bytes") or float("inf"),
+            name,
+        ),
+    )
+    target_dir = output_dir / "peer_verification" / f"d{depth}" / f"s{seed}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    command = build_runner_command(
+        repo_root=repo_root,
+        target_dir=target_dir,
+        overrides=[],
+        depth=depth,
+        seed=seed,
+        args={
+            "scenarios": [scenario],
+            "models": peers,
+            "threads": config["threads"],
+            "rounds": config["rounds"],
+            "learning_rate": config["learning_rate"],
+            "binning_strategy": config["binning_strategy"],
+            "bin_count": config["bin_count"],
+        },
+    )
+    print(
+        f"[peer-reuse] verifying reuse by refitting {','.join(peers)} on "
+        f"{scenario} d{depth} s{seed}",
+        flush=True,
+    )
+    completed = subprocess.run(command, cwd=repo_root, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise ValueError(
+            "peer reuse verification refit failed:\n"
+            + (completed.stdout or "")[-2000:]
+            + (completed.stderr or "")[-2000:]
+        )
+    payload = json.loads((target_dir / RESULT_NAME).read_text(encoding="utf-8"))
+    fresh = {
+        (record.get("scenario"), record.get("model"), record.get("seed")): record
+        for record in payload.get("records", [])
+        if isinstance(record, dict)
+    }
+    source = reference_loaded[(reference_arm, depth)]
+    checked: dict[str, Any] = {}
+    mismatches: list[str] = []
+    for model in peers:
+        key = (scenario, model, seed)
+        if key not in fresh:
+            raise ValueError(f"peer reuse verification produced no cell {key!r}")
+        if key not in source:
+            raise ValueError(f"peer reuse verification has no reused cell {key!r}")
+        metric = _metric_for_record(fresh[key])
+        new_value = fresh[key].get(metric)
+        old_value = source[key].get(metric)
+        checked[model] = {"metric": metric, "reused": old_value, "refit": new_value}
+        if repr(new_value) != repr(old_value):
+            mismatches.append(
+                f"{model}.{metric}: reused {old_value!r} but refit gives {new_value!r}"
+            )
+    if mismatches:
+        raise ValueError(
+            "peer reuse verification FAILED -- reused peer numbers do not reproduce. "
+            "Re-run without --reuse-peer-measurements.\n  " + "\n  ".join(mismatches)
+        )
+    print(f"[peer-reuse] verification passed on {scenario} for {len(peers)} peers", flush=True)
+    return {"scenario": scenario, "depth": depth, "seed": seed, "models": checked}
+
+
+def _reused_peer_models(config: dict[str, Any]) -> list[str]:
+    """Peer models that are reused rather than refitted, in analysis order."""
+    fitted = set(config.get("fitted_models") or config["models"])
+    return [model for model in config["models"] if model not in fitted]
+
+
+def verify_reused_peer_provenance(
+    *,
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+    external_manifest: dict[str, Any],
+) -> None:
+    """Refuse peer reuse unless the source ran the identical protocol on identical data.
+
+    Reusing peer numbers is only sound while nothing that could move them has
+    changed. Peer fits do not observe AlloyGBM overrides, but they do observe the
+    protocol and the data, so both are checked here rather than assumed.
+    """
+    source = external_manifest["config"]
+    for key in (
+        "rounds",
+        "learning_rate",
+        "threads",
+        "binning_strategy",
+        "bin_count",
+        "profile_name",
+    ):
+        if source.get(key) != config.get(key):
+            raise ValueError(
+                f"peer reuse refused: {key} differs (source {source.get(key)!r} vs "
+                f"this run {config.get(key)!r})"
+            )
+    for key in ("depths", "seeds", "scenarios"):
+        missing = sorted(set(config[key]) - set(source.get(key) or []))
+        if missing:
+            raise ValueError(
+                f"peer reuse refused: source run lacks {key} {missing!r}"
+            )
+    missing_models = sorted(set(_reused_peer_models(config)) - set(source.get("models") or []))
+    if missing_models:
+        raise ValueError(
+            f"peer reuse refused: source run lacks models {missing_models!r}"
+        )
+    # Data drift is the failure this guard exists for: identical protocol over a
+    # regenerated fixture would silently compare against peers fit on other rows.
+    here = manifest.get("dataset_identities") or {}
+    there = external_manifest.get("dataset_identities") or {}
+    for scenario in config["scenarios"]:
+        mine, theirs = here.get(scenario), there.get(scenario)
+        if not mine or not theirs:
+            raise ValueError(
+                f"peer reuse refused: missing dataset identity for {scenario!r}"
+            )
+        if mine.get("prepared_sha256") != theirs.get("prepared_sha256"):
+            raise ValueError(
+                f"peer reuse refused: prepared data for {scenario!r} changed since the "
+                "source run (sha256 mismatch)"
+            )
+
+
+def merge_reused_peer_cells(
+    loaded: dict[tuple[str, int], dict[tuple[str, str, int], dict[str, Any]]],
+    reference_loaded: dict[tuple[str, int], dict[tuple[str, str, int], dict[str, Any]]],
+    *,
+    reference_arm: str,
+    config: dict[str, Any],
+    arms: list[str],
+) -> int:
+    """Copy reused peer cells from the source run into every local arm's cells."""
+    peers = _reused_peer_models(config)
+    if not peers:
+        return 0
+    copied = 0
+    for depth in config["depths"]:
+        source = reference_loaded.get((reference_arm, depth))
+        if source is None:
+            raise ValueError(f"peer reuse: source run has no cells at depth {depth}")
+        for arm in arms:
+            target = loaded[(arm, depth)]
+            for (scenario, model, seed), record in source.items():
+                if model not in peers:
+                    continue
+                key = (scenario, model, seed)
+                if key in target:
+                    raise ValueError(f"peer reuse: {key!r} already present in arm {arm!r}")
+                target[key] = record
+                copied += 1
+    for depth in config["depths"]:
+        for arm in arms:
+            expected = {
+                (scenario, model, seed)
+                for scenario in config["scenarios"]
+                for model in config["models"]
+                for seed in config["seeds"]
+            }
+            if set(loaded[(arm, depth)]) != expected:
+                missing = sorted(expected - set(loaded[(arm, depth)]))
+                raise ValueError(f"peer reuse left arm {arm!r} d{depth} incomplete: {missing!r}")
+    return copied
+
+
 def _load_experiment_cells(
     manifest: dict[str, Any],
     experiment_root: Path,
@@ -897,7 +1088,7 @@ def _load_experiment_cells(
                     result_path,
                     expected_run_id=unit.get("result_run_id"),
                     scenarios=config["scenarios"],
-                    models=config["models"],
+                    models=config.get("fitted_models") or config["models"],
                     seed=seed,
                     depth=depth,
                     rounds=config["rounds"],
@@ -1111,6 +1302,15 @@ def _validate_cli(args: argparse.Namespace) -> tuple[list[int], list[int], dict[
     arms = parse_arm_specs(args.arm) if args.arm else {}
     if not args.analyze_only and not arms:
         raise ValueError("at least one --arm NAME:KEY=VALUE[,KEY=VALUE] is required")
+    if args.reuse_peer_measurements and not args.external_baseline:
+        raise ValueError(
+            "--reuse-peer-measurements requires --external-baseline: peer records are "
+            "reused from that same run, so there is exactly one provenance path"
+        )
+    if args.reuse_peer_measurements and len(models) == 1:
+        raise ValueError(
+            "--reuse-peer-measurements needs peer models in --models to reuse"
+        )
     if not args.external_baseline and not args.analyze_only and args.baseline_arm not in arms:
         raise ValueError(f"--baseline-arm {args.baseline_arm!r} is not among --arm names")
     config = {
@@ -1118,6 +1318,9 @@ def _validate_cli(args: argparse.Namespace) -> tuple[list[int], list[int], dict[
         "seeds": seeds,
         "scenarios": scenarios,
         "models": models,
+        "fitted_models": (
+            [candidate_model] if args.reuse_peer_measurements else list(models)
+        ),
         "candidate_model": candidate_model,
         "rounds": args.rounds,
         "learning_rate": args.learning_rate,
@@ -1323,7 +1526,7 @@ def run_sweep(
                             result_path,
                             expected_run_id=unit.get("result_run_id"),
                             scenarios=config["scenarios"],
-                            models=config["models"],
+                            models=config.get("fitted_models") or config["models"],
                             seed=seed,
                             depth=depth,
                             rounds=config["rounds"],
@@ -1343,7 +1546,7 @@ def run_sweep(
                         print(f"[resume] rerunning unverifiable unit {unit_key}", flush=True)
                 command_args = {
                     "scenarios": config["scenarios"],
-                    "models": config["models"],
+                    "models": config.get("fitted_models") or config["models"],
                     "threads": config["threads"],
                     "rounds": config["rounds"],
                     "learning_rate": config["learning_rate"],
@@ -1389,7 +1592,7 @@ def run_sweep(
                         result_path,
                         expected_run_id=None,
                         scenarios=config["scenarios"],
-                        models=config["models"],
+                        models=config.get("fitted_models") or config["models"],
                         seed=seed,
                         depth=depth,
                         rounds=config["rounds"],
@@ -1465,6 +1668,41 @@ def run_sweep(
         _save_json(manifest_path, manifest)
     elif baseline_arm not in arms:
         raise ValueError(f"baseline arm {baseline_arm!r} is not present")
+    if _reused_peer_models(config):
+        if external_manifest is None:
+            raise ValueError("peer reuse requires a loaded external baseline manifest")
+        verify_reused_peer_provenance(
+            config=config, manifest=manifest, external_manifest=external_manifest
+        )
+        verification = verify_reused_peers_by_refit(
+            repo_root=repo_root,
+            output_dir=output_dir,
+            config=config,
+            manifest=manifest,
+            reference_loaded=reference_loaded,
+            reference_arm=reference_arm,
+        )
+        copied = merge_reused_peer_cells(
+            loaded,
+            reference_loaded,
+            reference_arm=reference_arm,
+            config=config,
+            arms=local_arm_names,
+        )
+        manifest["reused_peer_measurements"] = {
+            "source_path": str(external_root),
+            "source_arm": reference_arm,
+            "source_git_sha": (external_manifest.get("source_state") or {}).get("git_sha"),
+            "models": _reused_peer_models(config),
+            "cells_copied": copied,
+            "verified_by_refit": verification,
+        }
+        print(
+            f"[peer-reuse] reused {copied} peer cells from {external_root} "
+            f"(arm {reference_arm})",
+            flush=True,
+        )
+        _save_json(manifest_path, manifest)
     manifest["analysis_completed_utc"] = datetime.now(timezone.utc).isoformat()
     _save_json(manifest_path, manifest)
     _write_analysis(
@@ -1577,6 +1815,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-arm", default="baseline")
     parser.add_argument("--external-baseline", type=Path)
     parser.add_argument("--external-baseline-arm", default=None)
+    parser.add_argument(
+        "--reuse-peer-measurements",
+        action="store_true",
+        help=(
+            "fit only the candidate model and reuse peer (LightGBM/XGBoost/CatBoost) "
+            "records from the --external-baseline run. Peer results cannot depend on "
+            "AlloyGBM-only overrides, so refitting them per arm is pure waste. Requires "
+            "--external-baseline; a live re-fit of one cell verifies the reuse."
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--analyze-only", action="store_true")
     return parser

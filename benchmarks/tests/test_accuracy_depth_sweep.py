@@ -23,6 +23,9 @@ from accuracy_depth_sweep import (  # noqa: E402
     run_sweep,
     _render_analysis_report,
     analyse_saved_experiment,
+    _reused_peer_models,
+    merge_reused_peer_cells,
+    verify_reused_peer_provenance,
     _parser,
     _validate_cli,
     validate_external_baseline,
@@ -688,3 +691,119 @@ def test_external_baseline_requires_matched_configuration_and_datasets_but_allow
         validate_external_baseline(candidate, bad_config, baseline_arm="baseline")
     with pytest.raises(ValueError, match="external baseline mismatch.*dataset"):
         validate_external_baseline(candidate, _manifest(dataset="different"), baseline_arm="baseline")
+
+
+# --- peer measurement reuse ------------------------------------------------
+
+
+def _reuse_config(**overrides):
+    config = {
+        "depths": [6],
+        "seeds": [1],
+        "scenarios": ["alpha"],
+        "models": ["alloygbm", "lightgbm"],
+        "fitted_models": ["alloygbm"],
+        "candidate_model": "alloygbm",
+        "rounds": 120,
+        "learning_rate": 0.1,
+        "threads": 1,
+        "binning_strategy": "linear",
+        "bin_count": 256,
+        "profile_name": "single",
+    }
+    config.update(overrides)
+    return config
+
+
+def test_reused_peer_models_excludes_fitted_models():
+    assert _reused_peer_models(_reuse_config()) == ["lightgbm"]
+    assert _reused_peer_models(_reuse_config(fitted_models=["alloygbm", "lightgbm"])) == []
+
+
+def test_verify_reused_peer_provenance_accepts_matching_source():
+    config = _reuse_config()
+    source = {
+        "config": dict(config, models=["alloygbm", "lightgbm"], fitted_models=None),
+        "dataset_identities": {"alpha": {"prepared_sha256": "abc"}},
+    }
+    manifest = {"dataset_identities": {"alpha": {"prepared_sha256": "abc"}}}
+    verify_reused_peer_provenance(
+        config=config, manifest=manifest, external_manifest=source
+    )
+
+
+@pytest.mark.parametrize(
+    "source_override, expected",
+    [
+        ({"rounds": 200}, "rounds differs"),
+        ({"learning_rate": 0.05}, "learning_rate differs"),
+        ({"bin_count": 64}, "bin_count differs"),
+        ({"threads": 4}, "threads differs"),
+        ({"seeds": [99]}, "lacks seeds"),
+        ({"depths": [12]}, "lacks depths"),
+        ({"scenarios": ["beta"]}, "lacks scenarios"),
+        ({"models": ["alloygbm"]}, "lacks models"),
+    ],
+)
+def test_verify_reused_peer_provenance_rejects_protocol_drift(source_override, expected):
+    config = _reuse_config()
+    source_config = dict(config, models=["alloygbm", "lightgbm"])
+    source_config.update(source_override)
+    source = {
+        "config": source_config,
+        "dataset_identities": {
+            name: {"prepared_sha256": "abc"} for name in source_config["scenarios"]
+        },
+    }
+    manifest = {"dataset_identities": {"alpha": {"prepared_sha256": "abc"}}}
+    with pytest.raises(ValueError, match=expected):
+        verify_reused_peer_provenance(
+            config=config, manifest=manifest, external_manifest=source
+        )
+
+
+def test_verify_reused_peer_provenance_rejects_regenerated_data():
+    """The guard this exists for: same protocol, different rows underneath."""
+    config = _reuse_config()
+    source = {
+        "config": dict(config, models=["alloygbm", "lightgbm"]),
+        "dataset_identities": {"alpha": {"prepared_sha256": "OLD"}},
+    }
+    manifest = {"dataset_identities": {"alpha": {"prepared_sha256": "NEW"}}}
+    with pytest.raises(ValueError, match="prepared data for 'alpha' changed"):
+        verify_reused_peer_provenance(
+            config=config, manifest=manifest, external_manifest=source
+        )
+
+
+def test_merge_reused_peer_cells_fills_every_arm():
+    config = _reuse_config(seeds=[1, 2])
+    loaded = {
+        ("armA", 6): {("alpha", "alloygbm", 1): {"v": 1}, ("alpha", "alloygbm", 2): {"v": 2}},
+        ("armB", 6): {("alpha", "alloygbm", 1): {"v": 3}, ("alpha", "alloygbm", 2): {"v": 4}},
+    }
+    reference = {
+        ("base", 6): {
+            ("alpha", "lightgbm", 1): {"v": 10},
+            ("alpha", "lightgbm", 2): {"v": 20},
+            ("alpha", "alloygbm", 1): {"v": 99},
+        }
+    }
+    copied = merge_reused_peer_cells(
+        loaded, reference, reference_arm="base", config=config, arms=["armA", "armB"]
+    )
+    assert copied == 4
+    # The source arm's own candidate record must NOT leak into the treatment arms.
+    assert loaded[("armA", 6)][("alpha", "alloygbm", 1)] == {"v": 1}
+    assert loaded[("armA", 6)][("alpha", "lightgbm", 1)] == {"v": 10}
+    assert loaded[("armB", 6)][("alpha", "lightgbm", 2)] == {"v": 20}
+
+
+def test_merge_reused_peer_cells_rejects_incomplete_source():
+    config = _reuse_config(seeds=[1, 2])
+    loaded = {("armA", 6): {("alpha", "alloygbm", 1): {}, ("alpha", "alloygbm", 2): {}}}
+    reference = {("base", 6): {("alpha", "lightgbm", 1): {}}}  # seed 2 missing
+    with pytest.raises(ValueError, match="incomplete"):
+        merge_reused_peer_cells(
+            loaded, reference, reference_arm="base", config=config, arms=["armA"]
+        )
