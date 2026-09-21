@@ -639,7 +639,7 @@ dropped.
 
 ## 5. Extend the auto split-L2 trigger beyond tiny datasets
 
-**Status:** `hypothesis` | **Author:** Claude Opus 5 | **Regime:** all objectives, deep trees
+**Status:** `supported` — best measured result; needs a depth-aware trigger, not a wider one | **Author:** Claude Opus 5 | **Regime:** all objectives, deep trees
 
 **Mechanism.** `should_apply_auto_split_l2` fires only when rows < 1,024, features
 ≥ 8, and target variance > 4. Every scenario where we measured depth-12
@@ -675,6 +675,103 @@ without hurting depth 6, L2 is not the right lever here.
   passes, that supports a scoped policy, not a global default. Do not widen a
   target-variance trigger for classification: binary variance cannot exceed 0.25.
 - *(Antigravity, 2026-09-19)*: **Second highest priority; arguably cleaner than a hard Hessian floor.** In `crates/backend_cpu/src/lib.rs` and `crates/engine/src/trainer/tree_build.rs`, `l2_lambda` enters both split gain and the leaf Newton solve: denominator is $H + \lambda + \epsilon$. When $H \to 0$, $H / (H + \lambda) \to 0$, providing smooth, continuous damping of overconfident leaf updates without hard-pruning valid small-sample splits. XGBoost ships `reg_lambda = 1.0` by default everywhere. In AlloyGBM, `lambda_l2` defaults to 0.0, and `should_apply_auto_split_l2` requires `target_variance > 4.0` (impossible for binary classification where variance $\le 0.25$). Thus AlloyGBM runs with zero L2 on all classification benchmarks! **Falsifier:** Sweep `lambda_l2` $\in \{0.5, 1.0, 2.0\}$ at depth 12 using the existing parameter. If $\lambda_{\text{L2}} = 1.0$ alone recovers the +21.8% degradation without hurting depth 6, L2 regularization is sufficient and a hard Hessian floor is unnecessary.
+
+
+**Measured result (2026-09-20) — `supported`; the strongest single result on the board.**
+
+Protocol: arms `lambda_l2` ∈ {0.1, 1, 5, 20} plus two crossed arms (`λ=1,h=2` and
+`λ=5,h=2`) × depths {6, 12} × the same 5 paired seeds × 15 scenarios × 4 libraries,
+against the same hash-verified `i17_base` baseline as Task 4. Data:
+`benchmarks/results/accuracy_depth/i5_l2/`. The crossed arms were added because
+`lambda_l2` and `min_child_hessian` both enter the leaf denominator
+`-lr·G/(H + λ₂ + ε)` *and* the split gain `G²/(H + λ₂)`, so their effects could not be
+assumed independent.
+
+**Depth 12 — large gains, and losses cut by two thirds.** Aggregate verdicts against the
+three peers (45 comparisons per row):
+
+| arm | d12 W/T/L | new losses vs baseline |
+| --- | --- | --- |
+| baseline | 4 / 31 / 10 | — |
+| `l2_1` | 4 / 36 / 5 | digits/lightgbm |
+| **`l2_5`** | **7 / 35 / 3** | digits/lightgbm |
+| `l2_20` | 9 / 32 / 4 | digits ×2, wine |
+| `h4` (best Hessian arm) | 6 / 32 / 7 | digits ×2, wine ×2 |
+
+Paired vs-baseline medians at depth 12, all 5/5 seeds unless noted:
+
+| scenario | `l2_1` | `l2_5` | `l2_20` | `h2` | `h4` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `synthetic_classification` | −26.38% | −35.21% | −39.00% | −33.39% | −37.11% |
+| `synthetic_multiclass` | −23.46% | −27.68% | −29.60% | −25.03% | −28.05% |
+| `adult_income` | −1.93% | −3.37% | −4.25% | −0.60% | −2.12% |
+| `digits_multiclass` | +15.08% (1/5) | +36.79% (1/5) | +92.59% (0/5) | +35.85% | +81.12% |
+| `wine_multiclass` | +31.23% (2/5) | +52.48% (2/5) | +100.39% (2/5) | +89.28% | +191.24% |
+
+**L2 dominates the Hessian floor at matched strength**, which is the cleanest comparison
+available since both are single-parameter treatments. At the weakest setting of each:
+
+| scenario (d12) | `λ=0.1` | `h=0.1` |
+| --- | ---: | ---: |
+| `synthetic_classification` | −14.77% | −13.90% |
+| `synthetic_multiclass` | −16.32% | −15.92% |
+| `digits_multiclass` | **−0.55%** | +18.82% |
+| `wine_multiclass` | **+26.31%** | +42.88% |
+
+Equal or better on the winners, and far less collateral damage on the small sets.
+
+**The two are substitutes, not complements.** Crossing them is strongly sub-additive:
+
+| scenario (d12) | `h2` alone | `λ` alone | both | naive sum | shortfall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `synthetic_classification` (λ=1) | −33.39% | −26.38% | −36.40% | −59.77% | +23.37 pp |
+| `synthetic_classification` (λ=5) | −33.39% | −35.21% | −37.99% | −68.60% | +30.61 pp |
+| `synthetic_multiclass` (λ=5) | −25.03% | −27.68% | −27.99% | −52.71% | +24.72 pp |
+
+No crossed arm beats the best single arm — `l2_20` alone (−39.00%) beats `l2_5_h2`
+(−37.99%). *Caveat on this arithmetic:* summing percentage deltas is not a valid
+decomposition, and because both knobs enter the split gain, the crossed arm is not the
+composition of two leaf-value transforms on one fixed tree. The shortfall is 20–30 pp,
+far too large to be an artefact of that sloppiness, but this is a directional finding and
+not an ANOVA. **Consequence: ship at most one of ideas 1 and 5.** Shipping both would
+double-regularise for almost no additional gain.
+
+**Guards pass, and better than expected — both guard scenarios improve.** At depth 12,
+5/5 seeds: `histogram_stress` −2.85% / −8.48% / −14.47% at λ = 1 / 5 / 20, and
+`panel_time_series` −0.52% / −2.75% / −5.22%. Regression improves broadly at depth 12
+too (`bike_sharing` −1.33%, `california_housing` −1.12%, `abalone_regression` −1.97% at
+4–5/5 seeds). This is a real difference from idea 1, which left regression bit-identical:
+L2 is *not* a classification-only treatment, and its regression effect at depth is
+favourable.
+
+**Costs.** (a) Depth 6 gets mildly worse, not better: 4/36/5 → 4/34/7 at λ=0.1 and
+5/32/8 at λ=5. (b) `california_ranking` degrades at depth 12 (+3.69% at λ=5, +5.06% at
+λ=20) though only 3/5 seeds against a 21% band, so this is weak evidence needing its own
+check. (c) `digits_multiclass` still degrades at every λ ≥ 1.
+
+**Which of Step 2's three outcomes occurred:** the first, in its stronger form. L2 does
+not merely match the alternative — it dominates it while using an existing parameter. So
+the production fix becomes an auto-policy change (Task 13) and **Task 12 (shipping the
+Hessian floor) should be dropped**, along with Task 11 which idea 17's rejection had
+already emptied.
+
+**Step 3 — would the existing trigger have fired?** No, and the reason matters.
+`should_apply_auto_split_l2` requires `row_count < 1_024 && feature_count >= 8 &&
+rows_per_feature < 64 && target_variance > 4`, and sets `AUTO_SPLIT_L2_NOISY_SMALL_WIDE
+= 2.0`. All three scenarios that carry the depth-12 win have 8,000–40,000 rows, so the
+`row_count < 1_024` gate excludes every one of them. The trigger fires precisely where
+the benefit is not. The good news is that the *knob* is right: the trigger sets
+`options.l2_lambda`, the same field `params.lambda_l2` feeds (`policy.rs:45,66`), which
+reaches both the split gain and the leaf denominator — so no new code path is needed.
+What idea 5 actually needs is its condition set **replaced** by a depth-aware rule, not
+widened. The title of this idea understates the change.
+
+**What this does not establish.** The depth-6 cost means a single global `lambda_l2`
+default is not shippable either; this is evidence for a depth-scaled λ, and the shape of
+that schedule is unmeasured — only two depths were tested, so anything between 6 and 12
+is interpolation. Both winning multiclass scenarios remain synthetic. Nothing here was
+tested under sample weights, and the ranking cost needs a dedicated look before any
+default changes.
 
 ---
 
