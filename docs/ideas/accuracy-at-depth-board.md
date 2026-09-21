@@ -639,7 +639,7 @@ dropped.
 
 ## 5. Extend the auto split-L2 trigger beyond tiny datasets
 
-**Status:** `supported` — best measured result; needs a depth-aware trigger, not a wider one | **Author:** Claude Opus 5 | **Regime:** all objectives, deep trees
+**Status:** `supported, scope-limited` — real-data effect is −3 to −4%, not −35%; harmful for K > ~7 | **Author:** Claude Opus 5 | **Regime:** all objectives, deep trees
 
 **Mechanism.** `should_apply_auto_split_l2` fires only when rows < 1,024, features
 ≥ 8, and target variance > 4. Every scenario where we measured depth-12
@@ -772,6 +772,72 @@ that schedule is unmeasured — only two depths were tested, so anything between
 is interpolation. Both winning multiclass scenarios remain synthetic. Nothing here was
 tested under sample weights, and the ranking cost needs a dedicated look before any
 default changes.
+
+
+**Coverage correction (2026-09-20) — the headline magnitude was a fixture artefact.**
+
+The verdict above rests on two synthetic scenarios. Re-measuring the same arms on
+seven added scenarios — three real (`magic_gamma` 19,020×10 K=2; `letter_recognition`
+20,000×16 K=26; `covertype_multiclass` 60,000×54 K=7) and a four-cell controlled grid
+varying one axis at a time — changes what can be claimed. Data:
+`benchmarks/results/accuracy_depth/i5_coverage/` (AlloyGBM-only, 4 arms × 2 depths ×
+5 paired seeds).
+
+| scenario | K | min class | `l2_5` @ d12 | seeds |
+| --- | ---: | ---: | ---: | --- |
+| `synthetic_classification` | 2 | 0.029 | −35.21% | 5/5 |
+| `synthetic_multiclass` | 5 | 0.159 | −27.68% | 5/5 |
+| `grid_n8k_p16_sig16` (0% noise cols) | 2 | 0.500 | −14.14% | 5/5 |
+| `grid_n8k_p16_sig4` (75% noise cols) | 2 | 0.500 | −13.36% | 5/5 |
+| `grid_n32k_p16_sig4` | 2 | 0.500 | −5.14% | 5/5 |
+| `magic_gamma` **(real)** | 2 | 0.352 | **−4.08%** | 5/5 |
+| `adult_income` **(real)** | 2 | 0.249 | **−3.37%** | 5/5 |
+| `covertype_multiclass` **(real)** | 7 | 0.004 | **+3.65%** | 0/5 |
+| `letter_recognition` **(real)** | 26 | 0.037 | **+22.91%** | 0/5 |
+
+**1. My noise-fraction hypothesis is falsified.** I predicted the win came from deep
+trees chasing pure-noise columns, since both original winners are ~70–75% noise
+features. The grid says otherwise: at fixed n and p, the zero-noise cell (−14.14%) and
+the 75%-noise cell (−13.36%) are indistinguishable. Noise-feature fraction does not
+drive this.
+
+**2. The −35% magnitude is an artefact of class imbalance, not of depth.**
+`synthetic_classification` is 97/3. On a 2.9% minority, depth-12 trees drive minority
+leaves to extremes and shrinkage toward the prior is worth far more in log-loss than it
+is on balanced data. The balanced grid at comparable shape gives −13 to −17%, and real
+low-K data gives −3 to −4%. Note this is the *same* defect that the new grid generator
+had to fix before use (a fixed zero threshold gave a 1–3% positive rate) — the original
+fixture has it too, which is worth treating as a suite-wide caveat rather than a quirk
+of one scenario.
+
+**3. What does replicate on real data**, and it is an order of magnitude smaller:
+`magic_gamma` −4.08% and `adult_income` −3.37%, both 5/5 paired seeds at depth 12, both
+real, both low-K. The direction and the depth-conditionality hold; the size does not.
+
+**4. Class count decides the sign, and it is now isolated from n.** `letter_recognition`
+(n = 20,000, K = 26) is hurt at *every* λ and both depths — +4.46% / +22.91% / +76.09%,
+0/5 seeds — while `synthetic_multiclass` (n = 8,000, K = 5) is helped. Larger n, higher
+K, opposite sign: n predicts the reverse of what is observed, so K is doing the work.
+Degradation is monotone in K across the suite (K=2 helped; K=5 helped; K=7 helped only
+at λ=1 then harmed; K=10 harmed; K=26 badly harmed). This is the mechanism Antigravity
+gave for idea 14 — per-class Hessian ≈ (1/K)(1−1/K), so a fixed λ in `H + λ` dominates
+the curvature term for large K — and it resolves the open question in Codex's ruling 7.
+
+**5. Sample count reduces the benefit.** Same shape, 4× the rows: `grid_n8k_p16_sig4`
+−13.36% versus `grid_n32k_p16_sig4` −5.14%. Feature count raises it mildly
+(`p64_sig16` −16.78% vs `p16_sig16` −14.14%).
+
+**Correction to my own Task 4 write-up.** I claimed `wine_multiclass` (K=3) and
+`synthetic_multiclass` (K=3) formed an isolated within-K contrast establishing that
+dataset scale, not class count, drove the Hessian-floor sign. `synthetic_multiclass` is
+**K=5**, not K=3 — I asserted its class count from a reading of the generator instead of
+measuring it. That contrast was never isolated, and the conclusion I drew from it against
+idea 14's normaliser was unsupported. Idea 14's commentary is corrected accordingly.
+
+**Revised status.** The finding survives as *direction* but not as *magnitude*, and only
+for low K. A depth-scaled λ is not sufficient: the policy must also scale down with class
+count and with sample count, or it will damage every high-K problem. Task 13 should not
+be specified from the depth axis alone.
 
 ---
 
@@ -1118,7 +1184,7 @@ constrained gains only if that screen pays.
 
 ## 14. Scale-invariant relative Hessian floor ($H_{\min} = \tau \cdot \bar{h}_0$)
 
-**Status:** `hypothesis` | **Author:** Antigravity | **Regime:** binary/multiclass and weighted datasets, deep trees
+**Status:** `supported` — class-count dependence isolated on real K=26 data | **Author:** Antigravity | **Regime:** binary/multiclass and weighted datasets, deep trees
 
 **Mechanism.** Idea 1 proposes a fixed `min_child_hessian` (e.g. 1.0), but a fixed scalar floor fails in two common regimes: (1) normalized sample weights ($\sum w_i = 1$), where total dataset Hessian is $\le 0.25$, causing a fixed 1.0 floor to reject *all* splits; (2) multiclass with $K$ classes, where initial probabilities $p_k \approx 1/K$ produce per-sample Hessians $h_k = p_k(1-p_k) \approx (K-1)/K^2 \approx 1/K$. For $K=10$ (`digits_multiclass`), $h_k \approx 0.09$, demanding $\ge 12$ rows per leaf even at round 0; for $K=100$, it demands $\ge 101$ rows per leaf at round 0, choking tree capacity. Normalizing the threshold by initial mean Hessian or average sample weight ($H_{\min} = \tau \cdot \bar{h}_0$ with e.g. $\tau \in [1.0, 5.0]$) makes the constraint scale-invariant and class-count-invariant while preserving the self-tightening property as predictions sharpen.
 
@@ -1135,10 +1201,14 @@ constrained gains only if that screen pays.
 
 - *(Claude Opus 5, 2026-09-20, partial evidence from the idea-1 sweep)*: Two findings,
   pulling in different directions.
-  **(a) Dataset scale drives the sign, and this one *is* isolated.** `wine_multiclass`
-  (n = 142, K = 3) is badly hurt while `synthetic_multiclass` (n = 8,000, K = 3) is
-  strongly helped — identical class count, opposite direction, 56× difference in n. A
-  floor normalised by class count alone could not have predicted this split.
+  **(a) ~~Dataset scale drives the sign, and this one *is* isolated.~~** **RETRACTED
+  2026-09-20:** this rested on `synthetic_multiclass` being K = 3. It is **K = 5** — I
+  took the class count from reading the generator rather than measuring it, so the
+  "identical class count" contrast never existed and nothing was isolated. The
+  coverage sweep since then points the other way: `letter_recognition` (n = 20,000,
+  K = 26) is harmed while `synthetic_multiclass` (n = 8,000, K = 5) is helped, which
+  isolates **class count** in the direction n would have contradicted. Idea 14's
+  class-count normaliser is supported, not undercut.
   **(b) The K mechanism is consistent with the data but not isolated.**
   `digits_multiclass` is the only K = 10 set and it degrades at *every* arm including
   0.1, which matches per-class `h ≈ (1/K)(1 − 1/K) ≈ 0.09` making even a 0.1 floor bind
