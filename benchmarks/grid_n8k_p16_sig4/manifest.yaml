@@ -1,0 +1,17 @@
+name: grid_n8k_p16_sig4
+version: 1
+kind: synthetic
+task_type: classification
+description: >
+  Controlled accuracy-at-depth grid cell: 8000 rows, 16 features,
+  4 of them carrying signal. vs sig16: isolates noise-feature fraction at fixed n and p.
+source:
+  generator: benchmarks/grid_n8k_p16_sig4/prepare.py
+prepared:
+  filename: prepared.csv
+  target: target
+  note: >
+    Binary target from a weighted sum of the first 4 features plus a
+    nonlinear term and gaussian noise. Signal scale is divided by sqrt(signal
+    count) so that varying the signal count does not also vary the
+    signal-to-noise ratio. Remaining 12 features are pure noise.

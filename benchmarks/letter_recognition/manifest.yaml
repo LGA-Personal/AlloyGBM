@@ -1,0 +1,12 @@
+name: letter_recognition
+version: 1
+kind: uci_download
+task_type: multiclass_classification
+description: "UCI Letter Recognition: 20,000 rows, 16 integer features, 26 classes."
+source:
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/letter-recognition/letter-recognition.data
+prepared:
+  filename: prepared.csv
+  target: target
+  note: >
+    Real large-n high-K multiclass. Supplies the large-n/high-K cell that digits_multiclass (1,437 rows, K=10) and wine_multiclass (142 rows, K=3) leave empty, so class count can be separated from sample count.

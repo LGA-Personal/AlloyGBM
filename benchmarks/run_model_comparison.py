@@ -48,6 +48,14 @@ AVAILABLE_SCENARIOS = [
     "wine_multiclass",
     "digits_multiclass",
     "synthetic_multiclass",
+    "letter_recognition",
+    "covertype_multiclass",
+    # Coverage expansion: real binary + controlled n / feature-count / noise-fraction grid
+    "magic_gamma",
+    "grid_n8k_p16_sig16",
+    "grid_n8k_p16_sig4",
+    "grid_n8k_p64_sig16",
+    "grid_n32k_p16_sig4",
     # Ranking
     "synthetic_ranking",
     "california_ranking",

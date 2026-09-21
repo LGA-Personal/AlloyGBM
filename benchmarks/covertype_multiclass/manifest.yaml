@@ -1,0 +1,12 @@
+name: covertype_multiclass
+version: 1
+kind: uci_download
+task_type: multiclass_classification
+description: "UCI Covertype: 60,000-row deterministic subsample, 54 features, 7 classes."
+source:
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/covtype/covtype.data.gz
+prepared:
+  filename: prepared.csv
+  target: target
+  note: >
+    Real large wide multiclass. Counterweight to synthetic_multiclass, which is the only large multiclass scenario in the fixed suite and is 70% noise features.

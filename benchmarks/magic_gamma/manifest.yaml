@@ -1,0 +1,12 @@
+name: magic_gamma
+version: 1
+kind: uci_download
+task_type: classification
+description: "UCI MAGIC Gamma Telescope: 19,020 rows, 10 continuous features, binary."
+source:
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/magic/magic04.data
+prepared:
+  filename: prepared.csv
+  target: target
+  note: >
+    Real medium-large binary classification with all-informative continuous features -- the opposite shape to synthetic_classification's 75% noise columns.
