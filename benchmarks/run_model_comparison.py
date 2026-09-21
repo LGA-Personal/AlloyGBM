@@ -56,6 +56,16 @@ AVAILABLE_SCENARIOS = [
     "grid_n8k_p16_sig4",
     "grid_n8k_p64_sig16",
     "grid_n32k_p16_sig4",
+    # Class-count sweep: identical except K, for calibrating K-dependence
+    "kgrid_n8k_p16_k2",
+    "kgrid_n8k_p16_k5",
+    "kgrid_n8k_p16_k10",
+    "kgrid_n8k_p16_k20",
+    # HOLDOUT -- see docs/ideas/accuracy-auto-regularization-protocol.md
+    "kgrid_n8k_p16_k3",
+    "kgrid_n8k_p16_k14",
+    "pendigits_multiclass",
+    "sensorless_multiclass",
     # Ranking
     "synthetic_ranking",
     "california_ranking",

@@ -96,3 +96,60 @@ def write_grid_dataset(
             record["target"] = 1 if score > threshold else 0
             writer.writerow(record)
     return prepared_path
+
+
+def write_multiclass_grid_dataset(
+    scenario: str,
+    *,
+    rows: int,
+    feature_count: int,
+    signal_count: int,
+    class_count: int,
+    seed: int,
+    separation: float = 1.1,
+    repo_root: Path | None = None,
+) -> Path:
+    """Write a class-count grid cell with exact class balance.
+
+    Real multiclass datasets confound class count with sample count, feature
+    count and class balance, so none of them can measure how a regularisation
+    constant should scale with K. Here every cell is identical except K: rows are
+    assigned round-robin so balance is exactly 1/K, signal features are drawn
+    class-conditionally around per-class means, and the remaining features are
+    drawn from the same distribution for every class so they carry no signal.
+
+    `separation` scales the per-class means. It is held fixed across cells, so
+    the Bayes error drifts upward with K -- unavoidable when K is the only thing
+    that may vary, and the reason these cells calibrate a *scaling law* rather
+    than supply comparable absolute accuracies.
+    """
+    if signal_count > feature_count:
+        raise ValueError("signal_count cannot exceed feature_count")
+    if class_count < 2:
+        raise ValueError("class_count must be at least 2")
+    root = repo_root or Path(__file__).resolve().parents[2]
+    prepared_path = root / "benchmarks" / "data" / scenario / "prepared" / PREPARED_FILENAME
+    prepared_path.parent.mkdir(parents=True, exist_ok=True)
+    rng = random.Random(seed)
+    means = [
+        [
+            separation * math.sin((klass + 1) * (index + 1) * 0.9)
+            for index in range(signal_count)
+        ]
+        for klass in range(class_count)
+    ]
+    fieldnames = [f"f{i}" for i in range(feature_count)] + ["target"]
+    with prepared_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row_index in range(rows):
+            klass = row_index % class_count
+            record: dict[str, float | int] = {}
+            for index in range(feature_count):
+                if index < signal_count:
+                    record[f"f{index}"] = rng.gauss(means[klass][index], 1.0)
+                else:
+                    record[f"f{index}"] = rng.gauss(0.0, 1.0)
+            record["target"] = klass
+            writer.writerow(record)
+    return prepared_path

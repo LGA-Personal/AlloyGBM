@@ -1,0 +1,14 @@
+name: pendigits_multiclass
+version: 1
+kind: uci_download
+task_type: multiclass_classification
+description: "UCI Pen-Based Handwritten Digits: 7,494 rows, 16 integer features, 10 classes."
+role: HOLDOUT
+source:
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/pendigits/pendigits.tra
+prepared:
+  filename: prepared.csv
+  target: target
+  note: >
+    Reserved holdout. Not consulted while choosing the auto-regularisation policy
+    form or its constants; measured once after the policy is frozen.

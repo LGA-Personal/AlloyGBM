@@ -1,0 +1,16 @@
+name: kgrid_n8k_p16_k10
+version: 1
+kind: synthetic
+task_type: multiclass_classification
+description: "Class-count grid cell: 8000 rows, 16 features, 8 signal, K=10, exactly balanced."
+role: calibration
+source:
+  generator: benchmarks/kgrid_n8k_p16_k10/prepare.py
+prepared:
+  filename: prepared.csv
+  target: target
+  note: >
+    Every cell in the kgrid family is identical except the class count, so a
+    regularisation constant's dependence on K can be measured without the
+    sample-count, feature-count and class-balance confounds that every real
+    multiclass dataset carries. Role is calibration.
