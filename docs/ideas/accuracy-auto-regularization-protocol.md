@@ -72,3 +72,20 @@ The policy is frozen when the function mapping (depth, class count, row count,
 objective) to a regularization strength is committed with its constants as
 literals, its tests written, and its intended default behaviour stated. Reading
 holdout numbers before that point voids the holdout.
+
+## Amendment 2026-09-21: the class-count cells were regenerated
+
+The first `kgrid` family held mean separation fixed across K, which made the
+cells progressively harder rather than merely differently-classed: the K=20 cell
+reached **0.913 of the random-guess log-loss**, i.e. nearly unlearnable. Maximal
+shrinkage trivially wins on a near-noise task, so that sweep measured difficulty
+and not class count, and its result (λ=20 optimal at every K) is void.
+
+All `kgrid` cells — calibration and holdout — were regenerated with the mean
+separation solved per K to hold Bayes accuracy at ~0.80. The holdout remains
+valid because no policy result had been measured on it; only the data changed,
+and it changed before any holdout measurement, not after.
+
+This is recorded rather than quietly fixed because the failed sweep is exactly
+the kind of in-sample artefact this protocol exists to catch, and it was caught
+by comparing against `ln(K)` rather than by any guard written in advance.

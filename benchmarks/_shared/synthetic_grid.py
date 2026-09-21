@@ -98,6 +98,53 @@ def write_grid_dataset(
     return prepared_path
 
 
+def _bayes_accuracy(means: list[list[float]], rng: random.Random, trials: int = 4000) -> float:
+    """Monte-Carlo accuracy of the nearest-mean (Bayes) rule for these means."""
+    class_count = len(means)
+    correct = 0
+    for trial in range(trials):
+        true_class = trial % class_count
+        point = [rng.gauss(mu, 1.0) for mu in means[true_class]]
+        best_class, best_distance = 0, None
+        for klass, mean in enumerate(means):
+            distance = sum((point[i] - mean[i]) ** 2 for i in range(len(mean)))
+            if best_distance is None or distance < best_distance:
+                best_class, best_distance = klass, distance
+        correct += best_class == true_class
+    return correct / trials
+
+
+def _class_means(class_count: int, signal_count: int, separation: float) -> list[list[float]]:
+    return [
+        [separation * math.sin((klass + 1) * (index + 1) * 0.9) for index in range(signal_count)]
+        for klass in range(class_count)
+    ]
+
+
+def separation_for_target_accuracy(
+    class_count: int, signal_count: int, target_accuracy: float, seed: int = 0
+) -> float:
+    """Find the mean separation giving a target Bayes accuracy for this K.
+
+    Holding `separation` fixed while varying K makes the task progressively
+    harder: the first kgrid sweep reached 0.913 of the random-guess log-loss at
+    K=20, i.e. nearly unlearnable. On a near-noise problem maximal shrinkage
+    always wins because the best prediction is the prior, so that sweep measured
+    task difficulty rather than class count. Solving for separation per K holds
+    difficulty fixed so K is genuinely the only thing that varies.
+    """
+    low, high = 0.05, 40.0
+    for _ in range(40):
+        mid = (low + high) / 2.0
+        rng = random.Random(seed)
+        accuracy = _bayes_accuracy(_class_means(class_count, signal_count, mid), rng)
+        if accuracy < target_accuracy:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2.0
+
+
 def write_multiclass_grid_dataset(
     scenario: str,
     *,
@@ -106,7 +153,8 @@ def write_multiclass_grid_dataset(
     signal_count: int,
     class_count: int,
     seed: int,
-    separation: float = 1.1,
+    separation: float | None = None,
+    target_accuracy: float | None = 0.80,
     repo_root: Path | None = None,
 ) -> Path:
     """Write a class-count grid cell with exact class balance.
@@ -118,10 +166,12 @@ def write_multiclass_grid_dataset(
     class-conditionally around per-class means, and the remaining features are
     drawn from the same distribution for every class so they carry no signal.
 
-    `separation` scales the per-class means. It is held fixed across cells, so
-    the Bayes error drifts upward with K -- unavoidable when K is the only thing
-    that may vary, and the reason these cells calibrate a *scaling law* rather
-    than supply comparable absolute accuracies.
+    Difficulty is held constant across cells by solving for the mean separation
+    that gives `target_accuracy` under the Bayes (nearest-mean) rule at each K.
+    A fixed separation does *not* work: it made the K=20 cell reach 0.913 of the
+    random-guess log-loss, so that sweep compared task difficulty rather than
+    class count. Pass an explicit `separation` only to reproduce that earlier,
+    confounded behaviour.
     """
     if signal_count > feature_count:
         raise ValueError("signal_count cannot exceed feature_count")
@@ -130,14 +180,14 @@ def write_multiclass_grid_dataset(
     root = repo_root or Path(__file__).resolve().parents[2]
     prepared_path = root / "benchmarks" / "data" / scenario / "prepared" / PREPARED_FILENAME
     prepared_path.parent.mkdir(parents=True, exist_ok=True)
+    if separation is None:
+        if target_accuracy is None:
+            raise ValueError("pass either separation or target_accuracy")
+        separation = separation_for_target_accuracy(
+            class_count, signal_count, target_accuracy
+        )
     rng = random.Random(seed)
-    means = [
-        [
-            separation * math.sin((klass + 1) * (index + 1) * 0.9)
-            for index in range(signal_count)
-        ]
-        for klass in range(class_count)
-    ]
+    means = _class_means(class_count, signal_count, separation)
     fieldnames = [f"f{i}" for i in range(feature_count)] + ["target"]
     with prepared_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)

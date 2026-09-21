@@ -70,3 +70,55 @@ def test_grid_rejects_impossible_configurations(tmp_path, signal, feats):
             "unit", rows=10, feature_count=feats, signal_count=signal,
             seed=1, repo_root=tmp_path,
         )
+
+
+# --- class-count grid ------------------------------------------------------
+
+
+def test_multiclass_grid_is_exactly_balanced(tmp_path):
+    from _shared.synthetic_grid import write_multiclass_grid_dataset
+
+    path = write_multiclass_grid_dataset(
+        "unit", rows=1200, feature_count=12, signal_count=6, class_count=6,
+        seed=2, repo_root=tmp_path,
+    )
+    rows = _read(path)
+    counts = {}
+    for row in rows:
+        counts[row["target"]] = counts.get(row["target"], 0) + 1
+    assert sorted(counts.values()) == [200] * 6
+
+
+def test_class_count_cells_hold_difficulty_constant():
+    """K must be the only thing that varies, including task difficulty.
+
+    The first version of this sweep held `separation` fixed, which made the K=20
+    cell reach 0.913 of the random-guess log-loss -- nearly unlearnable. Maximal
+    shrinkage trivially wins on a near-noise task, so that sweep measured
+    difficulty rather than class count and its conclusion was void.
+    """
+    import random
+
+    from _shared.synthetic_grid import (
+        _bayes_accuracy,
+        _class_means,
+        separation_for_target_accuracy,
+    )
+
+    for class_count in (2, 5, 10, 20):
+        separation = separation_for_target_accuracy(class_count, 8, 0.80)
+        accuracy = _bayes_accuracy(
+            _class_means(class_count, 8, separation), random.Random(99)
+        )
+        assert 0.75 <= accuracy <= 0.85, (class_count, separation, accuracy)
+
+
+def test_fixed_separation_still_available_for_reproducing_the_confound():
+    """The confounded behaviour must stay reachable so the old runs can be replayed."""
+    import random
+
+    from _shared.synthetic_grid import _bayes_accuracy, _class_means
+
+    low_k = _bayes_accuracy(_class_means(2, 8, 1.1), random.Random(1))
+    high_k = _bayes_accuracy(_class_means(20, 8, 1.1), random.Random(1))
+    assert low_k - high_k > 0.2, "fixed separation should drift hard with K"
