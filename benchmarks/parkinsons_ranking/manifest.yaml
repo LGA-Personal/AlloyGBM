@@ -1,0 +1,17 @@
+name: parkinsons_ranking
+version: 1
+kind: uci_download
+task_type: ranking
+description: "UCI Parkinsons Telemonitoring as learning-to-rank: 42 patient query groups, 5 graded relevance levels."
+source:
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/parkinsons/telemonitoring/parkinsons_updrs.data
+prepared:
+  filename: prepared.csv
+  target: relevance
+  group_column: query_id
+  note: >
+    Query groups are the patients, a grouping present in the data rather than
+    constructed for the benchmark -- unlike california_ranking, whose groups are
+    geographic cells built for the purpose. subject#, test_time, motor_UPDRS and
+    total_UPDRS are dropped from the features so the graded label cannot be read
+    off the other half of the same clinical score.

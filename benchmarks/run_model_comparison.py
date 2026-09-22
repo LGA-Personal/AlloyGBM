@@ -39,6 +39,7 @@ AVAILABLE_SCENARIOS = [
     "histogram_stress",
     "dow_jones_financial",
     "abalone_regression",
+    "wine_quality_white",
     "synthetic_categorical",
     # Binary classification
     "breast_cancer",
@@ -69,6 +70,7 @@ AVAILABLE_SCENARIOS = [
     # Ranking
     "synthetic_ranking",
     "california_ranking",
+    "parkinsons_ranking",
     # "news_ranking",  # Uncomment once prepare.py is implemented
 ]
 

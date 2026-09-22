@@ -1,0 +1,13 @@
+name: wine_quality_white
+version: 1
+kind: uci_download
+task_type: regression
+description: "UCI Wine Quality (white): 4,898 rows, 11 physicochemical features, quality score target."
+source:
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv
+prepared:
+  filename: prepared.csv
+  target: quality
+  note: >
+    Real regression. Distinct from dense_numeric, which uses the red-wine file
+    (1,599 rows); this is the larger white-wine file.
