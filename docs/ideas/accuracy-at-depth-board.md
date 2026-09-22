@@ -745,9 +745,12 @@ L2 is *not* a classification-only treatment, and its regression effect at depth 
 favourable.
 
 **Costs.** (a) Depth 6 gets mildly worse, not better: 4/36/5 → 4/34/7 at λ=0.1 and
-5/32/8 at λ=5. (b) `california_ranking` degrades at depth 12 (+3.69% at λ=5, +5.06% at
-λ=20) though only 3/5 seeds against a 21% band, so this is weak evidence needing its own
-check. (c) `digits_multiclass` still degrades at every λ ≥ 1.
+5/32/8 at λ=5. (b) ~~`california_ranking` degrades at depth 12~~ — **SIGN ERROR,
+corrected 2026-09-22.** NDCG is higher-is-better, and I read its raw percentage delta as
+though lower were better. `california_ranking` *improves* at depth 12: NDCG@10 median
+0.74013 at baseline versus 0.78379 at λ=20. It is still only 3/5 seeds against a ~21%
+band, so it remains weak evidence — but of benefit, not harm. (c) `digits_multiclass`
+still degrades at every λ ≥ 1.
 
 **Which of Step 2's three outcomes occurred:** the first, in its stronger form. L2 does
 not merely match the alternative — it dominates it while using an existing parameter. So

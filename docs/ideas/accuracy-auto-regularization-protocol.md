@@ -170,3 +170,72 @@ Still unresolved before this can ship:
 - **λ=0.5 has not been run against the regression and ranking guards** — the
   earlier guard sweep used 0.1, 1, 5 and 20.
 - **Four real calibration datasets is thin** for any policy, including this one.
+
+## Regression and ranking calibration, 2026-09-22
+
+Eight arms (0, 0.1, 0.5, 1, 2, 5, 20, 50) × depths {6, 12} × 5 paired seeds over
+7 real regression scenarios, 1 synthetic regression, 2 real-derived ranking and
+1 synthetic ranking. Data: `benchmarks/results/accuracy_depth/calib_regrank/`.
+The ladder was extended to 50 because squared error has Hessian ≡ 1.0, making λ
+a phantom-row count against leaves the auto policy already fills with 8–16 real
+rows; a ladder stopping at 20 could have reported "λ barely helps regression"
+as an artefact of where it stopped.
+
+**A sign error is corrected above.** NDCG is higher-is-better. The Task 5 verdict
+read `california_ranking`'s raw percentage delta as if lower were better and
+called a benefit a cost. Every ranking number below is orientation-corrected.
+
+### Depth 6: λ does little for regression, and large λ harms it
+
+Only 2 of 7 real regression scenarios improve at ≥4/5 seeds
+(`abalone_regression` −1.71%, `panel_time_series` −3.95%, both at λ=50). Several
+degrade at large λ: `california_housing` +2.43%, `bike_sharing` +4.15%,
+`wine_quality_white` +2.93% at λ=50. The depth gate holds for regression as it
+does for classification.
+
+### Depth 12: real regression benefits modestly, and prefers a far larger λ
+
+| scenario | best λ (≥4/5 seeds) | benefit | λ=20 |
+| --- | ---: | ---: | ---: |
+| `panel_time_series` | 50 | −5.91% | −5.22% (5/5) |
+| `abalone_regression` | 50 | −3.89% | −1.97% (5/5) |
+| `bike_sharing` | 50 | −1.74% | −1.19% (5/5) |
+| `california_housing` | 20 | −1.12% | −1.12% (4/5) |
+| `dense_numeric` | 0.1 | −1.04% | −1.04% (3/5) |
+| `wine_quality_white` | 1 | −0.48% | +0.74% (1/5) |
+| `dow_jones_financial` | none | — | +0.14% (2/5) |
+
+λ=20 is the best single compromise: four solid improvements (−1.12% to −5.22%,
+4–5/5 seeds) against two small harms (+0.14%, +0.74%).
+
+### The optimal λ differs 40× between objectives
+
+| objective | real-data compromise λ at depth 12 | typical benefit |
+| --- | ---: | ---: |
+| log-loss (classification) | **0.5** | 1–2% |
+| squared error (regression) | **20** | 1–5% |
+
+This is mechanical, not incidental. Squared error has `h ≡ 1`, so a leaf's
+denominator is `rows + λ` and λ=0.5 against an 8–16 row floor is a 3–6% shrink.
+Log-loss curvature `Σ p(1−p)` collapses as predictions sharpen, so the same λ can
+dominate the denominator outright. **A single global λ cannot serve both**, which
+is idea 4 (objective-aware auto policy) arriving as a requirement rather than a
+hypothesis.
+
+### Ranking is not calibratable from this evidence
+
+The two real-derived ranking scenarios disagree at every λ above 0.1.
+`california_ranking` improves (best −3.03% at λ=0.5, 4/5); `parkinsons_ranking`
+has no setting reaching 4/5 seeds and degrades from λ=1 upward (+2.27% to
++5.34%). Seed agreement is 1–4/5 throughout against bands near 21%, so most of
+this is noise. With two real-derived scenarios — one of which has query groups
+constructed for the benchmark — there is no basis for a ranking λ default.
+**Recommendation: leave ranking at λ=0, and treat it as uncalibrated rather than
+as measured-neutral.**
+
+### The synthetic/real gap replicates in regression
+
+`histogram_stress` (the one synthetic regression scenario) gives −19.82% at λ=50
+versus −1% to −6% across the seven real ones — the same order-of-magnitude
+inflation seen in classification. The pattern now holds in both objectives and
+is a property of the fixtures, not of one task type.
