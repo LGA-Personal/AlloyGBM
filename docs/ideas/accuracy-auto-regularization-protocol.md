@@ -239,3 +239,76 @@ as measured-neutral.**
 versus −1% to −6% across the seven real ones — the same order-of-magnitude
 inflation seen in classification. The pattern now holds in both objectives and
 is a property of the fixtures, not of one task type.
+
+## Retraction of the objective-split claim, 2026-09-22
+
+The regression/ranking write-up above concluded that optimal λ differs 40× "between
+objectives" and that an objective-aware policy was therefore a requirement. **A
+cross-check I ran the next day refutes it.** At depth 12, comparing λ=0.5 against
+λ=20 on the same scenarios:
+
+| scenario | group | λ=0.5 | λ=20 | prefers |
+| --- | --- | ---: | ---: | --- |
+| `adult_income` | CLS K=2 | −0.86% | **−4.25%** | 20 |
+| `magic_gamma` | CLS K=2 | −1.93% | **−3.38%** | 20 |
+| `covertype_multiclass` | CLS K=7 | **−2.38%** | +16.93% | 0.5 |
+| `letter_recognition` | CLS K=26 | **+0.70%** | +76.09% | 0.5 |
+
+Only 2 of 4 classification scenarios prefer the "log-loss" value. The two that
+want λ=20 are the binary ones. The split is not objective versus objective — it
+tracks **class count**, and binary log-loss behaves like squared error. The
+plausible mechanism is effective curvature per leaf (`h ≡ 1` for squared error,
+`p(1−p) ≤ 0.25` for binary, `≈(1/K)(1−1/K)` per class for K-way softmax), which
+would make the right form a λ *relative* to typical leaf Hessian. I have not
+verified that: dividing the observed λ\* by a crude leaf-Hessian estimate gives
+ratios spanning 0.17 to 12.5, so the relative form does not fit as stated and
+would need actual leaf-Hessian instrumentation to test.
+
+## Frozen policy v1, 2026-09-22
+
+Committed before any holdout measurement.
+
+```
+lambda_auto(objective, row_count, min_rows_per_leaf, max_depth):
+    if user set lambda_l2 explicitly:        return user value   # never overridden
+    if objective is ranking:                 return 0.0         # uncalibrated
+    if 2**max_depth <= row_count / min_rows_per_leaf: return 0.0 # not deep enough
+    return 0.5
+```
+
+**Why λ=0.5 and not the larger value that wins more often.** λ=20 improves 6 of 11
+real scenarios at depth 12 versus λ=0.5's 5 — but its worst case is **+76.09%**
+(`letter_recognition`) and **+16.93%** (`covertype_multiclass`), at every depth
+tested. λ=0.5's worst case across all 11 real scenarios and all five depths at
+which it fires is **+0.70%**. A rule that would route around the catastrophe needs
+to condition on class count, and the only such rule I can fit rests on two
+multiclass calibration scenarios with an arbitrary boundary. Taking the smaller,
+safe constant costs perhaps 1–3% on regression and buys a bounded downside.
+
+**Why the gate is a support criterion rather than a depth constant.** The effect is
+a ramp, not a step: benefit grows monotonically with depth on `adult_income`,
+`magic_gamma` and `covertype_multiclass`, and `california_housing` and
+`bike_sharing` flip sign between depth 8 and 10. Choosing the depth that
+maximises measured benefit would be fitting the cutoff to 11 scenarios. The
+criterion `2^depth > rows / min_rows_per_leaf` instead fires exactly when the
+tree's leaf capacity outruns the leaf support the data can provide at the floor,
+and it reproduces the clean transitions: `bike_sharing` (13,903 rows, floor 16)
+crosses at depth 9.76 and its benefit appears at depth 10; `california_housing`
+(16,512, floor 16) crosses at 10.01 and its benefit appears at 12.
+
+**Blast radius.** Default `max_depth` is 6 ([config.rs:245](../../crates/core/src/config.rs)).
+At depth 6 the criterion fires only for datasets under ~64 rows, so default
+behaviour is unchanged for every realistic dataset. This is opt-in by depth.
+
+**Expected effect, stated before the holdout is read:** on deep real fits, roughly
+1% median log-loss or RMSE improvement on about half of scenarios, worst case
+about +0.7%. Prediction for the holdout: all four scenarios are multiclass K≥3 and
+all cross the support threshold at depth 12 but not at depth 6, so the policy
+should be exactly inert at depth 6 and give small improvements at depth 12, with
+no scenario worse than roughly +1%.
+
+**What this freeze does not cover.** The λ=20 branch is not in the policy and must
+not ship without its own holdout — and note the holdout I built contains no
+regression or binary scenario, so it cannot test that branch at all. That is a gap
+in my holdout design: I chose it to test class-count generalisation before knowing
+the policy's largest risk would be on the low-K side.
