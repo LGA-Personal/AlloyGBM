@@ -312,3 +312,41 @@ not ship without its own holdout — and note the holdout I built contains no
 regression or binary scenario, so it cannot test that branch at all. That is a gap
 in my holdout design: I chose it to test class-count generalisation before knowing
 the policy's largest risk would be on the low-K side.
+
+## HOLDOUT RESULT — measured once, 2026-09-22
+
+Policy frozen at commit `e317f2a` before this was run. Data:
+`benchmarks/results/accuracy_depth/HOLDOUT_policy_v1/`. Baseline versus λ=0.5,
+depths 6 and 12, 5 paired seeds. The gate is arithmetically inert at depth 6 for
+all four scenarios and fires at depth 12 for all four, so the depth-6 column
+shows what *would* have happened had the gate been wrong.
+
+| scenario | | d6 (gate off) | **d12 (gate ON)** | seed band |
+| --- | --- | ---: | ---: | ---: |
+| `kgrid_n8k_p16_k3` | K=3 synthetic | −0.83% (4/5) | **−19.53% (5/5)** | 12.1% |
+| `kgrid_n8k_p16_k14` | K=14 synthetic | −10.24% (5/5) | **−32.02% (5/5)** | 6.2% |
+| `pendigits_multiclass` | K=10 real, n=7.5k | −10.61% (4/5) | **−8.45% (4/5)** | 145.9% |
+| `sensorless_multiclass` | K=11 real, n=58.5k | +18.15% (2/5) | **−0.82% (3/5)** | 70.7% |
+
+**Verdict: pass.** All four improved where the policy fires; three at ≥4/5 seeds.
+The worst outcome is itself an improvement (−0.82%), against a pre-registered
+prediction of "no scenario worse than roughly +1%". No scenario was harmed.
+
+**The gate earned its place, and this is the strongest single result here.**
+`sensorless_multiclass` would have cost **+18.15%** had λ fired at depth 6. The
+support criterion — chosen on mechanism rather than fitted to the calibration
+depths — correctly withheld it. That is the one prediction in this program that
+could have failed loudly and did not.
+
+**Do not read the median as the expected effect.** The −13.99% median across the
+four is driven by the two synthetic cells (−19.53%, −32.02%), and synthetic
+fixtures have overstated this effect by roughly 10× at every previous
+opportunity. Within the holdout, both *real* scenarios' effects sit inside their
+own seed bands (−8.45% against a 145.9% band; −0.82% against 70.7%), so neither
+is individually conclusive. The defensible magnitude estimate remains the
+calibration figure — about 1% median on roughly half of real deep fits — and the
+holdout's contribution is that it found **no harm**, not that it confirmed a size.
+
+**Holdout is now spent.** Per the rules above, any change to this policy requires
+a new holdout built at parameter values the then-current calibration set does not
+contain. The four scenarios here are calibration data from this point on.
