@@ -1,0 +1,4181 @@
+{
+  "schema_version": 1,
+  "arms": [
+    {
+      "name": "alloy",
+      "library": "alloygbm",
+      "params": {},
+      "version": "1.0.0"
+    },
+    {
+      "name": "alloy-manual",
+      "library": "alloygbm",
+      "params": {
+        "training_policy": "manual"
+      },
+      "version": "1.0.0"
+    },
+    {
+      "name": "lightgbm",
+      "library": "lightgbm",
+      "params": {},
+      "version": "4.7.0"
+    },
+    {
+      "name": "xgboost",
+      "library": "xgboost",
+      "params": {},
+      "version": "3.4.1"
+    },
+    {
+      "name": "catboost",
+      "library": "catboost",
+      "params": {},
+      "version": "1.2.10"
+    }
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "threads": 4,
+  "datasets": [
+    {
+      "name": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "rows": 569,
+      "features": 30,
+      "target_scale": 1.0
+    },
+    {
+      "name": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "rows": 442,
+      "features": 10,
+      "target_scale": 1.0
+    },
+    {
+      "name": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "rows": 1797,
+      "features": 64,
+      "target_scale": 1.0
+    },
+    {
+      "name": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "rows": 178,
+      "features": 13,
+      "target_scale": 1.0
+    },
+    {
+      "name": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "rows": 5000,
+      "features": 10,
+      "target_scale": 1.0
+    },
+    {
+      "name": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "rows": 6000,
+      "features": 20,
+      "target_scale": 1.0
+    },
+    {
+      "name": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "rows": 6000,
+      "features": 10,
+      "target_scale": 1.0
+    },
+    {
+      "name": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "rows": 6000,
+      "features": 20,
+      "target_scale": 1.0
+    },
+    {
+      "name": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "rows": 12000,
+      "features": 8,
+      "target_scale": 1.0
+    },
+    {
+      "name": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "rows": 12000,
+      "features": 8,
+      "target_scale": 1.0
+    },
+    {
+      "name": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "rows": 600,
+      "features": 64,
+      "target_scale": 1.0
+    },
+    {
+      "name": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "rows": 8000,
+      "features": 12,
+      "target_scale": 1.0
+    },
+    {
+      "name": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "rows": 442,
+      "features": 10,
+      "target_scale": 0.001
+    },
+    {
+      "name": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "rows": 442,
+      "features": 10,
+      "target_scale": 1000.0
+    },
+    {
+      "name": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "rows": 5000,
+      "features": 10,
+      "target_scale": 0.001
+    },
+    {
+      "name": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "rows": 5000,
+      "features": 10,
+      "target_scale": 1000.0
+    }
+  ],
+  "environment": {
+    "python": "3.13.16",
+    "platform": "Linux-6.18.44-fc-v80-x86_64-with-glibc2.39"
+  },
+  "records": [
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.4452791946555131,
+      "fit_seconds": 0.2711892359999979,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.4452791946555131,
+      "fit_seconds": 0.282846673999984,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.2026540777903699,
+      "fit_seconds": 0.6121113770000193,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.16990199216818397,
+      "fit_seconds": 0.2333447820000174,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.1418751965468918,
+      "fit_seconds": 2.5154931629999737,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.6432357674116318,
+      "fit_seconds": 0.36393920900002286,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.6432357674116318,
+      "fit_seconds": 0.3385595780000017,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.21641995605054162,
+      "fit_seconds": 0.07870846100001927,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.16264628622239138,
+      "fit_seconds": 0.05434338200001321,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.1343283024186795,
+      "fit_seconds": 2.6104412540000226,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.44686599878137406,
+      "fit_seconds": 0.43715199100000746,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.44686599878137406,
+      "fit_seconds": 0.40015217500001654,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.19615192482549174,
+      "fit_seconds": 0.04876538799999253,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.11719453154516453,
+      "fit_seconds": 0.04571527100000594,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.10372259782669815,
+      "fit_seconds": 2.448970438999993,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.655229864141232,
+      "fit_seconds": 0.333519573999979,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.655229864141232,
+      "fit_seconds": 0.3412935970000035,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.13475143675991932,
+      "fit_seconds": 0.09231305499997688,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.09138145711083297,
+      "fit_seconds": 0.08907339600000341,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.087747400376003,
+      "fit_seconds": 2.447255740999992,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.5574089932276038,
+      "fit_seconds": 0.3554960320000191,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.5574089932276038,
+      "fit_seconds": 0.33858914400002504,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.12866717300264258,
+      "fit_seconds": 0.07544947800005275,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.09988709503288715,
+      "fit_seconds": 0.044542422000006354,
+      "error": null
+    },
+    {
+      "dataset": "breast_cancer",
+      "task": "binary",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.08413749451349055,
+      "fit_seconds": 2.322986747000016,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 63.61866264937539,
+      "fit_seconds": 0.22401343199999246,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 63.61866264937539,
+      "fit_seconds": 0.2118554099999983,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 62.73530232921284,
+      "fit_seconds": 0.019409843000005367,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 68.71066193450575,
+      "fit_seconds": 0.06178447199999937,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 61.48120009092812,
+      "fit_seconds": 0.509562944000038,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 67.18292763181726,
+      "fit_seconds": 0.23543273900003214,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 67.18292763181726,
+      "fit_seconds": 0.2323140409999951,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 61.370334557294825,
+      "fit_seconds": 0.01910198900003479,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 68.66276455042235,
+      "fit_seconds": 0.08591444900002898,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 59.887235631334484,
+      "fit_seconds": 0.5840759509999884,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 64.28506029506185,
+      "fit_seconds": 0.27443423300002223,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 64.28506029506185,
+      "fit_seconds": 0.24255540600000813,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 62.155511790906004,
+      "fit_seconds": 0.02499922500004459,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 65.62258123569929,
+      "fit_seconds": 0.06445023999998511,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 61.875837114031675,
+      "fit_seconds": 0.576055273999998,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 61.52322462079485,
+      "fit_seconds": 0.20166827499997453,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 61.52322462079485,
+      "fit_seconds": 0.2397497219999991,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 60.218589970444235,
+      "fit_seconds": 0.029474496000034378,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 60.396630269458065,
+      "fit_seconds": 0.11037190600001168,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 57.440893514046294,
+      "fit_seconds": 0.5637595640000086,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 66.64454482243958,
+      "fit_seconds": 0.23725639899998896,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 66.64454482243958,
+      "fit_seconds": 0.22664062100000137,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 62.037895163408656,
+      "fit_seconds": 0.03528317799998604,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 64.42788223389783,
+      "fit_seconds": 0.09064885600002981,
+      "error": null
+    },
+    {
+      "dataset": "diabetes",
+      "task": "regression",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 59.81468734544174,
+      "fit_seconds": 0.5636473649999516,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.0763123329465213,
+      "fit_seconds": 0.43185874499999954,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.2254005101710524,
+      "fit_seconds": 0.7122168480000255,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.06154221603303237,
+      "fit_seconds": 0.815366589000007,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.1049481148811184,
+      "fit_seconds": 0.3123581339999646,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.06214862655530656,
+      "fit_seconds": 4.771272877000001,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.14447161747592782,
+      "fit_seconds": 0.472729352999977,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.2986358812056158,
+      "fit_seconds": 0.712500628999976,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.1080313185380874,
+      "fit_seconds": 0.7747011449999945,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.11633154505645626,
+      "fit_seconds": 0.327945112000009,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.07722369020106279,
+      "fit_seconds": 4.489586712000005,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.13947953190072865,
+      "fit_seconds": 0.46639983500000426,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.34163447697136573,
+      "fit_seconds": 0.6792927620000455,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.13762693483746202,
+      "fit_seconds": 0.8581805689999555,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.13653167945572048,
+      "fit_seconds": 0.3080802139999719,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.06756313505370104,
+      "fit_seconds": 4.4019252880000295,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.09780280511188308,
+      "fit_seconds": 0.49213097899996683,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.1977020955588607,
+      "fit_seconds": 0.6465693160000114,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.07782088509656448,
+      "fit_seconds": 0.690812515999994,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.10958909755128302,
+      "fit_seconds": 0.30279467200000454,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.0812210175132252,
+      "fit_seconds": 4.464570991000016,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.09609993385251206,
+      "fit_seconds": 0.4226275959999839,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.21067645142601768,
+      "fit_seconds": 0.6561356469999851,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.07097764695382801,
+      "fit_seconds": 0.879823311999985,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.11618784786377265,
+      "fit_seconds": 0.3464507329999833,
+      "error": null
+    },
+    {
+      "dataset": "digits",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.06227730161551431,
+      "fit_seconds": 5.255877920000046,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.3168950714298793,
+      "fit_seconds": 0.1500805640000067,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.3168950714298793,
+      "fit_seconds": 0.12559403400001656,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.0016401448727494054,
+      "fit_seconds": 0.22011531900000136,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.08471766909518447,
+      "fit_seconds": 0.04931996900000968,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.019232438149932522,
+      "fit_seconds": 1.036751640000034,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.26935125597907755,
+      "fit_seconds": 0.1066944190000072,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.26935125597907755,
+      "fit_seconds": 0.13164235099998223,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.010618894861830621,
+      "fit_seconds": 0.04234671300002901,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.061884293890579485,
+      "fit_seconds": 0.05311541500003614,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.04540855859391876,
+      "fit_seconds": 1.0407064280000213,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.06540700082234117,
+      "fit_seconds": 0.11656510599999592,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.06540700082234117,
+      "fit_seconds": 0.09468588700002556,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.02984136941332715,
+      "fit_seconds": 0.046953077000011945,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.05411734599941805,
+      "fit_seconds": 0.036413067000012234,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.0457626781262798,
+      "fit_seconds": 0.8675529650000158,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.41336181621671436,
+      "fit_seconds": 0.09446098799998026,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.41336181621671436,
+      "fit_seconds": 0.09420608600004243,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.32591344673424416,
+      "fit_seconds": 0.025875311999982387,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.20001126236545705,
+      "fit_seconds": 0.026345354999989468,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.06883010615258647,
+      "fit_seconds": 0.9157273099999657,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.38104015033740446,
+      "fit_seconds": 0.11318379900001219,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.38104015033740446,
+      "fit_seconds": 0.1155281549999927,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.008038619457346605,
+      "fit_seconds": 0.04001400699996793,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.028256205758570685,
+      "fit_seconds": 0.024314474000050268,
+      "error": null
+    },
+    {
+      "dataset": "wine",
+      "task": "multiclass",
+      "stratum": "real",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.04444659133646278,
+      "fit_seconds": 0.9956009489999929,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 1.24609055987373,
+      "fit_seconds": 0.23405379899998024,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 1.2518348813398497,
+      "fit_seconds": 0.2725209379999569,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 1.2117528685312402,
+      "fit_seconds": 0.11335325700008525,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 1.3594436149852447,
+      "fit_seconds": 0.16136910299996998,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 1.0767364288372379,
+      "fit_seconds": 1.3387186349999638,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 1.2474529177119331,
+      "fit_seconds": 0.23837300000002415,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 1.2646725313549205,
+      "fit_seconds": 0.27775260800001433,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 1.2087286151078782,
+      "fit_seconds": 0.09865449500000523,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 1.3694688592715198,
+      "fit_seconds": 0.13668099199992412,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 1.0578762774066541,
+      "fit_seconds": 1.389124587000083,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 1.2675975748110329,
+      "fit_seconds": 0.2506739689999904,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 1.2883640301922066,
+      "fit_seconds": 0.2847953220000363,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 1.2538765662497713,
+      "fit_seconds": 0.0777179660000229,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 1.377750235307774,
+      "fit_seconds": 0.1641517189999604,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 1.087879911282485,
+      "fit_seconds": 1.2973917580000034,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 1.2450550932983502,
+      "fit_seconds": 0.22862210100004177,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 1.2758111084817372,
+      "fit_seconds": 0.2456370220000963,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 1.2297526175547762,
+      "fit_seconds": 0.10488386999998056,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 1.3695656265830216,
+      "fit_seconds": 0.16695382799991876,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 1.0894051163570573,
+      "fit_seconds": 1.3564538499999799,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 1.2585632666448459,
+      "fit_seconds": 0.24900573299998996,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 1.255281779354433,
+      "fit_seconds": 0.2534663440000031,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 1.2239244126619981,
+      "fit_seconds": 0.09146805899990795,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 1.4003617641865822,
+      "fit_seconds": 0.16318031800005883,
+      "error": null
+    },
+    {
+      "dataset": "friedman1",
+      "task": "regression",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 1.1184467043994462,
+      "fit_seconds": 1.2780995989999155,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.2880769787795108,
+      "fit_seconds": 0.4033915420000085,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.29592480060114124,
+      "fit_seconds": 0.4409949849999748,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.28627246946923623,
+      "fit_seconds": 0.13936819700006708,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.322541636115206,
+      "fit_seconds": 0.15950320800004647,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.27542853369983233,
+      "fit_seconds": 2.746325121000041,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.29411279019105646,
+      "fit_seconds": 0.3606281149999404,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.30115493176378483,
+      "fit_seconds": 0.4316112559999965,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.2970328007178438,
+      "fit_seconds": 0.15454704499995842,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.3169912565153984,
+      "fit_seconds": 0.1539728700000751,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.27722055782432636,
+      "fit_seconds": 2.295147236000048,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.3239604431369206,
+      "fit_seconds": 0.3558741630000668,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.3216773230026691,
+      "fit_seconds": 0.4711284659999819,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.3169935275009825,
+      "fit_seconds": 0.23033955400001105,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.3487718029360054,
+      "fit_seconds": 0.1861274279999634,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.3003386804726855,
+      "fit_seconds": 2.9082549809999136,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.2825091747462559,
+      "fit_seconds": 0.3616443869999557,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.2871343169087954,
+      "fit_seconds": 0.4675151860000142,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.28059430929144175,
+      "fit_seconds": 0.1616700250000349,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.31805958318319133,
+      "fit_seconds": 0.21721289200002047,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.2737743983818148,
+      "fit_seconds": 2.4527158579999195,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.30593105947328203,
+      "fit_seconds": 0.33300242899997556,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.3126948481552072,
+      "fit_seconds": 0.4210746259999496,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.301405172601782,
+      "fit_seconds": 0.21182089599994924,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.3445440148771948,
+      "fit_seconds": 0.18902841299995998,
+      "error": null
+    },
+    {
+      "dataset": "make_classification",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.28960090134286925,
+      "fit_seconds": 2.6586503609999,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.24830270349180822,
+      "fit_seconds": 0.2707355060000509,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.2615570518371963,
+      "fit_seconds": 0.2618759910000108,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.192704846121094,
+      "fit_seconds": 0.145766999999978,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.1868439705389372,
+      "fit_seconds": 0.11915411099994344,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.19437351989711593,
+      "fit_seconds": 1.7461126210000657,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.25208919825350873,
+      "fit_seconds": 0.2899633460000359,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.25291222893813553,
+      "fit_seconds": 0.2773461000000452,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.19900779099472293,
+      "fit_seconds": 0.1343356599999197,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.18127935336317091,
+      "fit_seconds": 0.13227705700001025,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.1951709914016317,
+      "fit_seconds": 1.9950788570000668,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.265452175129735,
+      "fit_seconds": 0.2868475349999926,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.2800948356803718,
+      "fit_seconds": 0.30844350500001383,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.21398061280479397,
+      "fit_seconds": 0.15277329900004588,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.2092436294690688,
+      "fit_seconds": 0.1370575739999822,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.2013171637910144,
+      "fit_seconds": 2.0701595589999897,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.2467062396217863,
+      "fit_seconds": 0.2617815049999308,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.2589298304822782,
+      "fit_seconds": 0.29064486800007217,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.2018940640518544,
+      "fit_seconds": 0.11267469200004143,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.19156769807150908,
+      "fit_seconds": 0.1264695600000323,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.19736740689896193,
+      "fit_seconds": 1.7962003200000254,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.2569309602928898,
+      "fit_seconds": 0.2551001000000497,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.2678395778168141,
+      "fit_seconds": 0.2800110289999793,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.20602657073555164,
+      "fit_seconds": 0.11499791799997183,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.1978719712406563,
+      "fit_seconds": 0.11421205199997075,
+      "error": null
+    },
+    {
+      "dataset": "hastie_10_2",
+      "task": "binary",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.19742948990716067,
+      "fit_seconds": 1.938567427999942,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.3447286791322522,
+      "fit_seconds": 1.2301267220000227,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.36787704729072446,
+      "fit_seconds": 1.4484878110000636,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.3441638884398878,
+      "fit_seconds": 0.7513631840000699,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.34458420611818763,
+      "fit_seconds": 0.7479780579999442,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.324655291656958,
+      "fit_seconds": 7.196389139999951,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.36628957304884535,
+      "fit_seconds": 1.2856864629999336,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.3864890369422385,
+      "fit_seconds": 1.4469761950000475,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.3493517567183147,
+      "fit_seconds": 0.8529278630001045,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.36533564621022957,
+      "fit_seconds": 0.7569443390000288,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.32481263442755365,
+      "fit_seconds": 7.117184930999997,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.3083754832583229,
+      "fit_seconds": 1.230310429000042,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.33371598316831835,
+      "fit_seconds": 1.480740338999908,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.30173463227961167,
+      "fit_seconds": 0.9592321270000639,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.32947402253960567,
+      "fit_seconds": 0.6663513280000188,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.29718849649525736,
+      "fit_seconds": 7.178180247,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.40858543267597575,
+      "fit_seconds": 1.368266984999991,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.43518558726432716,
+      "fit_seconds": 1.5673912429999746,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.39829116163587724,
+      "fit_seconds": 0.9387862160000395,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.40816338796383583,
+      "fit_seconds": 0.7455679569999347,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.3550362876526392,
+      "fit_seconds": 6.979776948999984,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.3575714513867107,
+      "fit_seconds": 1.2506416290000288,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.3711785641576245,
+      "fit_seconds": 1.4747554509999645,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.34792961345551743,
+      "fit_seconds": 0.721003440000004,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.3733129731264596,
+      "fit_seconds": 0.7894317510000519,
+      "error": null
+    },
+    {
+      "dataset": "make_multiclass",
+      "task": "multiclass",
+      "stratum": "synthetic",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.3350652956443416,
+      "fit_seconds": 7.121240168999975,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.22133510852635008,
+      "fit_seconds": 0.23602447200005372,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.24637457339113267,
+      "fit_seconds": 0.26256053700001303,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.206676867467088,
+      "fit_seconds": 0.10615951299996595,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.22712391386853362,
+      "fit_seconds": 0.1327409919999809,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.12756537811175633,
+      "fit_seconds": 1.621767568999985,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.20479993729329823,
+      "fit_seconds": 0.2265608999999813,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.2356741706493137,
+      "fit_seconds": 0.2550399109999262,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.1896625767651772,
+      "fit_seconds": 0.12288275800005977,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.22630167587570874,
+      "fit_seconds": 0.18074507100004666,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.12386183634999243,
+      "fit_seconds": 1.7016396559999976,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.21292580572724515,
+      "fit_seconds": 0.2728671319999876,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.24844436477251539,
+      "fit_seconds": 0.2818437560000575,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.20147496324542816,
+      "fit_seconds": 0.11107576000006247,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.2163366631495308,
+      "fit_seconds": 0.19797352899990983,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.127703714732823,
+      "fit_seconds": 1.6459388319999562,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.19863185505144235,
+      "fit_seconds": 0.25268520499992064,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.23287303276690047,
+      "fit_seconds": 0.2868453270000373,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.18641834087025153,
+      "fit_seconds": 0.14777884700004051,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.2035512823196026,
+      "fit_seconds": 0.21340128800000002,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.12263870024825528,
+      "fit_seconds": 1.7453401919999578,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.20088762015368597,
+      "fit_seconds": 0.23623630600002343,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.24767429629658713,
+      "fit_seconds": 0.3417757059999076,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.19147963099013732,
+      "fit_seconds": 1.9039998299999752,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.22042009503956952,
+      "fit_seconds": 6.4143045079999865,
+      "error": null
+    },
+    {
+      "dataset": "zero_inflated",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.11300705290727199,
+      "fit_seconds": 1.702596920000019,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.32200522981197593,
+      "fit_seconds": 0.2310332389999985,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.3170895955281594,
+      "fit_seconds": 0.28166428400004406,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.26844002069429046,
+      "fit_seconds": 1.1870081019999361,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.2280026277844634,
+      "fit_seconds": 0.1644553599999199,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.20878730107917412,
+      "fit_seconds": 1.5973262190000241,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.3016469685110758,
+      "fit_seconds": 0.24633903500000542,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.3034358172434247,
+      "fit_seconds": 0.2632895819999703,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.24513794938256883,
+      "fit_seconds": 0.12270111300006192,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.2212939868022516,
+      "fit_seconds": 0.11287898000000496,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.20210826667693374,
+      "fit_seconds": 1.688427909999973,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.2908547424733945,
+      "fit_seconds": 0.23460913600001732,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.29129282323337696,
+      "fit_seconds": 0.27692963699996653,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.24811485417722592,
+      "fit_seconds": 0.12441793499999676,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.21680382033695622,
+      "fit_seconds": 0.148173474000032,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.20432058410696452,
+      "fit_seconds": 1.5595845459999964,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.30071916716594216,
+      "fit_seconds": 0.2148375850000548,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.30179856282088774,
+      "fit_seconds": 0.25453594400005386,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.2618588567933106,
+      "fit_seconds": 0.12196888500000114,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.2251897630194185,
+      "fit_seconds": 0.27432483699999466,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.2123750190558882,
+      "fit_seconds": 1.71316007300004,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.2996655748719386,
+      "fit_seconds": 0.24043925900002705,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.3084657623121973,
+      "fit_seconds": 0.26905129900001157,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.2715594094871401,
+      "fit_seconds": 0.07413196400000288,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.2283580047143019,
+      "fit_seconds": 0.11653816600005484,
+      "error": null
+    },
+    {
+      "dataset": "skewed_discrete",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.21047036610661632,
+      "fit_seconds": 1.5358721629999081,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 2.183759777832618,
+      "fit_seconds": 0.7572363410000662,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 2.183759777832618,
+      "fit_seconds": 0.7305113469999469,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 2.1902833539538857,
+      "fit_seconds": 0.0792946189999384,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 2.313151833912409,
+      "fit_seconds": 0.4950129830000378,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 2.1195731387298435,
+      "fit_seconds": 4.475233311000011,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 2.06611660429585,
+      "fit_seconds": 0.8403307769999628,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 2.06611660429585,
+      "fit_seconds": 0.9150381960000686,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 2.0552401171661665,
+      "fit_seconds": 0.09661123500006852,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 2.1590145865078987,
+      "fit_seconds": 0.44509916800006977,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 1.9162706482088647,
+      "fit_seconds": 4.541618033000077,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 2.1472513267575297,
+      "fit_seconds": 0.7502409429999943,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 2.1472513267575297,
+      "fit_seconds": 0.7741040959999737,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 2.157270123476802,
+      "fit_seconds": 0.09710067499997876,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 2.2139164689330473,
+      "fit_seconds": 0.4100745890000326,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 2.115362093188696,
+      "fit_seconds": 4.2671305579999625,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 2.439976846686491,
+      "fit_seconds": 0.8129027190000215,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 2.439976846686491,
+      "fit_seconds": 0.7569865970000365,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 2.3123598800602525,
+      "fit_seconds": 0.08128275700005361,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 2.4517385138681935,
+      "fit_seconds": 0.4102987530000064,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 2.2385581157991714,
+      "fit_seconds": 4.342763037000054,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 2.2717393763765874,
+      "fit_seconds": 0.7091775149999648,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 2.2717393763765874,
+      "fit_seconds": 0.7030193179999742,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 2.3581449637603726,
+      "fit_seconds": 0.06311222499994074,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 2.3824555696296157,
+      "fit_seconds": 0.40118669700007104,
+      "error": null
+    },
+    {
+      "dataset": "small_wide_noisy",
+      "task": "regression",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 2.3303923454346265,
+      "fit_seconds": 4.4476725670000405,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 0.2196671739808717,
+      "fit_seconds": 0.24647660800007998,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 0.22567460041057064,
+      "fit_seconds": 0.26432230000000345,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 0.22292749319797456,
+      "fit_seconds": 0.10372477700002491,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 0.2730818740171667,
+      "fit_seconds": 0.12003415800006678,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 0.2058132901140093,
+      "fit_seconds": 2.32078229800004,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 0.20932223286963808,
+      "fit_seconds": 0.2845514059999914,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 0.21169873571634076,
+      "fit_seconds": 0.2873252220000495,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 0.21771649126803527,
+      "fit_seconds": 0.08081443799994759,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 0.25072833765779917,
+      "fit_seconds": 0.10241090500005612,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 0.1977158095841184,
+      "fit_seconds": 2.1785046810000495,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 0.22789098038355268,
+      "fit_seconds": 0.28168987600008677,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 0.2224682682557254,
+      "fit_seconds": 0.296679370999982,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 0.22231806393739306,
+      "fit_seconds": 0.10683149699991645,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 0.2675170554155011,
+      "fit_seconds": 0.11937158300008832,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 0.20322770787203315,
+      "fit_seconds": 2.1321259410000266,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 0.23334945925725936,
+      "fit_seconds": 0.28198092200000247,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 0.24560610180306394,
+      "fit_seconds": 0.29891094099991733,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 0.23023360768269824,
+      "fit_seconds": 0.11882537400003912,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 0.2643800052130066,
+      "fit_seconds": 0.14340235899999243,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 0.2112433321349752,
+      "fit_seconds": 2.098101773000053,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 0.2479220269868311,
+      "fit_seconds": 0.3086261180000065,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 0.2507094169413742,
+      "fit_seconds": 0.2983842079999022,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 0.24395933887464927,
+      "fit_seconds": 0.12631538100004036,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 0.3031266775376584,
+      "fit_seconds": 0.18115875299997697,
+      "error": null
+    },
+    {
+      "dataset": "imbalanced_binary",
+      "task": "binary",
+      "stratum": "targeted",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 0.22304367766919525,
+      "fit_seconds": 2.2772312800000236,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 64.38976602280006,
+      "fit_seconds": 0.22551633000000493,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 64.38976602280006,
+      "fit_seconds": 0.2186232920000748,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 62.735302391443255,
+      "fit_seconds": 0.4568834509999533,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 69.05404993759653,
+      "fit_seconds": 0.1061987709999812,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 61.48119993330631,
+      "fit_seconds": 0.5903658890000543,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 67.67107209697342,
+      "fit_seconds": 0.24911129400004484,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 67.67107209697342,
+      "fit_seconds": 0.24199325100005353,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 61.37033451400025,
+      "fit_seconds": 0.027952728000059324,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 69.05212581622712,
+      "fit_seconds": 0.04506908899998052,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 59.88723583256671,
+      "fit_seconds": 0.5311391449999974,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 64.97954215520762,
+      "fit_seconds": 0.2537952810000661,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 64.97954215520762,
+      "fit_seconds": 0.2585867730000473,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 62.15551186406714,
+      "fit_seconds": 0.02976556300006905,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 66.88325531550583,
+      "fit_seconds": 0.04423515199994199,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 61.87583722113963,
+      "fit_seconds": 0.6019376509999574,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 60.02540628957851,
+      "fit_seconds": 0.22518810500002928,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 60.02540628957851,
+      "fit_seconds": 0.21287788099994032,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 60.21858978717144,
+      "fit_seconds": 0.031218515999967167,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 60.461284888989,
+      "fit_seconds": 0.05078586800004814,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 57.44089333540313,
+      "fit_seconds": 0.5206509900000356,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 66.06604141280235,
+      "fit_seconds": 0.23219675600000755,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 66.06604141280235,
+      "fit_seconds": 0.22459916599996177,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 62.0378948605525,
+      "fit_seconds": 0.02049885400003859,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 64.52920665289906,
+      "fit_seconds": 0.05540313599999536,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 59.81468708858424,
+      "fit_seconds": 0.5825275010000723,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 63.708983142200296,
+      "fit_seconds": 0.22676070900001832,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 63.708983142200296,
+      "fit_seconds": 0.21676533799995923,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 62.735302304083405,
+      "fit_seconds": 0.03443613000001733,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 68.71065915712816,
+      "fit_seconds": 0.06222469200008618,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 61.48120010643271,
+      "fit_seconds": 0.5879907169999115,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 67.13226482863291,
+      "fit_seconds": 0.23087673700001687,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 67.13226482863291,
+      "fit_seconds": 0.27286920599999576,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 61.370334571357056,
+      "fit_seconds": 0.03077038900005391,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 68.66276025255596,
+      "fit_seconds": 0.058392020000042066,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 59.8872356326027,
+      "fit_seconds": 0.5448818729998948,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 64.33943102694947,
+      "fit_seconds": 0.2773502480000616,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 64.33943102694947,
+      "fit_seconds": 0.2521536259999948,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 62.15551180506079,
+      "fit_seconds": 0.020764405000022634,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 65.62596035411725,
+      "fit_seconds": 0.11015450399997917,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 61.87583712665121,
+      "fit_seconds": 0.6292267960000117,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 61.612103649942036,
+      "fit_seconds": 0.22610879000001205,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 61.612103649942036,
+      "fit_seconds": 0.23038164899992353,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 60.21858998047615,
+      "fit_seconds": 0.029774509999924703,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 60.396624214525765,
+      "fit_seconds": 0.0776182870000639,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 57.44089351557518,
+      "fit_seconds": 0.5965002720000712,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 66.67776466545422,
+      "fit_seconds": 0.22490496700004314,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 66.67776466545422,
+      "fit_seconds": 0.24051126699998804,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 62.0378952145678,
+      "fit_seconds": 0.026522794000015892,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 64.42788071795535,
+      "fit_seconds": 0.09701524199999767,
+      "error": null
+    },
+    {
+      "dataset": "diabetes@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 59.81468738188742,
+      "fit_seconds": 0.7192397759999949,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 1.2364339852486046,
+      "fit_seconds": 0.33388635300002534,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 1.2496546169655571,
+      "fit_seconds": 0.3997659269999758,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 1.2117528676102045,
+      "fit_seconds": 16.65598270299995,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 1.3626658980149744,
+      "fit_seconds": 0.07878966999999193,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 1.0767364279198568,
+      "fit_seconds": 1.310216051999987,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 1.219299455961195,
+      "fit_seconds": 0.2257249410000668,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 1.245704136480913,
+      "fit_seconds": 0.20024589600006948,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 1.2087286134778534,
+      "fit_seconds": 0.0757615679999617,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 1.3607110191434755,
+      "fit_seconds": 0.053249221999976726,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 1.057834006504395,
+      "fit_seconds": 1.3152702659999704,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 1.251834884177448,
+      "fit_seconds": 0.1966802000000598,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 1.270384909185105,
+      "fit_seconds": 0.21200596699998187,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 1.2538765644528904,
+      "fit_seconds": 0.0643295389999139,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 1.3887409000731004,
+      "fit_seconds": 0.08923925099998087,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 1.0878799099449148,
+      "fit_seconds": 1.361773855000024,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 1.2438593569060237,
+      "fit_seconds": 0.23301079700001992,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 1.2514906130023877,
+      "fit_seconds": 0.20394470600001569,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 1.2297526169278266,
+      "fit_seconds": 0.11667276600007881,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 1.359671189406998,
+      "fit_seconds": 0.05789240000001428,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 1.0894051206528492,
+      "fit_seconds": 1.3528387229999908,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 1.2558954295330838,
+      "fit_seconds": 0.22141222900006596,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 1.2509140089999713,
+      "fit_seconds": 0.2146118650000517,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 1.223924408475658,
+      "fit_seconds": 2.4158344940000234,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 1.3824941505124553,
+      "fit_seconds": 0.05570069500004138,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale0.001",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 1.1184466990645934,
+      "fit_seconds": 1.2339505779999627,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy",
+      "loss": 1.2460910009321093,
+      "fit_seconds": 0.21692448700002842,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "alloy-manual",
+      "loss": 1.2528458532189164,
+      "fit_seconds": 0.24199769699998797,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "lightgbm",
+      "loss": 1.2117528670017124,
+      "fit_seconds": 0.10844348800003445,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "xgboost",
+      "loss": 1.3594435760473338,
+      "fit_seconds": 0.15587883500006683,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 0,
+      "arm": "catboost",
+      "loss": 1.0767364304414198,
+      "fit_seconds": 1.1916093749999845,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy",
+      "loss": 1.247453011563854,
+      "fit_seconds": 0.21592741699998896,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "alloy-manual",
+      "loss": 1.264673829600203,
+      "fit_seconds": 0.2447077189999618,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "lightgbm",
+      "loss": 1.2087286118950105,
+      "fit_seconds": 0.09332432700000481,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "xgboost",
+      "loss": 1.3694687021248226,
+      "fit_seconds": 0.12499745899992831,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 1,
+      "arm": "catboost",
+      "loss": 1.0578340054226794,
+      "fit_seconds": 1.2625106010000309,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy",
+      "loss": 1.2675971542383209,
+      "fit_seconds": 0.2278954570000451,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "alloy-manual",
+      "loss": 1.2842403050558522,
+      "fit_seconds": 0.2758060429999887,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "lightgbm",
+      "loss": 1.253876566759447,
+      "fit_seconds": 0.11339428600001611,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "xgboost",
+      "loss": 1.377750330444374,
+      "fit_seconds": 0.12992755900006614,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 2,
+      "arm": "catboost",
+      "loss": 1.0878799138471844,
+      "fit_seconds": 1.2894256660000565,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy",
+      "loss": 1.2450551440539896,
+      "fit_seconds": 0.24525794700002734,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "alloy-manual",
+      "loss": 1.2760941396967322,
+      "fit_seconds": 0.2740721499999381,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "lightgbm",
+      "loss": 1.2297526145357227,
+      "fit_seconds": 0.13730125100005353,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "xgboost",
+      "loss": 1.36956569548506,
+      "fit_seconds": 0.13188965999995617,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 3,
+      "arm": "catboost",
+      "loss": 1.0894051189013525,
+      "fit_seconds": 1.3101614660000678,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy",
+      "loss": 1.2585625863524312,
+      "fit_seconds": 0.24603559299998778,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "alloy-manual",
+      "loss": 1.2768433178010423,
+      "fit_seconds": 0.24579019999998764,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "lightgbm",
+      "loss": 1.2239244091931096,
+      "fit_seconds": 0.07062125400000241,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "xgboost",
+      "loss": 1.4003614546446526,
+      "fit_seconds": 0.11806308500001705,
+      "error": null
+    },
+    {
+      "dataset": "friedman1@scale1000",
+      "task": "regression",
+      "stratum": "scale",
+      "seed": 4,
+      "arm": "catboost",
+      "loss": 1.1184467013658699,
+      "fit_seconds": 1.2443173809999735,
+      "error": null
+    }
+  ]
+}
