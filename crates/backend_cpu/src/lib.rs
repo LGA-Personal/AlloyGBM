@@ -33,8 +33,8 @@ use arena::{
 use factor_split::{FactorSplitScratch, with_factor_split_scratch};
 use split_helpers::{
     GainStrategy, MissingDirectionCandidate, ScalarSideStats, apply_feature_weight,
-    categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, gain_materially_exceeds,
-    goes_left_for_split, l1_threshold_gradient, split_gain_term,
+    categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, feature_weight_allows_split,
+    gain_materially_exceeds, goes_left_for_split, l1_threshold_gradient, split_gain_term,
 };
 use split_scan::with_split_scan_scratch;
 
@@ -1729,16 +1729,20 @@ impl CpuBackend {
         // Parallelism for this phase comes from the level's node-level
         // `par_iter` and, for histogram construction, from feature tiles.
         {
-            histograms.features().filter_map(find_best).reduce(|a, b| {
-                if gain_materially_exceeds(
-                    apply_feature_weight(&b, feature_weights),
-                    apply_feature_weight(&a, feature_weights),
-                ) {
-                    b
-                } else {
-                    a
-                }
-            })
+            histograms
+                .features()
+                .filter_map(find_best)
+                .filter(|candidate| feature_weight_allows_split(candidate, feature_weights))
+                .reduce(|a, b| {
+                    if gain_materially_exceeds(
+                        apply_feature_weight(&b, feature_weights),
+                        apply_feature_weight(&a, feature_weights),
+                    ) {
+                        b
+                    } else {
+                        a
+                    }
+                })
         }
     }
 
