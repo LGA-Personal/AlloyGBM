@@ -13,13 +13,14 @@ use monotone::{
     has_active_monotone_constraints, project_monotone_forest, project_monotone_tree,
     validate_monotone_forest,
 };
+pub(crate) use policy::{
+    AUTO_SPLIT_L2_NOISY_SMALL_WIDE, auto_leaf_regularization, is_small_wide,
+    resolve_training_policy, split_selection_options_with_controls,
+};
 #[cfg(test)]
 pub(crate) use policy::{
-    AUTO_SPLIT_L2_NOISY_SMALL_WIDE, should_apply_auto_split_l2,
-    split_selection_options_for_training,
-};
-pub(crate) use policy::{
-    resolve_training_policy, split_selection_options_with_resolution_for_training,
+    should_apply_auto_split_l2, split_selection_options_for_training,
+    split_selection_options_with_resolution_for_training,
 };
 pub(crate) use tree_build::{
     LEAF_EPSILON, apply_single_categorical_target_encoding, build_tree_leaf_wise,
@@ -28,7 +29,7 @@ pub(crate) use tree_build::{
 #[cfg(test)]
 pub(crate) use tree_build::{subtract_histogram_bundle, subtract_histogram_bundle_into};
 pub(crate) use validate::{
-    binned_feature_density, compute_feature_means_from_matrix, factor_split_context_for_node,
+    compute_feature_means_from_matrix, factor_split_context_for_node,
     gradient_neutralization_config, prepare_pre_target_training_dataset, target_variance,
     validate_gradient_pair_length, validate_gradient_pairs, validate_neutralization_fit_contract,
     validate_neutralization_fit_contract_for_support, validate_partition_cover,
@@ -682,13 +683,39 @@ impl Trainer {
         policy_mode: TrainingPolicyMode,
         is_ranking: bool,
     ) -> EngineResult<IterationControls> {
+        let family = if is_ranking {
+            ObjectiveFamily::Ranking
+        } else {
+            ObjectiveFamily::Regression
+        };
+        self.iteration_controls_for_objective_family(
+            dataset,
+            binned_matrix,
+            rounds,
+            policy_mode,
+            family,
+        )
+    }
+
+    /// Resolve iteration controls for `policy_mode`, letting the auto policy
+    /// choose defaults appropriate to the objective's `family` (for example,
+    /// leaf regularization for classifiers, whose leaves otherwise overfit
+    /// badly on confidently separated rows).
+    pub fn iteration_controls_for_objective_family(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        rounds: usize,
+        policy_mode: TrainingPolicyMode,
+        family: ObjectiveFamily,
+    ) -> EngineResult<IterationControls> {
         let controls = if experiment_force_manual_policy_enabled() {
             self.default_iteration_controls(rounds)?
         } else {
             match policy_mode {
                 TrainingPolicyMode::Manual => self.default_iteration_controls(rounds),
                 TrainingPolicyMode::Auto => {
-                    self.auto_iteration_controls(dataset, binned_matrix, rounds, is_ranking)
+                    self.auto_iteration_controls(dataset, binned_matrix, rounds, family)
                 }
             }?
         };
@@ -1032,11 +1059,12 @@ impl Trainer {
         }
 
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
-        let split_resolution = split_selection_options_with_resolution_for_training(
+        let split_resolution = split_selection_options_with_controls(
             &self.params,
             None,
             dataset,
             binned_matrix,
+            Some(&controls),
         )?;
         let resolved_training_policy = resolve_training_policy(controls, &split_resolution);
         let split_options = split_resolution.options;
@@ -2131,26 +2159,40 @@ impl Trainer {
         dataset: &TrainingDataset,
         binned_matrix: &BinnedMatrix,
         rounds: usize,
-        is_ranking: bool,
+        family: ObjectiveFamily,
     ) -> EngineResult<IterationControls> {
         validate_training_alignment(dataset, binned_matrix)?;
         let mut controls = self.default_iteration_controls(rounds)?;
         let row_count = dataset.row_count();
+        (controls.auto_lambda_l2, controls.auto_min_child_hessian) =
+            auto_leaf_regularization(family, row_count);
         let feature_count = binned_matrix.feature_count;
-        let target_variance = target_variance(&dataset.targets, dataset.sample_weights.as_deref())?;
         if row_count < 1_024 {
-            let rows_per_feature = row_count as f32 / feature_count.max(1) as f32;
-            if feature_count >= 8
-                && rounds > 256
-                && rows_per_feature < 64.0
-                && target_variance > 1.0
-            {
+            // Small, wide data: cap very long requests and, for regression,
+            // regularize leaves harder. Only the data's shape decides this for
+            // regression: a target-variance condition here used to make the
+            // model depend on the target's units. Ranking labels have an
+            // intrinsic scale, so ranking keeps its original variance check.
+            let small_wide = is_small_wide(row_count, feature_count);
+            let cap_applies = match family {
+                ObjectiveFamily::Regression => small_wide,
+                ObjectiveFamily::Ranking => {
+                    small_wide
+                        && target_variance(&dataset.targets, dataset.sample_weights.as_deref())?
+                            > 1.0
+                }
+                ObjectiveFamily::BinaryClassification
+                | ObjectiveFamily::MulticlassClassification => false,
+            };
+            if cap_applies && rounds > 256 {
                 controls.rounds = rounds.min(96);
+            }
+            if family == ObjectiveFamily::Regression && small_wide {
+                controls.auto_lambda_l2 =
+                    controls.auto_lambda_l2.max(AUTO_SPLIT_L2_NOISY_SMALL_WIDE);
             }
             return Ok(controls);
         }
-
-        let binned_density = binned_feature_density(binned_matrix);
 
         let suggested_min_rows = if row_count < 128 {
             1
@@ -2168,21 +2210,15 @@ impl Trainer {
             .max(user_min)
             .min(row_count.saturating_div(2).max(1));
 
-        // Ranking objectives produce gradients whose gain scale differs from
-        // regression/classification. The density-based min_split_gain floor
-        // was tuned for regression losses and can stop ranking early, so keep
-        // it disabled for ranking. Training-loss stopping is opt-in globally;
-        // validation early stopping is the default stopping policy.
-        let auto_min_split_gain: f32 = if is_ranking {
-            0.0
-        } else if binned_density < 0.10 {
-            0.001
-        } else if row_count.saturating_mul(feature_count) >= 65_536 {
-            0.0001
-        } else {
-            0.0
-        };
-        controls.min_split_gain = auto_min_split_gain.max(self.params.min_split_gain);
+        // No automatic minimum split gain. Split gain is measured in the
+        // target's units squared (for squared error), so any absolute floor
+        // makes the model depend on those units: an earlier 1e-4 floor made a
+        // target expressed in thousands 2.5x worse than the same target in
+        // ones. Calibration also found the floor quality-neutral where it did
+        // not bind (docs/benchmarks/auto_policy_calibration_v1.md,
+        // `no_gain_floor`). LightGBM and XGBoost default to 0 for the same
+        // reason. A user-set `min_split_gain` still applies.
+        controls.min_split_gain = self.params.min_split_gain;
         controls.min_loss_improvement = 0.0;
         controls.max_consecutive_weak_improvements = 0;
 
@@ -2313,11 +2349,12 @@ impl Trainer {
             None
         };
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
-        let split_resolution = split_selection_options_with_resolution_for_training(
+        let split_resolution = split_selection_options_with_controls(
             &self.params,
             execution.policy_mode,
             active_dataset,
             binned_matrix,
+            Some(&controls),
         )?;
         let resolved_training_policy = resolve_training_policy(controls, &split_resolution);
         let split_options = split_resolution.options;

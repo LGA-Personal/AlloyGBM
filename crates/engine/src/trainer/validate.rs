@@ -243,26 +243,6 @@ pub(crate) fn validate_partition_cover(
     Ok(())
 }
 
-pub(crate) fn binned_feature_density(binned_matrix: &BinnedMatrix) -> f32 {
-    let bin_count = binned_matrix.max_bin as usize + 1;
-    let feature_count = binned_matrix.feature_count;
-    let total_slots = feature_count.saturating_mul(bin_count);
-    if total_slots == 0 {
-        return 0.0;
-    }
-
-    let mut seen = vec![false; total_slots];
-    for row_index in 0..binned_matrix.row_count {
-        let row_base = row_index * feature_count;
-        for feature_index in 0..feature_count {
-            let bin = binned_matrix.row_bin(row_base + feature_index) as usize;
-            seen[feature_index * bin_count + bin] = true;
-        }
-    }
-    let occupied = seen.into_iter().filter(|value| *value).count();
-    occupied as f32 / total_slots as f32
-}
-
 pub(crate) fn target_variance(
     targets: &[f32],
     sample_weights: Option<&[f32]>,
