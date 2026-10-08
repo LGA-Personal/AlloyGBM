@@ -133,9 +133,22 @@ Stopping and policy controls
 recommended default for practical use. ``manual`` is more appropriate for
 controlled ablation work.
 
+What ``auto`` does depends on the objective, never on the units of the target:
+
+- binary classification: ``min_child_hessian = 1.0``, tapered linearly below
+  64 rows;
+- multiclass classification: leaf ``lambda_l2 = 1.0``;
+- regression: ``lambda_l2 = 2.0`` only on small, wide data (under 1,024 rows,
+  at least 8 features, fewer than 64 rows per feature);
+- ranking: no extra leaf regularization;
+- no implicit ``min_split_gain`` floor for any objective.
+
+Any explicit ``lambda_l1``, ``lambda_l2`` or ``min_child_hessian`` turns the
+auto leaf regularization off.
+
 After fitting, ``resolved_training_policy_`` reports the requested policy
 mode, requested and effective round counts, effective leaf/split thresholds,
-effective row/column sampling, and split-L2 selection. It is a diagnostic
+effective row/column sampling, and the effective leaf L2. It is a diagnostic
 dictionary, not a constructor parameter or model-artifact field. It can be
 ``None`` only for an older or mocked native summary, older saved wrapper
 metadata, or an unfitted or reset estimator.
@@ -152,8 +165,8 @@ Leaf and split controls
 - ``lambda_l1: float = 0.0``
 - ``lambda_l2: float = 0.0``
 - ``min_child_hessian: float = 0.0``
-- ``min_split_gain: float = 0.0`` -- minimum gain required for a split. The auto
-  policy may set this adaptively.
+- ``min_split_gain: float = 0.0`` -- minimum gain required for a split, used as
+  given under both policies.
 
 These map directly to native training controls instead of relying on
 environment-variable overrides.

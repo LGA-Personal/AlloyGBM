@@ -140,9 +140,30 @@ cont.fit(X, y, init_model=base)
 `training_policy="auto"` is the recommended default unless you are doing a
 tight parameter ablation and want fewer adaptive adjustments.
 
+What `auto` does depends on the objective, never on the units of the target
+(rescaling `y` by 1000 gives the same trees, scaled):
+
+- Binary classification: `min_child_hessian = 1.0` (the XGBoost
+  `min_child_weight` default), tapered linearly below 64 rows so tiny
+  datasets can still split. Without it, a leaf that holds only one class is
+  unbounded and probability calibration suffers.
+- Multiclass classification: leaf `lambda_l2 = 1.0`.
+- Regression: no extra leaf regularization, except `lambda_l2 = 2.0` on
+  small, wide data (under 1,024 rows, at least 8 features, fewer than 64 rows
+  per feature).
+- Ranking: no extra leaf regularization.
+- All objectives: no implicit `min_split_gain` floor. Gain is measured in the
+  target's squared units, so a fixed floor would change the model when the
+  target is rescaled.
+
+Any explicit `lambda_l1`, `lambda_l2` or `min_child_hessian` turns the auto
+leaf regularization off and is used as given. `training_policy="manual"`
+applies none of the above.
+
 After fitting, `resolved_training_policy_` reports the requested policy mode,
 requested and effective round counts, effective leaf/split thresholds,
-effective row/column sampling, and split-L2 selection. It is a diagnostic
+effective row/column sampling, and the effective leaf L2 (`effective_split_l2`,
+with `auto_split_l2_applied` saying whether auto chose it). It is a diagnostic
 dictionary, not a constructor parameter or model-artifact field. It can be
 `None` only for an older or mocked native summary, older saved wrapper
 metadata, or an unfitted or reset estimator.
@@ -163,8 +184,8 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
 - `min_child_hessian: float = 0.0`
   - Minimum child Hessian required for a split candidate.
 - `min_split_gain: float = 0.0`
-  - Minimum gain required for a split to be made. The auto training policy may
-    set this adaptively; passing it explicitly overrides that.
+  - Minimum gain required for a split to be made. Used as given under both
+    policies; `auto` adds no floor of its own.
 
 ## Tree Growth Strategy
 
