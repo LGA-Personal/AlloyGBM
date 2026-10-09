@@ -399,6 +399,159 @@ pub(crate) fn quantile_cuts_from_weighted_values(
     cuts
 }
 
+/// Place a cut between two adjacent distinct values.
+///
+/// A cut `c` sends every value `>= c` to the upper bin (see
+/// [`quantize_quantile_value`]), so the cut must satisfy `lower < c <= upper`.
+/// The midpoint sends an unseen value between two training values to the
+/// nearer bin. When the two values are adjacent `f32`s the rounded midpoint
+/// can collapse onto `lower`; `upper` itself is then the only valid cut.
+fn midpoint_cut(lower: f32, upper: f32) -> f32 {
+    let midpoint = ((f64::from(lower) + f64::from(upper)) * 0.5) as f32;
+    if midpoint > lower && midpoint <= upper {
+        midpoint
+    } else {
+        upper
+    }
+}
+
+/// Greedy border selection over a feature's distinct values.
+///
+/// Port of LightGBM's `GreedyFindBin` (with `min_data_in_bin = 1`), adapted
+/// to AlloyGBM's lower-bound cut convention:
+///
+/// * When the distinct values fit in `data_bin_count`, every value gets its
+///   own bin.
+/// * Otherwise a value holding at least an equal share of the rows becomes
+///   a bin of its own, and the remaining budget is spread over the remaining
+///   rows, re-balanced after every bin. Equal-frequency cuts, by contrast,
+///   land several times on a heavy value and the duplicates are dropped, so
+///   their share of the budget is lost.
+///
+/// Cuts sit halfway between adjacent distinct values. `counts` are the row
+/// counts (or weights) of each value; only their ratios matter except in
+/// the "close a bin before a heavy value" rule, which compares against one
+/// row, so weighted callers should normalize counts to row units.
+fn greedy_cuts_from_distinct_values(
+    distinct_values: &[f32],
+    counts: &[f64],
+    data_bin_count: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(distinct_values.len(), counts.len());
+    let distinct_count = distinct_values.len();
+    if distinct_count <= 1 || data_bin_count <= 1 {
+        return Vec::new();
+    }
+    if distinct_count <= data_bin_count {
+        return distinct_values
+            .windows(2)
+            .map(|pair| midpoint_cut(pair[0], pair[1]))
+            .collect();
+    }
+
+    let max_bin = data_bin_count;
+    let total: f64 = counts.iter().sum();
+    let mut mean_bin_size = total / max_bin as f64;
+    let mut rest_bin_count = max_bin as i64;
+    let mut rest_sample_count = total;
+    let is_big: Vec<bool> = counts.iter().map(|count| *count >= mean_bin_size).collect();
+    for (count, big) in counts.iter().zip(&is_big) {
+        if *big {
+            rest_bin_count -= 1;
+            rest_sample_count -= count;
+        }
+    }
+    mean_bin_size = rest_sample_count / rest_bin_count.max(1) as f64;
+
+    let mut cuts = Vec::with_capacity(max_bin - 1);
+    let mut bin_count = 0usize;
+    let mut current_bin_size = 0.0_f64;
+    for index in 0..distinct_count - 1 {
+        if !is_big[index] {
+            rest_sample_count -= counts[index];
+        }
+        current_bin_size += counts[index];
+        let close_bin = is_big[index]
+            || current_bin_size >= mean_bin_size
+            || (is_big[index + 1] && current_bin_size >= (mean_bin_size * 0.5).max(1.0));
+        if close_bin {
+            cuts.push(midpoint_cut(
+                distinct_values[index],
+                distinct_values[index + 1],
+            ));
+            bin_count += 1;
+            if bin_count >= max_bin - 1 {
+                break;
+            }
+            current_bin_size = 0.0;
+            if !is_big[index] {
+                rest_bin_count -= 1;
+                mean_bin_size = rest_sample_count / rest_bin_count.max(1) as f64;
+            }
+        }
+    }
+    cuts
+}
+
+/// Greedy cut points for one unweighted feature column (sorted, NaN-free).
+///
+/// `data_bin_count` has the same meaning as in
+/// [`quantile_cuts_from_sorted_values`].
+pub(crate) fn greedy_cuts_from_sorted_values(
+    sorted_values: &[f32],
+    data_bin_count: usize,
+) -> Vec<f32> {
+    let mut distinct_values = Vec::new();
+    let mut counts: Vec<f64> = Vec::new();
+    for value in sorted_values {
+        if distinct_values.last() == Some(value) {
+            *counts.last_mut().expect("counts track distinct values") += 1.0;
+        } else {
+            distinct_values.push(*value);
+            counts.push(1.0);
+        }
+    }
+    greedy_cuts_from_distinct_values(&distinct_values, &counts, data_bin_count)
+}
+
+/// Weighted counterpart of [`greedy_cuts_from_sorted_values`]. Rows must
+/// already be filtered to positive weights and sorted by value.
+///
+/// Each distinct value's count is its weight share rescaled to row units
+/// (`weight / total_weight * rows`), which leaves every ratio in the greedy
+/// rule unchanged and keeps its one-row floor meaningful.
+pub(crate) fn greedy_cuts_from_weighted_values(
+    sorted_values: &[(f32, f32)],
+    data_bin_count: usize,
+) -> Vec<f32> {
+    let total_weight: f64 = sorted_values
+        .iter()
+        .map(|(_, weight)| f64::from(*weight))
+        .sum();
+    if sorted_values.len() <= 1 || total_weight <= 0.0 {
+        return Vec::new();
+    }
+    let row_scale = sorted_values.len() as f64 / total_weight;
+    let mut distinct_values = Vec::new();
+    let mut counts: Vec<f64> = Vec::new();
+    for (value, weight) in sorted_values {
+        let count = f64::from(*weight) * row_scale;
+        if distinct_values.last() == Some(value) {
+            *counts.last_mut().expect("counts track distinct values") += count;
+        } else {
+            distinct_values.push(*value);
+            counts.push(count);
+        }
+    }
+    greedy_cuts_from_distinct_values(&distinct_values, &counts, data_bin_count)
+}
+
+/// `ALLOYGBM_EXPERIMENT_EQUAL_FREQUENCY_BINS=1` restores the equal-frequency
+/// cut selection used before greedy borders, for A/B benchmarking.
+fn equal_frequency_bins_enabled_from_env() -> bool {
+    env_toggle_enabled(crate::EQUAL_FREQUENCY_BINS_ENV_VAR)
+}
+
 fn evenly_spaced_row_index(sample_index: usize, sample_count: usize, row_count: usize) -> usize {
     if sample_count <= 1 {
         return row_count / 2;
@@ -420,6 +573,7 @@ pub(crate) fn derive_dense_feature_quantile_cuts(
     // budget emits one cut too many and `quantize_quantile_value` clamps the
     // top interval into its neighbour, merging the two highest quantiles.
     let data_bin_count = max_bins.saturating_sub(1);
+    let equal_frequency = equal_frequency_bins_enabled_from_env();
     let sampled_row_count = sketch_max_rows.filter(|max_rows| row_count > *max_rows);
     let selected_row_count = sampled_row_count.unwrap_or(row_count);
     let derive_feature_cuts = |feature_index: usize| {
@@ -438,7 +592,11 @@ pub(crate) fn derive_dense_feature_quantile_cuts(
                 }
             }
             column.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
-            quantile_cuts_from_weighted_values(&column, data_bin_count)
+            if equal_frequency {
+                quantile_cuts_from_weighted_values(&column, data_bin_count)
+            } else {
+                greedy_cuts_from_weighted_values(&column, data_bin_count)
+            }
         } else {
             let mut column = Vec::with_capacity(selected_row_count);
             for selected_index in 0..selected_row_count {
@@ -453,7 +611,11 @@ pub(crate) fn derive_dense_feature_quantile_cuts(
                 }
             }
             column.sort_unstable_by(f32::total_cmp);
-            quantile_cuts_from_sorted_values(&column, data_bin_count)
+            if equal_frequency {
+                quantile_cuts_from_sorted_values(&column, data_bin_count)
+            } else {
+                greedy_cuts_from_sorted_values(&column, data_bin_count)
+            }
         }
     };
 

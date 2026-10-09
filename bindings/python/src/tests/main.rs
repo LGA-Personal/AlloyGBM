@@ -315,9 +315,12 @@ fn quantile_sketch_uses_exact_fallback_and_even_row_coverage() {
         sampled.metadata.feature_quantile_cut_methods,
         Some(vec!["sketch".to_string()])
     );
+    // The sketch keeps rows 0, 4, 9, 14 and 19 (values 0.25 .. 19.25). Their
+    // five distinct values fit the budget, so greedy borders cut halfway
+    // between each neighbouring pair.
     assert_eq!(
         sampled.metadata.feature_quantile_cuts,
-        Some(vec![vec![4.25, 9.25, 14.25, 19.25]])
+        Some(vec![vec![2.25, 6.75, 11.75, 16.75]])
     );
 }
 
@@ -1045,4 +1048,145 @@ fn derived_cuts_leave_a_free_slot_for_the_missing_bin() {
             feature_cuts.len()
         );
     }
+}
+
+fn bin_counts_for_cuts(values: &[f32], cuts: &[f32], max_data_bin: u16) -> Vec<usize> {
+    let mut counts = vec![0usize; usize::from(max_data_bin) + 1];
+    for value in values {
+        let bin = crate::quantization::quantize_quantile_value(*value, cuts, max_data_bin);
+        counts[usize::from(bin)] += 1;
+    }
+    counts
+}
+
+#[test]
+fn greedy_cuts_give_every_distinct_value_its_own_bin_when_they_fit() {
+    // 40 distinct integers, heavily skewed: equal-frequency cuts land on the
+    // common values repeatedly and drop the duplicates, so rare values share
+    // bins. Greedy borders must separate all 40.
+    let mut values = Vec::new();
+    for value in 1..=40u32 {
+        let repeats = 4_000 / (value * value) + 1;
+        values.extend(std::iter::repeat_n(value as f32, repeats as usize));
+    }
+    let cuts = crate::quantization::greedy_cuts_from_sorted_values(&values, 255);
+    assert_eq!(cuts.len(), 39);
+    for (index, cut) in cuts.iter().enumerate() {
+        let expected = index as f32 + 1.5;
+        assert_eq!(
+            *cut, expected,
+            "cut {index} sits halfway between neighbours"
+        );
+    }
+    let counts = bin_counts_for_cuts(&values, &cuts, 254);
+    assert_eq!(counts.iter().filter(|count| **count > 0).count(), 40);
+
+    let legacy = crate::quantization::quantile_cuts_from_sorted_values(&values, 255);
+    assert!(
+        legacy.len() < 39,
+        "the skewed fixture must actually defeat equal-frequency cuts"
+    );
+}
+
+#[test]
+fn greedy_cuts_spend_the_budget_dropped_by_equal_frequency_on_a_zipf_feature() {
+    // Zipf-like integer feature with more distinct values than bins. Heavy
+    // values get their own bins and the remaining budget covers the tail.
+    let mut values = Vec::new();
+    for value in 1..=2_000u32 {
+        let repeats = (200_000.0 / f64::from(value).powf(1.6)).ceil() as usize;
+        values.extend(std::iter::repeat_n(value as f32, repeats));
+    }
+    let greedy = crate::quantization::greedy_cuts_from_sorted_values(&values, 255);
+    let legacy = crate::quantization::quantile_cuts_from_sorted_values(&values, 255);
+    assert!(
+        greedy.len() <= 254,
+        "greedy cuts respect the data-bin budget"
+    );
+    assert!(
+        greedy.len() >= 240,
+        "greedy keeps nearly the whole budget, got {} cuts",
+        greedy.len()
+    );
+    assert!(
+        legacy.len() < greedy.len() / 2,
+        "equal-frequency drops duplicate cuts: {} vs {}",
+        legacy.len(),
+        greedy.len()
+    );
+    // The heaviest values are isolated.
+    let counts = bin_counts_for_cuts(&values, &greedy, 254);
+    assert_eq!(counts[0], values.iter().filter(|v| **v == 1.0).count());
+    assert_eq!(counts[1], values.iter().filter(|v| **v == 2.0).count());
+    assert!(greedy.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn greedy_cuts_stay_near_equal_frequency_on_continuous_data() {
+    let values: Vec<f32> = (1..=100_000).map(|value| value as f32).collect();
+    let cuts = crate::quantization::greedy_cuts_from_sorted_values(&values, 255);
+    assert_eq!(cuts.len(), 254, "255 data bins are delimited by 254 cuts");
+    let counts = bin_counts_for_cuts(&values, &cuts, 254);
+    let max = *counts.iter().max().expect("bins");
+    let min = *counts.iter().min().expect("bins");
+    assert!(min > 0, "every data bin is reachable");
+    assert!(
+        max <= min * 3 / 2,
+        "bins stay balanced: min {min}, max {max}"
+    );
+}
+
+#[test]
+fn greedy_midpoint_cut_never_collapses_onto_the_lower_value() {
+    // Adjacent f32 values: the rounded midpoint equals one of them, and the
+    // cut must still separate them (lower < cut <= upper).
+    let lower = 1.0_f32;
+    let upper = f32::from_bits(lower.to_bits() + 1);
+    let values = vec![lower, lower, upper, upper];
+    let cuts = crate::quantization::greedy_cuts_from_sorted_values(&values, 255);
+    assert_eq!(cuts.len(), 1);
+    assert!(cuts[0] > lower && cuts[0] <= upper);
+    let counts = bin_counts_for_cuts(&values, &cuts, 254);
+    assert_eq!(&counts[..2], &[2, 2]);
+}
+
+#[test]
+fn greedy_cuts_handle_degenerate_columns() {
+    assert!(crate::quantization::greedy_cuts_from_sorted_values(&[], 255).is_empty());
+    assert!(crate::quantization::greedy_cuts_from_sorted_values(&[3.0], 255).is_empty());
+    assert!(crate::quantization::greedy_cuts_from_sorted_values(&[3.0, 3.0, 3.0], 255).is_empty());
+    // Two data bins: exactly one cut, even with many distinct values.
+    let values: Vec<f32> = (0..100).map(|value| value as f32).collect();
+    assert_eq!(
+        crate::quantization::greedy_cuts_from_sorted_values(&values, 2).len(),
+        1
+    );
+    assert!(crate::quantization::greedy_cuts_from_weighted_values(&[], 255).is_empty());
+}
+
+#[test]
+fn weighted_greedy_cuts_match_unweighted_for_unit_and_uniform_weights() {
+    let mut values = Vec::new();
+    for value in 1..=1_000u32 {
+        let repeats = (50_000.0 / f64::from(value).powf(1.3)).ceil() as usize;
+        values.extend(std::iter::repeat_n(value as f32, repeats));
+    }
+    let unweighted = crate::quantization::greedy_cuts_from_sorted_values(&values, 255);
+    for weight in [1.0_f32, 0.25, 2.0] {
+        let weighted: Vec<(f32, f32)> = values.iter().map(|value| (*value, weight)).collect();
+        assert_eq!(
+            crate::quantization::greedy_cuts_from_weighted_values(&weighted, 255),
+            unweighted,
+            "uniform weight {weight} must not change the borders"
+        );
+    }
+}
+
+#[test]
+fn weighted_greedy_cuts_isolate_a_value_that_is_heavy_by_weight() {
+    // Value 0 is rare by count but carries most of the weight.
+    let mut weighted: Vec<(f32, f32)> = vec![(0.0, 10_000.0)];
+    weighted.extend((1..=5_000).map(|value| (value as f32, 1.0)));
+    let cuts = crate::quantization::greedy_cuts_from_weighted_values(&weighted, 255);
+    assert_eq!(cuts[0], 0.5, "the heavy value closes its own bin");
 }
