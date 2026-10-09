@@ -156,9 +156,11 @@ What `auto` does depends on the objective, never on the units of the target
   target's squared units, so a fixed floor would change the model when the
   target is rescaled.
 
-Any explicit `lambda_l1`, `lambda_l2` or `min_child_hessian` turns the auto
-leaf regularization off and is used as given. `training_policy="manual"`
-applies none of the above.
+Setting any of `lambda_l1`, `lambda_l2` or `min_child_hessian` to a nonzero
+value turns the auto leaf regularization off and uses your values as given.
+Passing `0.0` is the same as leaving the default, so to train with no leaf
+regularization at all use `training_policy="manual"`, which applies none of
+the above.
 
 After fitting, `resolved_training_policy_` reports the requested policy mode,
 requested and effective round counts, effective leaf/split thresholds,

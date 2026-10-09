@@ -143,8 +143,9 @@ What ``auto`` does depends on the objective, never on the units of the target:
 - ranking: no extra leaf regularization;
 - no implicit ``min_split_gain`` floor for any objective.
 
-Any explicit ``lambda_l1``, ``lambda_l2`` or ``min_child_hessian`` turns the
-auto leaf regularization off.
+A nonzero ``lambda_l1``, ``lambda_l2`` or ``min_child_hessian`` turns the auto
+leaf regularization off. Passing ``0.0`` is the same as the default; use
+``training_policy="manual"`` to train with no leaf regularization.
 
 After fitting, ``resolved_training_policy_`` reports the requested policy
 mode, requested and effective round counts, effective leaf/split thresholds,

@@ -20,8 +20,8 @@ Under `training_policy="auto"`:
 | Ranking | unchanged | unchanged |
 | All | absolute `min_split_gain` floor | no implicit floor |
 
-Explicit `lambda_l1`, `lambda_l2` or `min_child_hessian` turn the auto values
-off. `training_policy="manual"` is unchanged.
+A nonzero `lambda_l1`, `lambda_l2` or `min_child_hessian` turns the auto
+values off. `training_policy="manual"` is unchanged.
 
 The two removed conditions both depended on the target's units: gain is
 measured in squared target units, so a fixed floor (and a fixed variance

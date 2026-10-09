@@ -9,9 +9,9 @@
   `min_child_hessian = 1.0` (tapered below 64 rows), multiclass classifiers get
   leaf `lambda_l2 = 1.0`, and the implicit absolute `min_split_gain` floor is
   gone for every objective. The small-wide regression L2 rule now looks at the
-  data's shape only. Any explicit `lambda_l1`, `lambda_l2` or
+  data's shape only. A nonzero `lambda_l1`, `lambda_l2` or
   `min_child_hessian` disables the auto values; `training_policy="manual"` is
-  unchanged. On the new default-quality suite this improves AlloyGBM's
+  unchanged and turns them all off. On the new default-quality suite this improves AlloyGBM's
   defaults by 18% (geometric-mean test loss, 5 seeds, paired Wilcoxon
   p = 0.003): `breast_cancer` log loss falls about 5x and `wine` about 3.6x.
   Model outputs under `auto` change; see
