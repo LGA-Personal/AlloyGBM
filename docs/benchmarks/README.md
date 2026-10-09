@@ -20,7 +20,8 @@ Current benchmark entry points:
 - cross-library runner guide: `benchmarks/README.md`
 - default-vs-default multi-seed quality suite and gate:
   `benchmarks/default_quality.py` with report at
-  [default_quality_v1.md](default_quality_v1.md)
+  [default_quality_v1.md](default_quality_v1.md); greedy quantile borders at
+  [greedy_borders_v1.md](greedy_borders_v1.md)
 - MorphBoost-focused harnesses (`morph_report.py`, `morph_ablation.py`,
   `numerai_benchmark.py`): see `benchmarks/README.md`
 - deterministic DRO clean-holdout harness: `benchmarks/dro_robustness.py`

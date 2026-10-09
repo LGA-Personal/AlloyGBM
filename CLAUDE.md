@@ -179,6 +179,7 @@ maturin develop --release      # Build and install Python extension
 - **BackendOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Abstraction over hardware. Only `CpuBackend` exists.
 - **Training policy**: Auto mode with dataset-aware heuristics for `min_split_gain`, `min_rows_per_leaf`, regularization. Manual mode uses raw user params.
 - **Tree growth**: Level-wise (default) or leaf-wise (best-first) via `tree_growth` parameter.
+- **Quantile border selection** (`bindings/python/src/quantization.rs`): the default `continuous_binning_strategy="quantile"` picks cuts with a port of LightGBM's `GreedyFindBin` (`greedy_cuts_from_sorted_values` / `_weighted_values`): one bin per distinct value when they fit, heavy values isolated otherwise, cuts at midpoints between neighbouring distinct values. Cut semantics are `bin = #cuts <= value`, so stored cuts from older models stay valid. `ALLOYGBM_EXPERIMENT_EQUAL_FREQUENCY_BINS=1` restores equal-frequency cuts for A/B runs. The legacy-bridge Python path mirrors it in `_regressor/_quantization.py`.
 - **Histogram subtraction trick**: Used for child nodes within a level (smaller child built from scratch, larger = parent - smaller). Histogram buffers are reused across rounds.
 - **NaN handling**: Missing values get a dedicated bin; split finding learns the optimal direction for NaN.
 - **Model persistence**: Pickle support via `__getstate__`/`__setstate__`, `save_model`/`load_model`, and raw `artifact_bytes` property.

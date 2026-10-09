@@ -17,6 +17,20 @@
   Model outputs under `auto` change; see
   `docs/benchmarks/default_quality_v1.md`.
 
+- **Quantile binning chooses borders greedily, in the style of LightGBM's
+  `GreedyFindBin`.** A feature with no more distinct values than data bins gets
+  one bin per value; otherwise heavy values get their own bins and the rest of
+  the budget is spread over the remaining rows. Borders sit halfway between
+  neighbouring training values. Equal-frequency cuts wasted most of the budget
+  on skewed or discrete features (48 of 255 bins on a Zipf feature). On the
+  default-quality suite `skewed_discrete` improves 17% with no significant
+  regression, and AlloyGBM's normalized geomean moves from 1.236 to 1.215
+  (LightGBM 1.222). A side effect is that `feature_bundling="exact"` now
+  bundles nonnegative sparse columns under the default `"quantile"` strategy.
+  Models fitted before this change keep their stored cuts and predict exactly
+  as before; `ALLOYGBM_EXPERIMENT_EQUAL_FREQUENCY_BINS=1` restores the old cuts
+  for new fits. See `docs/benchmarks/greedy_borders_v1.md`.
+
 ### Fixed
 
 - A feature with `feature_weights` 0 could still be split on when no

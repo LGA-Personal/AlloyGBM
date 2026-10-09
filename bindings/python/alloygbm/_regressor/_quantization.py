@@ -18,7 +18,8 @@ from ._base import (
 class _QuantizationMixin:
     """Mixin carrying quantization/binning methods for GBMRegressor.
 
-    All 33 methods are moved verbatim from GBMRegressor in _core.py.
+    The original 33 methods were moved verbatim from GBMRegressor in
+    _core.py; the greedy-border helpers were added later.
     ``GBMRegressor`` references inside static method bodies resolve at
     call-time from this module's globals: after defining the class, _core.py
     injects ``_quantization.GBMRegressor = GBMRegressor`` (a top-level
