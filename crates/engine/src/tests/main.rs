@@ -1530,7 +1530,15 @@ impl BackendOps for ConcurrentHistogramBackend {
         let active = self.active_builds.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         self.max_active_builds
             .fetch_max(active, AtomicOrdering::SeqCst);
-        std::thread::sleep(Duration::from_millis(5));
+        // Stay active until another build is seen (or a generous timeout), so
+        // a slow-to-schedule runner can't miss an overlap that a fixed short
+        // sleep would. Sequential callers still never overlap; they just wait.
+        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        while self.max_active_builds.load(AtomicOrdering::SeqCst) < 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let result = MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles);
         self.active_builds.fetch_sub(1, AtomicOrdering::SeqCst);
         result
