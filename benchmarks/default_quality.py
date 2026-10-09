@@ -400,10 +400,17 @@ def compare(baseline_result: dict, candidate_result: dict, baseline: str, candid
                 if r["arm"] == baseline} | {
                (r["dataset"], r["seed"]) for r in candidate_result["records"]
                if r["arm"] == candidate}
-    missing = sorted(key for key in expected if key not in base or key not in cand)
+    def valid(loss: float) -> bool:
+        return math.isfinite(loss) and loss > 0.0
+
+    # A NaN, infinite or non-positive loss is a failed fit: it fails the gate
+    # like a missing pair instead of silently dropping out of the aggregate.
+    missing = sorted(key for key in expected
+                     if key not in base or key not in cand
+                     or not valid(base[key]) or not valid(cand[key]))
     per_dataset: dict[str, list[float]] = {}
     for key in sorted(set(base) & set(cand)):
-        if base[key] > 0 and cand[key] > 0:
+        if valid(base[key]) and valid(cand[key]):
             per_dataset.setdefault(key[0], []).append(math.log(cand[key] / base[key]))
     rows = []
     for ds, logs in per_dataset.items():

@@ -90,6 +90,15 @@ def test_compare_fails_closed_on_missing_pairs():
     assert cmp["missing"] == [("d1", 0)]
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0.0, -1.0])
+def test_compare_fails_closed_on_invalid_losses(bad):
+    base, cand = _uniform(0.9, jitter=0.01)
+    cand[("d2", 1)] = bad
+    cmp = dq.compare(_result({"base": base}), _result({"cand": cand}), "base", "cand")
+    assert not cmp["gate_passed"]
+    assert ("d2", 1) in cmp["missing"]
+
+
 def test_quick_suite_shapes_and_scale_variants():
     suite = dq.build_suite(quick=True)
     names = {ds.name for ds in suite}
