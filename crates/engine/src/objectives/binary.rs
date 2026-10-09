@@ -3,6 +3,7 @@ use alloygbm_core::GradientPair;
 use crate::binary_crossentropy_loss;
 use crate::error::{EngineError, EngineResult};
 use crate::traits::ObjectiveOps;
+use crate::types::ObjectiveFamily;
 
 /// Binary cross-entropy (log loss) objective for binary classification.
 /// Targets must be 0.0 or 1.0. Predictions are in log-odds (logit) space.
@@ -23,6 +24,10 @@ pub(crate) fn sigmoid(x: f32) -> f32 {
 impl ObjectiveOps for BinaryCrossEntropyObjective {
     fn objective_name(&self) -> &str {
         "binary_crossentropy"
+    }
+
+    fn objective_family(&self) -> ObjectiveFamily {
+        ObjectiveFamily::BinaryClassification
     }
 
     fn initial_prediction(

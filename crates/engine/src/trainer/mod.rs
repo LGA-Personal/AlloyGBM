@@ -568,12 +568,12 @@ impl Trainer {
         objective: &O,
         request: PolicyFitRequest,
     ) -> EngineResult<TrainedModel> {
-        let controls = self.iteration_controls_for_policy_ext(
+        let controls = self.iteration_controls_for_objective_family(
             active_dataset,
             binned_matrix,
             request.rounds,
             request.policy_mode,
-            objective.requires_group_id(),
+            objective.objective_family(),
         )?;
         let summary = self.fit_iterations_with_optional_validation_summary(
             active_dataset,

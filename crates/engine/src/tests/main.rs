@@ -4431,6 +4431,22 @@ fn auto_leaf_regularization_is_objective_aware() {
 }
 
 #[test]
+fn objective_family_lets_generic_fit_paths_use_the_classifier_policy() {
+    assert_eq!(
+        BinaryCrossEntropyObjective.objective_family(),
+        ObjectiveFamily::BinaryClassification
+    );
+    assert_eq!(
+        SquaredErrorObjective.objective_family(),
+        ObjectiveFamily::Regression
+    );
+    assert_eq!(
+        LambdaMARTObjective::new(&[0, 0, 1, 1]).objective_family(),
+        ObjectiveFamily::Ranking
+    );
+}
+
+#[test]
 fn auto_binary_hessian_floor_tapers_on_tiny_datasets() {
     // Six binary rows carry at most 1.5 total Hessian; a full 1.0 floor per
     // child would forbid every split and train a constant model.

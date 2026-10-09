@@ -3,7 +3,10 @@
 
 use alloygbm_core::{BinnedMatrix, LeafSolverKind, TrainParams, TrainingDataset};
 
-use crate::env::{split_l2_env_is_configured, split_selection_options_from_env};
+use crate::env::{
+    leaf_regularization_env_is_configured, split_l2_env_is_configured,
+    split_selection_options_from_env,
+};
 use crate::error::EngineResult;
 use crate::split_options::SplitSelectionOptions;
 use crate::types::{
@@ -114,7 +117,7 @@ pub(crate) fn split_selection_options_with_controls(
     let auto_requested = matches!(policy_mode, Some(TrainingPolicyMode::Auto))
         || controls.is_some_and(|c| c.requested_policy_mode == TrainingPolicyMode::Auto);
     let auto_regularization_allowed =
-        auto_requested && !user_set_regularization && !split_l2_env_is_configured();
+        auto_requested && !user_set_regularization && !leaf_regularization_env_is_configured();
     if let Some(controls) = controls.filter(|_| auto_regularization_allowed) {
         if controls.auto_lambda_l2 > 0.0 {
             options.l2_lambda = controls.auto_lambda_l2;
