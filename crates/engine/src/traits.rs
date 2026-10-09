@@ -8,6 +8,7 @@ use crate::split_options::{
     CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, PreparedLinearSplit,
     SplitSelectionOptions, SplitShortlist,
 };
+use crate::types::ObjectiveFamily;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistogramExecution {
@@ -353,6 +354,15 @@ pub trait ObjectiveOps {
     /// Whether this objective requires `group_id` on the training dataset.
     fn requires_group_id(&self) -> bool {
         false
+    }
+
+    /// Which auto-policy family this objective belongs to.
+    fn objective_family(&self) -> ObjectiveFamily {
+        if self.requires_group_id() {
+            ObjectiveFamily::Ranking
+        } else {
+            ObjectiveFamily::Regression
+        }
     }
 
     /// Return the quantile alpha if this is a quantile objective.

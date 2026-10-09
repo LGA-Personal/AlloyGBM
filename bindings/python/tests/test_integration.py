@@ -515,6 +515,22 @@ class TestConstraintsWithObjectives(unittest.TestCase):
         for name, imp in zero_weighted.items():
             self.assertAlmostEqual(imp, 0.0, places=5, msg=f"{name} should have ~0 importance")
 
+    def test_zero_weight_feature_is_never_split(self) -> None:
+        # f1 and f2 are constant, so f0 is the only feature with a split
+        # candidate. Weighting it 0 must still keep it out of every tree.
+        rng = np.random.default_rng(7)
+        X = np.ones((300, 3))
+        X[:, 0] = rng.normal(size=300)
+        y = X[:, 0].copy()
+        model = GBMRegressor(
+            n_estimators=10,
+            feature_weights={0: 0.0},
+            training_policy="manual",
+            seed=0,
+        ).fit(X, y)
+        importances = dict(model.feature_importances(X[:50]))
+        self.assertEqual(importances.get("f0", 0.0), 0.0)
+
     def test_feature_weights_ranking(self) -> None:
         X, y, group = _make_ranking_data(n_features=6, seed=210)
         ranker = GBMRanker(

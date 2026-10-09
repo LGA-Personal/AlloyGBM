@@ -109,6 +109,13 @@ pub struct IterationControls {
     pub requested_rounds: usize,
     /// Public policy mode requested by the caller.
     pub requested_policy_mode: TrainingPolicyMode,
+    /// L2 leaf regularization chosen by the auto policy. Applied only when
+    /// the caller set no explicit regularization (`lambda_l2`, `lambda_l1`
+    /// and `min_child_hessian` all zero). `0.0` means "no auto value".
+    pub auto_lambda_l2: f32,
+    /// Minimum child Hessian sum chosen by the auto policy, under the same
+    /// rule as `auto_lambda_l2`. `0.0` means "no auto value".
+    pub auto_min_child_hessian: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +332,24 @@ pub enum TrainingPolicyMode {
     Auto,
 }
 
+/// Coarse objective family the auto training policy keys its defaults on.
+///
+/// Gradients and Hessians have different scales and meanings per family, so
+/// a regularization default that suits one can be wrong for another: log-loss
+/// Hessians are bounded by 0.25 per row, squared-error Hessians are exactly 1,
+/// and ranking Hessians are pairwise and often far below 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectiveFamily {
+    /// Squared error, quantile, GLM and custom objectives.
+    Regression,
+    /// Binary cross-entropy.
+    BinaryClassification,
+    /// Multiclass softmax.
+    MulticlassClassification,
+    /// Pairwise, LambdaMART, XE-NDCG, YetiRank and QueryRMSE.
+    Ranking,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedTrainingPolicy {
     pub requested_mode: TrainingPolicyMode,
@@ -442,6 +467,8 @@ impl IterationControls {
             training_loss_gate_enabled: false,
             requested_rounds: rounds,
             requested_policy_mode: TrainingPolicyMode::Manual,
+            auto_lambda_l2: 0.0,
+            auto_min_child_hessian: 0.0,
         })
     }
 

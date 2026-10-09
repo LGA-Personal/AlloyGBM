@@ -1530,7 +1530,15 @@ impl BackendOps for ConcurrentHistogramBackend {
         let active = self.active_builds.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         self.max_active_builds
             .fetch_max(active, AtomicOrdering::SeqCst);
-        std::thread::sleep(Duration::from_millis(5));
+        // Stay active until another build is seen (or a generous timeout), so
+        // a slow-to-schedule runner can't miss an overlap that a fixed short
+        // sleep would. Sequential callers still never overlap; they just wait.
+        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        while self.max_active_builds.load(AtomicOrdering::SeqCst) < 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let result = MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles);
         self.active_builds.fetch_sub(1, AtomicOrdering::SeqCst);
         result
@@ -4353,12 +4361,18 @@ fn scalar_summary_carries_the_resolved_manual_policy() {
 }
 
 #[test]
-fn multiclass_auto_policy_does_not_apply_scalar_split_l2() {
+fn multiclass_auto_policy_applies_classifier_l2_not_small_wide_l2() {
     let mut dataset = sample_wide_small_dataset();
     dataset.targets = vec![0.0, 5.0, 0.0, 5.0];
     let matrix = sample_wide_small_binned_matrix();
     let controls = trainer()
-        .iteration_controls_for_policy(&dataset, &matrix, 300, TrainingPolicyMode::Auto)
+        .iteration_controls_for_objective_family(
+            &dataset,
+            &matrix,
+            300,
+            TrainingPolicyMode::Auto,
+            ObjectiveFamily::MulticlassClassification,
+        )
         .expect("auto controls should resolve");
     let summary = trainer()
         .fit_multiclass_iterations_with_summary(
@@ -4374,8 +4388,152 @@ fn multiclass_auto_policy_does_not_apply_scalar_split_l2() {
         summary.resolved_training_policy.requested_mode,
         TrainingPolicyMode::Auto
     );
-    assert!(!summary.resolved_training_policy.auto_split_l2_applied);
-    assert_eq!(summary.resolved_training_policy.effective_split_l2, 0.0);
+    // Classifier leaves get the auto L2, but not the regression-only
+    // small-wide value, and multiclass gets no round cap.
+    assert!(summary.resolved_training_policy.auto_split_l2_applied);
+    assert_eq!(summary.resolved_training_policy.effective_split_l2, 1.0);
+    assert_eq!(summary.resolved_training_policy.effective_round_cap, 300);
+}
+
+#[test]
+fn auto_leaf_regularization_is_objective_aware() {
+    let (dataset, matrix) = policy_fixture(4_096, 16, 1.0);
+    let auto = |family| {
+        let controls = trainer()
+            .iteration_controls_for_objective_family(
+                &dataset,
+                &matrix,
+                50,
+                TrainingPolicyMode::Auto,
+                family,
+            )
+            .expect("auto controls should resolve");
+        (controls.auto_lambda_l2, controls.auto_min_child_hessian)
+    };
+    assert_eq!(auto(ObjectiveFamily::BinaryClassification), (0.0, 1.0));
+    assert_eq!(auto(ObjectiveFamily::MulticlassClassification), (1.0, 0.0));
+    assert_eq!(auto(ObjectiveFamily::Regression), (0.0, 0.0));
+    assert_eq!(auto(ObjectiveFamily::Ranking), (0.0, 0.0));
+
+    let manual = trainer()
+        .iteration_controls_for_objective_family(
+            &dataset,
+            &matrix,
+            50,
+            TrainingPolicyMode::Manual,
+            ObjectiveFamily::BinaryClassification,
+        )
+        .expect("manual controls should resolve");
+    assert_eq!(
+        (manual.auto_lambda_l2, manual.auto_min_child_hessian),
+        (0.0, 0.0)
+    );
+}
+
+#[test]
+fn objective_family_lets_generic_fit_paths_use_the_classifier_policy() {
+    assert_eq!(
+        BinaryCrossEntropyObjective.objective_family(),
+        ObjectiveFamily::BinaryClassification
+    );
+    assert_eq!(
+        SquaredErrorObjective.objective_family(),
+        ObjectiveFamily::Regression
+    );
+    assert_eq!(
+        LambdaMARTObjective::new(&[0, 0, 1, 1]).objective_family(),
+        ObjectiveFamily::Ranking
+    );
+}
+
+#[test]
+fn auto_binary_hessian_floor_tapers_on_tiny_datasets() {
+    // Six binary rows carry at most 1.5 total Hessian; a full 1.0 floor per
+    // child would forbid every split and train a constant model.
+    for (rows, expected) in [(6, 6.0 / 64.0), (32, 0.5), (64, 1.0), (500, 1.0)] {
+        let (dataset, matrix) = policy_fixture(rows, 2, 1.0);
+        let controls = trainer()
+            .iteration_controls_for_objective_family(
+                &dataset,
+                &matrix,
+                5,
+                TrainingPolicyMode::Auto,
+                ObjectiveFamily::BinaryClassification,
+            )
+            .expect("auto controls should resolve");
+        assert_eq!(controls.auto_min_child_hessian, expected, "rows={rows}");
+    }
+}
+
+#[test]
+fn auto_leaf_regularization_yields_to_explicit_regularization() {
+    let (dataset, matrix) = policy_fixture(4_096, 16, 1.0);
+    for (lambda_l2, lambda_l1, min_child_hessian) in
+        [(0.25, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 3.0)]
+    {
+        let trainer = Trainer::new(TrainParams {
+            lambda_l2,
+            lambda_l1,
+            min_child_hessian,
+            ..TrainParams::default()
+        })
+        .expect("valid params");
+        let controls = trainer
+            .iteration_controls_for_objective_family(
+                &dataset,
+                &matrix,
+                5,
+                TrainingPolicyMode::Auto,
+                ObjectiveFamily::BinaryClassification,
+            )
+            .expect("auto controls should resolve");
+        let resolution = split_selection_options_with_controls(
+            trainer.params(),
+            Some(TrainingPolicyMode::Auto),
+            &dataset,
+            &matrix,
+            Some(&controls),
+        )
+        .expect("split options resolve");
+        assert!(!resolution.auto_split_l2_applied);
+        assert_eq!(resolution.options.l2_lambda, lambda_l2);
+        assert_eq!(resolution.options.l1_alpha, lambda_l1);
+        assert_eq!(resolution.options.min_child_hessian, min_child_hessian);
+    }
+}
+
+#[test]
+fn auto_policy_is_invariant_to_regression_target_units() {
+    // Small-wide and large shapes: the resolved policy must not depend on
+    // whether the same target is expressed in ones, thousandths or thousands.
+    for (rows, features) in [(512, 64), (600, 8), (4_096, 16), (20_000, 20)] {
+        let resolve = |scale: f32| {
+            let (dataset, matrix) = policy_fixture(rows, features, scale);
+            let controls = trainer()
+                .iteration_controls_for_objective_family(
+                    &dataset,
+                    &matrix,
+                    400,
+                    TrainingPolicyMode::Auto,
+                    ObjectiveFamily::Regression,
+                )
+                .expect("auto controls should resolve");
+            let split = split_selection_options_with_controls(
+                trainer().params(),
+                Some(TrainingPolicyMode::Auto),
+                &dataset,
+                &matrix,
+                Some(&controls),
+            )
+            .expect("split options resolve");
+            resolve_training_policy(controls, &split)
+        };
+        let unit = resolve(1.0);
+        assert_eq!(unit.min_split_gain, 0.0, "{rows}x{features}");
+        for scale in [1e-3, 1e3] {
+            assert_eq!(resolve(scale), unit, "{rows}x{features} scale {scale}");
+        }
+    }
 }
 
 fn large_ranking_shaped_dataset() -> TrainingDataset {
@@ -4443,10 +4601,9 @@ fn auto_policy_disables_regression_only_guards_for_ranking_objectives() {
         !regression_controls.training_loss_gate_enabled,
         "regression auto-policy must leave the training-loss gate disabled"
     );
-    assert!(
-        regression_controls.min_split_gain > 0.0,
-        "regression auto-policy must keep density-based min_split_gain floor \
-             on 5000x16"
+    assert_eq!(
+        regression_controls.min_split_gain, 0.0,
+        "auto-policy must not impose a unit-dependent min_split_gain floor"
     );
 
     // Ranking path disables all three regression-tuned guards.

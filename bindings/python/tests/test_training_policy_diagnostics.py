@@ -106,7 +106,9 @@ def test_binary_classifier_assigns_resolved_policy() -> None:
     assert policy["requested_rounds"] == 3
 
 
-def test_multiclass_policy_preserves_existing_split_l2_provenance() -> None:
+def test_multiclass_auto_policy_reports_classifier_l2() -> None:
+    # Auto mode gives multiclass softmax leaf L2 = 1 (objective-aware policy);
+    # the regression-only small-wide L2 rule does not apply to classifiers.
     X, _ = make_dense_fixture(rows=128, features=32, classes=6)
     y = np.asarray(([0, 5] * 62) + [1, 2, 3, 4], dtype="int32")
     model = GBMClassifier(n_estimators=3, training_policy="auto", seed=7).fit(X, y)
@@ -115,8 +117,12 @@ def test_multiclass_policy_preserves_existing_split_l2_provenance() -> None:
 
     assert policy is not None
     assert policy["requested_mode"] == "auto"
-    assert policy["auto_split_l2_applied"] is False
-    assert policy["effective_split_l2"] == pytest.approx(0.0)
+    assert policy["auto_split_l2_applied"] is True
+    assert policy["effective_split_l2"] == pytest.approx(1.0)
+
+    manual = GBMClassifier(n_estimators=3, training_policy="manual", seed=7).fit(X, y)
+    assert manual.resolved_training_policy_["auto_split_l2_applied"] is False
+    assert manual.resolved_training_policy_["effective_split_l2"] == pytest.approx(0.0)
 
 
 def test_auto_ranker_has_no_implicit_split_gain_floor() -> None:

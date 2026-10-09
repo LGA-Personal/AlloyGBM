@@ -77,3 +77,11 @@ fn parse_nonnegative_env_f32(env_name: &str) -> EngineResult<f32> {
 pub(crate) fn split_l2_env_is_configured() -> bool {
     std::env::var_os(SPLIT_L2_ENV_VAR).is_some()
 }
+
+/// Whether any leaf-regularization experiment override is set. The auto
+/// policy's objective-aware values yield to all three, not just split L2.
+pub(crate) fn leaf_regularization_env_is_configured() -> bool {
+    [SPLIT_L2_ENV_VAR, SPLIT_L1_ENV_VAR, MIN_CHILD_HESS_ENV_VAR]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+}

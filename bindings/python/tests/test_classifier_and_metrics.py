@@ -75,10 +75,12 @@ class GBMClassifierTests(unittest.TestCase):
 
     def test_early_stopping_with_eval_set(self) -> None:
         X_train, y_train, X_val, y_val = self._make_binary_dataset()
-        clf = GBMClassifier(n_estimators=100, early_stopping_rounds=5, seed=42)
+        # The auto policy's Hessian floor keeps validation loss improving for
+        # ~120 rounds on this fixture, so leave room for early stopping to fire.
+        clf = GBMClassifier(n_estimators=400, early_stopping_rounds=5, seed=42)
         clf.fit(X_train, y_train, eval_set=(X_val, y_val))
         self.assertIsNotNone(clf.best_iteration_)
-        self.assertLess(clf.n_estimators_, 100)
+        self.assertLess(clf.n_estimators_, 400)
 
     def test_pickle_roundtrip(self) -> None:
         X_train, y_train, _, _ = self._make_binary_dataset()

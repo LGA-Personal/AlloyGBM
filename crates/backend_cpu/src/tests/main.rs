@@ -314,13 +314,15 @@ fn shortlist_standard_handles_zero_exhaustive_ties_and_parallel_features() {
             exhaustive.numeric_candidates.last().unwrap().feature_index,
             0
         );
+        // A tiny positive weight shrinks every weighted gain below the tie
+        // tolerance. (A zero weight would exclude the feature outright.)
         for _ in 0..8 {
             assert_eq!(
                 backend
                     .shortlist_standard_splits(
                         &histograms,
                         options,
-                        &vec![0.0; feature_count],
+                        &vec![1e-30; feature_count],
                         &[],
                         feature_count,
                     )

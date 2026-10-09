@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The auto training policy is objective-aware and no longer depends on the
+  target's units.** Under `training_policy="auto"`, binary classifiers get
+  `min_child_hessian = 1.0` (tapered below 64 rows), multiclass classifiers get
+  leaf `lambda_l2 = 1.0`, and the implicit absolute `min_split_gain` floor is
+  gone for every objective. The small-wide regression L2 rule now looks at the
+  data's shape only. A nonzero `lambda_l1`, `lambda_l2` or
+  `min_child_hessian` disables the auto values; `training_policy="manual"` is
+  unchanged and turns them all off. On the new default-quality suite this improves AlloyGBM's
+  defaults by 18% (geometric-mean test loss, 5 seeds, paired Wilcoxon
+  p = 0.003): `breast_cancer` log loss falls about 5x and `wine` about 3.6x.
+  Model outputs under `auto` change; see
+  `docs/benchmarks/default_quality_v1.md`.
+
+### Fixed
+
+- A feature with `feature_weights` 0 could still be split on when no
+  positively weighted feature had positive gain. It is now never a split
+  candidate.
+
+### Added
+
+- `benchmarks/default_quality.py`: every library at its own defaults, multi-seed,
+  normalized loss, and a paired gate (`compare --gate`) for default changes.
+
 ## v1.0.0 (2026-09-05)
 
 **First stable release.** AlloyGBM's public API, artifact format, and

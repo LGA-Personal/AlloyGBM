@@ -69,8 +69,8 @@ mod warm_start;
 pub use types::{
     ArtifactCompatibilityMode, ArtifactCompatibilityReport, CategoricalTargetEncodingSpec,
     FitContractEvaluation, IterationControls, IterationDiagnostics, IterationRunSummary,
-    IterationStopReason, NodeDebugStats, ResolvedTrainingPolicy, TrainRoundSummary, TrainedStump,
-    TrainingPolicyMode, ValidationDatasetRef,
+    IterationStopReason, NodeDebugStats, ObjectiveFamily, ResolvedTrainingPolicy,
+    TrainRoundSummary, TrainedStump, TrainingPolicyMode, ValidationDatasetRef,
 };
 pub(crate) use types::{IterationExecutionContext, PolicyFitRequest, gradient_l2_norm_only};
 pub use warm_start::{MultiClassWarmStartState, WarmStartState};

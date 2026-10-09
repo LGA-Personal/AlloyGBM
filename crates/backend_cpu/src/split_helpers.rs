@@ -33,6 +33,19 @@ pub(crate) fn apply_feature_weight(candidate: &SplitCandidate, feature_weights: 
     feature_weighted_gain(candidate, feature_weights)
 }
 
+/// A feature weighted `<= 0` is never a split candidate. Ranking alone can't
+/// exclude it: the winner keeps its raw gain for the `min_split_gain` check,
+/// so a zero-weight feature could still be chosen whenever no
+/// positively-weighted feature had positive gain.
+pub(crate) fn feature_weight_allows_split(
+    candidate: &SplitCandidate,
+    feature_weights: &[f32],
+) -> bool {
+    feature_weights
+        .get(candidate.feature_index as usize)
+        .is_none_or(|weight| *weight > 0.0)
+}
+
 pub(crate) fn gain_materially_exceeds(candidate: f32, current: f32) -> bool {
     let tolerance = 1e-6_f32 * candidate.abs().max(current.abs()).max(1.0);
     candidate > current + tolerance

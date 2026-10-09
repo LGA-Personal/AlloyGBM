@@ -11,7 +11,9 @@ use alloygbm_engine::{
 
 use crate::CpuBackend;
 use crate::factor_split::validate_factor_split_context;
-use crate::split_helpers::{apply_feature_weight, gain_materially_exceeds};
+use crate::split_helpers::{
+    apply_feature_weight, feature_weight_allows_split, gain_materially_exceeds,
+};
 use crate::{NodeStatsAccumulator, pl, pl_histogram};
 
 pub(crate) fn morph_uses_standard_gain_only(morph: &MorphContext) -> bool {
@@ -155,6 +157,7 @@ impl BackendOps for CpuBackend {
         let best_overall = per_feature
             .iter()
             .flatten()
+            .filter(|candidate| feature_weight_allows_split(candidate, feature_weights))
             .cloned()
             .reduce(|current, candidate| {
                 if gain_materially_exceeds(
@@ -170,7 +173,9 @@ impl BackendOps for CpuBackend {
         let mut remaining: Vec<SplitCandidate> = per_feature
             .into_iter()
             .flatten()
-            .filter(|candidate| !candidate.is_categorical)
+            .filter(|candidate| {
+                !candidate.is_categorical && feature_weight_allows_split(candidate, feature_weights)
+            })
             .collect();
         let target = max_numeric_features.min(remaining.len());
         let mut numeric_candidates = Vec::with_capacity(target);
@@ -281,16 +286,20 @@ impl BackendOps for CpuBackend {
 
         // Sequential across features: see the note in
         // `best_split_with_options_internal`.
-        let result = histograms.features().filter_map(find_best).reduce(|a, b| {
-            if gain_materially_exceeds(
-                apply_feature_weight(&b, feature_weights),
-                apply_feature_weight(&a, feature_weights),
-            ) {
-                b
-            } else {
-                a
-            }
-        });
+        let result = histograms
+            .features()
+            .filter_map(find_best)
+            .filter(|candidate| feature_weight_allows_split(candidate, feature_weights))
+            .reduce(|a, b| {
+                if gain_materially_exceeds(
+                    apply_feature_weight(&b, feature_weights),
+                    apply_feature_weight(&a, feature_weights),
+                ) {
+                    b
+                } else {
+                    a
+                }
+            });
 
         Ok(result)
     }

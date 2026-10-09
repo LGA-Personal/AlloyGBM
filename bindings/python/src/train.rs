@@ -33,7 +33,7 @@ use alloygbm_engine::{
     BinaryCrossEntropyObjective, CategoricalFeatureInfo, CategoricalTargetEncodingSpec,
     EngineError, GammaObjective, IterationRunSummary, LambdaMARTObjective,
     MultiClassIterationRunSummary, MultiClassSoftmaxObjective, MultiClassTrainedModel,
-    MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective, PerRoundMetricCallback,
+    MultiClassWarmStartState, ObjectiveFamily, PairwiseRankingObjective, PerRoundMetricCallback,
     PoissonObjective, QuantileObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel,
     Trainer, TrainingPolicyMode, TweedieObjective, WarmStartState, XeNDCGObjective,
     YetiRankObjective,
@@ -577,14 +577,23 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
         .as_ref()
         .map(|cb| cb as &dyn PerRoundMetricCallback);
 
+    let objective_family = match objective {
+        "binary_crossentropy" => ObjectiveFamily::BinaryClassification,
+        "multiclass_softmax" => ObjectiveFamily::MulticlassClassification,
+        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
+            ObjectiveFamily::Ranking
+        }
+        _ => ObjectiveFamily::Regression,
+    };
+
     macro_rules! run_training {
         ($obj:expr) => {{
-            let controls = trainer.iteration_controls_for_policy_ext(
+            let controls = trainer.iteration_controls_for_objective_family(
                 &prepared.dataset,
                 &prepared.binned_matrix,
                 rounds,
                 training_policy,
-                $obj.requires_group_id(),
+                objective_family,
             )?;
             if let Some(warm_start) = warm_start_state.clone() {
                 if let Some(validation_prepared) = validation_prepared.as_ref() {
@@ -721,11 +730,12 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                 )));
             }
             let mc_obj = MultiClassSoftmaxObjective::new(k)?;
-            let controls = trainer.iteration_controls_for_policy(
+            let controls = trainer.iteration_controls_for_objective_family(
                 &prepared.dataset,
                 &prepared.binned_matrix,
                 rounds,
                 training_policy,
+                ObjectiveFamily::MulticlassClassification,
             )?;
 
             // Build multiclass warm-start state from init_artifact_bytes if available
