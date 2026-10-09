@@ -35,6 +35,9 @@ _VALID_BOOSTING_MODES = {"standard", "goss", "dart"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
 _LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
 _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD = 0.10
+# Restores equal-frequency quantile cuts (pre-greedy borders) for A/B runs.
+# Mirrors EQUAL_FREQUENCY_BINS_ENV_VAR in bindings/python/src/lib.rs.
+_EQUAL_FREQUENCY_BINS_ENV_VAR = "ALLOYGBM_EXPERIMENT_EQUAL_FREQUENCY_BINS"
 
 
 def _load_native_predictor_predict_batch():
@@ -342,6 +345,10 @@ def _parse_env_toggle(env_name: str) -> bool:
 
 def _linear_tail_rank_enabled_from_env() -> bool:
     return _parse_env_toggle(_LINEAR_TAIL_RANK_ENV_VAR)
+
+
+def _equal_frequency_bins_enabled_from_env() -> bool:
+    return _parse_env_toggle(_EQUAL_FREQUENCY_BINS_ENV_VAR)
 
 
 def _linear_tail_core_span_ratio_threshold_from_env() -> float:

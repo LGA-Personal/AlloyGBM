@@ -327,6 +327,84 @@ class _QuantizationMixin:
     def _single_feature_quantile_cuts_from_sorted_values(
         values: Sequence[float], data_bin_count: int
     ) -> list[float]:
+        if _base._equal_frequency_bins_enabled_from_env():
+            return GBMRegressor._single_feature_equal_frequency_cuts_from_sorted_values(
+                values, data_bin_count
+            )
+        return GBMRegressor._single_feature_greedy_cuts_from_sorted_values(
+            values, data_bin_count
+        )
+
+    @staticmethod
+    def _midpoint_cut(lower: float, upper: float) -> float:
+        # Mirrors `midpoint_cut` in quantization.rs: round the midpoint to
+        # f32 and fall back to `upper` when it collapses onto `lower`.
+        midpoint = struct.unpack("f", struct.pack("f", (lower + upper) * 0.5))[0]
+        if lower < midpoint <= upper:
+            return midpoint
+        return upper
+
+    @staticmethod
+    def _single_feature_greedy_cuts_from_sorted_values(
+        values: Sequence[float], data_bin_count: int
+    ) -> list[float]:
+        # Mirrors `greedy_cuts_from_sorted_values` in quantization.rs
+        # (LightGBM's GreedyFindBin with min_data_in_bin = 1).
+        distinct: list[float] = []
+        counts: list[float] = []
+        for value in values:
+            if distinct and distinct[-1] == value:
+                counts[-1] += 1.0
+            else:
+                distinct.append(value)
+                counts.append(1.0)
+        distinct_count = len(distinct)
+        if distinct_count <= 1 or data_bin_count <= 1:
+            return []
+        midpoint_cut = GBMRegressor._midpoint_cut
+        if distinct_count <= data_bin_count:
+            return [
+                midpoint_cut(distinct[index], distinct[index + 1])
+                for index in range(distinct_count - 1)
+            ]
+
+        max_bin = data_bin_count
+        total = sum(counts)
+        mean_bin_size = total / max_bin
+        is_big = [count >= mean_bin_size for count in counts]
+        rest_bin_count = max_bin - sum(is_big)
+        rest_sample_count = total - sum(
+            count for count, big in zip(counts, is_big) if big
+        )
+        mean_bin_size = rest_sample_count / max(rest_bin_count, 1)
+
+        cuts: list[float] = []
+        current_bin_size = 0.0
+        for index in range(distinct_count - 1):
+            if not is_big[index]:
+                rest_sample_count -= counts[index]
+            current_bin_size += counts[index]
+            if (
+                is_big[index]
+                or current_bin_size >= mean_bin_size
+                or (
+                    is_big[index + 1]
+                    and current_bin_size >= max(1.0, mean_bin_size * 0.5)
+                )
+            ):
+                cuts.append(midpoint_cut(distinct[index], distinct[index + 1]))
+                if len(cuts) >= max_bin - 1:
+                    break
+                current_bin_size = 0.0
+                if not is_big[index]:
+                    rest_bin_count -= 1
+                    mean_bin_size = rest_sample_count / max(rest_bin_count, 1)
+        return cuts
+
+    @staticmethod
+    def _single_feature_equal_frequency_cuts_from_sorted_values(
+        values: Sequence[float], data_bin_count: int
+    ) -> list[float]:
         if len(values) <= 1:
             return []
 

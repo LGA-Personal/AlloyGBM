@@ -260,10 +260,10 @@ if __name__ == "__main__":
 class InertBundlingDiagnosticsTests(unittest.TestCase):
     """`feature_bundling="exact"` must never fail silently.
 
-    Bundle discovery treats bin 0 as a feature's "empty" value, which only
-    `continuous_binning_strategy="linear"` reliably produces for a raw 0.0.
-    Under the default `"quantile"` strategy a one-hot column's zeros can
-    land in a higher bin, every candidate is skipped, and training runs
+    Bundle discovery treats bin 0 as a feature's "empty" value. Linear
+    binning and the default greedy `"quantile"` borders put a nonnegative
+    column's zeros in bin 0; `"rank"` binning does not, so a one-hot column's
+    zeros land in a higher bin, every candidate is skipped, and training runs
     unbundled — previously with no signal to the caller at all.
     """
 
@@ -283,13 +283,25 @@ class InertBundlingDiagnosticsTests(unittest.TestCase):
             model = GBMRegressor(
                 n_estimators=5,
                 feature_bundling="exact",
-                continuous_binning_strategy="quantile",
+                continuous_binning_strategy="rank",
             ).fit(X, y)
 
         message = str(captured.warning)
         self.assertIn("produced no bundles", message)
         self.assertIn("continuous_binning_strategy='linear'", message)
         self.assertFalse(model.feature_bundling_diagnostics_["active"])
+
+    def test_default_quantile_borders_put_zeros_in_bin_zero_and_bundle(self) -> None:
+        # Greedy borders give a {0, 1} column one bin per value, so its zeros
+        # occupy bin 0 and the one-hot block bundles under the default.
+        X, y = self._one_hot_fixture()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = GBMRegressor(n_estimators=5, feature_bundling="exact").fit(X, y)
+        self.assertTrue(model.feature_bundling_diagnostics_["active"])
+        self.assertFalse(
+            [w for w in caught if "produced no bundles" in str(w.message)]
+        )
 
     def test_successful_bundling_does_not_warn(self) -> None:
         X, y = self._one_hot_fixture()
