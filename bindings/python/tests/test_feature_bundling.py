@@ -299,8 +299,9 @@ class InertBundlingDiagnosticsTests(unittest.TestCase):
             warnings.simplefilter("always")
             model = GBMRegressor(n_estimators=5, feature_bundling="exact").fit(X, y)
         self.assertTrue(model.feature_bundling_diagnostics_["active"])
-        self.assertFalse(
-            [w for w in caught if "produced no bundles" in str(w.message)]
+        self.assertEqual(
+            [str(w.message) for w in caught if "produced no bundles" in str(w.message)],
+            [],
         )
 
     def test_successful_bundling_does_not_warn(self) -> None:

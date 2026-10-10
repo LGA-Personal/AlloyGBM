@@ -2568,6 +2568,14 @@ class _GBMEstimatorCore(
                 " Some candidate features were not mutually exclusive on "
                 "every row."
             )
+        elif self.continuous_binning_strategy == "quantile":
+            message += (
+                " Bundle discovery requires each sparse feature's dominant "
+                "value to occupy bin 0. continuous_binning_strategy='quantile' "
+                "guarantees this only for columns without negative values; "
+                "for columns with negative values, try "
+                "continuous_binning_strategy='linear'."
+            )
         elif self.continuous_binning_strategy != "linear":
             message += (
                 " Bundle discovery requires each sparse feature's dominant "

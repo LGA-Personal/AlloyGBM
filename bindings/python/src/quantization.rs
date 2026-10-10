@@ -465,10 +465,9 @@ fn greedy_cuts_from_distinct_values(
             rest_sample_count -= count;
         }
     }
-    mean_bin_size = rest_sample_count / rest_bin_count.max(1) as f64;
+    mean_bin_size = rest_sample_count.max(0.0) / rest_bin_count.max(1) as f64;
 
     let mut cuts = Vec::with_capacity(max_bin - 1);
-    let mut bin_count = 0usize;
     let mut current_bin_size = 0.0_f64;
     for index in 0..distinct_count - 1 {
         if !is_big[index] {
@@ -483,14 +482,13 @@ fn greedy_cuts_from_distinct_values(
                 distinct_values[index],
                 distinct_values[index + 1],
             ));
-            bin_count += 1;
-            if bin_count >= max_bin - 1 {
+            if cuts.len() >= max_bin - 1 {
                 break;
             }
             current_bin_size = 0.0;
             if !is_big[index] {
                 rest_bin_count -= 1;
-                mean_bin_size = rest_sample_count / rest_bin_count.max(1) as f64;
+                mean_bin_size = rest_sample_count.max(0.0) / rest_bin_count.max(1) as f64;
             }
         }
     }

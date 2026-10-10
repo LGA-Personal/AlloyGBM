@@ -386,7 +386,7 @@ class _QuantizationMixin:
         rest_sample_count = total - sum(
             count for count, big in zip(counts, is_big) if big
         )
-        mean_bin_size = rest_sample_count / max(rest_bin_count, 1)
+        mean_bin_size = max(rest_sample_count, 0.0) / max(rest_bin_count, 1)
 
         cuts: list[float] = []
         current_bin_size = 0.0
@@ -408,7 +408,7 @@ class _QuantizationMixin:
                 current_bin_size = 0.0
                 if not is_big[index]:
                     rest_bin_count -= 1
-                    mean_bin_size = rest_sample_count / max(rest_bin_count, 1)
+                    mean_bin_size = max(rest_sample_count, 0.0) / max(rest_bin_count, 1)
         return cuts
 
     @staticmethod
