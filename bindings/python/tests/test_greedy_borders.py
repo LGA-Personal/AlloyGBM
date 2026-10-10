@@ -87,3 +87,10 @@ def test_models_fitted_with_equal_frequency_cuts_predict_unchanged(monkeypatch) 
     restored = pickle.loads(payload)
     assert _cuts(restored) == _cuts(legacy)
     np.testing.assert_array_equal(restored.predict(x), expected)
+
+
+def test_python_mirror_keeps_values_beyond_the_f32_range() -> None:
+    # The legacy bridge quantizes Python sequences in Python, so values are
+    # not limited to f32; the midpoint must not overflow while packing.
+    cuts = GBMRegressor._single_feature_greedy_cuts_from_sorted_values([1e39, 2e39], 255)
+    assert cuts == [1.5e39]

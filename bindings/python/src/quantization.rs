@@ -429,9 +429,13 @@ fn midpoint_cut(lower: f32, upper: f32) -> f32 {
 ///   their share of the budget is lost.
 ///
 /// Cuts sit halfway between adjacent distinct values. `counts` are the row
-/// counts (or weights) of each value; only their ratios matter except in
-/// the "close a bin before a heavy value" rule, which compares against one
-/// row, so weighted callers should normalize counts to row units.
+/// counts (or weights) of each value, and only their ratios matter.
+///
+/// LightGBM closes a bin before a heavy value once it holds
+/// `max(1, mean / 2)` rows. With integer row counts the `1` floor never
+/// binds, because a bin always holds at least one row, so it is dropped
+/// here: that keeps unweighted results identical to LightGBM while making
+/// weighted cuts invariant to rescaling the weights.
 fn greedy_cuts_from_distinct_values(
     distinct_values: &[f32],
     counts: &[f64],
@@ -473,7 +477,7 @@ fn greedy_cuts_from_distinct_values(
         current_bin_size += counts[index];
         let close_bin = is_big[index]
             || current_bin_size >= mean_bin_size
-            || (is_big[index + 1] && current_bin_size >= (mean_bin_size * 0.5).max(1.0));
+            || (is_big[index + 1] && current_bin_size >= mean_bin_size * 0.5);
         if close_bin {
             cuts.push(midpoint_cut(
                 distinct_values[index],
@@ -517,25 +521,16 @@ pub(crate) fn greedy_cuts_from_sorted_values(
 /// Weighted counterpart of [`greedy_cuts_from_sorted_values`]. Rows must
 /// already be filtered to positive weights and sorted by value.
 ///
-/// Each distinct value's count is its weight share rescaled to row units
-/// (`weight / total_weight * rows`), which leaves every ratio in the greedy
-/// rule unchanged and keeps its one-row floor meaningful.
+/// Each distinct value's count is its total weight, so integer weights give
+/// the same cuts as repeating each row that many times.
 pub(crate) fn greedy_cuts_from_weighted_values(
     sorted_values: &[(f32, f32)],
     data_bin_count: usize,
 ) -> Vec<f32> {
-    let total_weight: f64 = sorted_values
-        .iter()
-        .map(|(_, weight)| f64::from(*weight))
-        .sum();
-    if sorted_values.len() <= 1 || total_weight <= 0.0 {
-        return Vec::new();
-    }
-    let row_scale = sorted_values.len() as f64 / total_weight;
     let mut distinct_values = Vec::new();
     let mut counts: Vec<f64> = Vec::new();
     for (value, weight) in sorted_values {
-        let count = f64::from(*weight) * row_scale;
+        let count = f64::from(*weight);
         if distinct_values.last() == Some(value) {
             *counts.last_mut().expect("counts track distinct values") += count;
         } else {

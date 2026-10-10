@@ -339,8 +339,14 @@ class _QuantizationMixin:
     @staticmethod
     def _midpoint_cut(lower: float, upper: float) -> float:
         # Mirrors `midpoint_cut` in quantization.rs: round the midpoint to
-        # f32 and fall back to `upper` when it collapses onto `lower`.
-        midpoint = struct.unpack("f", struct.pack("f", (lower + upper) * 0.5))[0]
+        # f32 and fall back to `upper` when it collapses onto `lower`. Rows
+        # given as Python sequences may exceed the f32 range; keep the
+        # double-precision midpoint for those.
+        midpoint = (lower + upper) * 0.5
+        try:
+            midpoint = struct.unpack("f", struct.pack("f", midpoint))[0]
+        except OverflowError:
+            pass
         if lower < midpoint <= upper:
             return midpoint
         return upper
@@ -390,7 +396,7 @@ class _QuantizationMixin:
                 or current_bin_size >= mean_bin_size
                 or (
                     is_big[index + 1]
-                    and current_bin_size >= max(1.0, mean_bin_size * 0.5)
+                    and current_bin_size >= mean_bin_size * 0.5
                 )
             ):
                 cuts.append(midpoint_cut(distinct[index], distinct[index + 1]))

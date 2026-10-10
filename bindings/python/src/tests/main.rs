@@ -1183,6 +1183,32 @@ fn weighted_greedy_cuts_match_unweighted_for_unit_and_uniform_weights() {
 }
 
 #[test]
+fn weighted_greedy_cuts_match_row_repetition_and_ignore_weight_scale() {
+    // Integer weights must match repeating the rows; rescaling the weights
+    // must not move the cuts (the case that broke with a one-row floor).
+    let values = [1.0_f32, 2.0, 3.0, 4.0];
+    let weights = [1.0_f32, 1.0, 5.0, 2.0];
+    let mut repeated = Vec::new();
+    for (value, weight) in values.iter().zip(weights) {
+        repeated.extend(std::iter::repeat_n(*value, weight as usize));
+    }
+    let expected = crate::quantization::greedy_cuts_from_sorted_values(&repeated, 2);
+    assert_eq!(expected, vec![2.5]);
+    for scale in [1.0_f32, 0.1, 0.25, 1_000.0] {
+        let weighted: Vec<(f32, f32)> = values
+            .iter()
+            .zip(weights)
+            .map(|(value, weight)| (*value, weight * scale))
+            .collect();
+        assert_eq!(
+            crate::quantization::greedy_cuts_from_weighted_values(&weighted, 2),
+            expected,
+            "weight scale {scale}"
+        );
+    }
+}
+
+#[test]
 fn weighted_greedy_cuts_isolate_a_value_that_is_heavy_by_weight() {
     // Value 0 is rare by count but carries most of the weight.
     let mut weighted: Vec<(f32, f32)> = vec![(0.0, 10_000.0)];
