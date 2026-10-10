@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import heapq
 import math
 import struct
 from collections.abc import Sequence
@@ -337,6 +338,10 @@ class _QuantizationMixin:
             return GBMRegressor._single_feature_equal_frequency_cuts_from_sorted_values(
                 values, data_bin_count
             )
+        if _base._greedy_log_sum_bins_enabled_from_env():
+            return GBMRegressor._single_feature_greedy_log_sum_cuts_from_sorted_values(
+                values, data_bin_count
+            )
         return GBMRegressor._single_feature_greedy_cuts_from_sorted_values(
             values, data_bin_count
         )
@@ -410,6 +415,65 @@ class _QuantizationMixin:
                     rest_bin_count -= 1
                     mean_bin_size = max(rest_sample_count, 0.0) / max(rest_bin_count, 1)
         return cuts
+
+    @staticmethod
+    def _single_feature_greedy_log_sum_cuts_from_sorted_values(
+        values: Sequence[float], data_bin_count: int
+    ) -> list[float]:
+        # Mirrors `greedy_log_sum_cuts_from_sorted_values` in quantization.rs
+        # (CatBoost's GreedyLogSum, weighted-median variant).
+        distinct: list[float] = []
+        counts: list[float] = []
+        for value in values:
+            if distinct and distinct[-1] == value:
+                counts[-1] += 1.0
+            else:
+                distinct.append(value)
+                counts.append(1.0)
+        distinct_count = len(distinct)
+        if distinct_count <= 1 or data_bin_count <= 1:
+            return []
+        midpoint_cut = GBMRegressor._midpoint_cut
+        if distinct_count <= data_bin_count:
+            return [
+                midpoint_cut(distinct[index], distinct[index + 1])
+                for index in range(distinct_count - 1)
+            ]
+
+        cumulative: list[float] = []
+        running = 0.0
+        for count in counts:
+            running += count
+            cumulative.append(running)
+
+        def make_bin(start: int, end: int) -> tuple[float, int, int, int]:
+            before = cumulative[start - 1] if start > 0 else 0.0
+            total = cumulative[end - 1] - before
+
+            def score_at(split: int) -> float:
+                if split <= start or split >= end:
+                    return -math.inf
+                left = cumulative[split - 1] - before
+                return math.log(left) + math.log(total - left) - math.log(total)
+
+            median = bisect.bisect_left(cumulative, before + 0.5 * total, start, end)
+            median = min(median, end - 1)
+            left_score, right_score = score_at(median), score_at(median + 1)
+            if left_score >= right_score:
+                split, score = median, left_score
+            else:
+                split, score = median + 1, right_score
+            # heapq is a min-heap: negate the score; ties pop the leftmost bin.
+            return (-score, start, end, split)
+
+        bins = [make_bin(0, distinct_count)]
+        while len(bins) < data_bin_count and bins[0][0] != math.inf:
+            _, start, end, split = heapq.heappop(bins)
+            heapq.heappush(bins, make_bin(start, split))
+            heapq.heappush(bins, make_bin(split, end))
+
+        starts = sorted(start for _, start, _, _ in bins if start > 0)
+        return [midpoint_cut(distinct[start - 1], distinct[start]) for start in starts]
 
     @staticmethod
     def _single_feature_equal_frequency_cuts_from_sorted_values(

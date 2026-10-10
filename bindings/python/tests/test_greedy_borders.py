@@ -94,3 +94,31 @@ def test_python_mirror_keeps_values_beyond_the_f32_range() -> None:
     # not limited to f32; the midpoint must not overflow while packing.
     cuts = GBMRegressor._single_feature_greedy_cuts_from_sorted_values([1e39, 2e39], 255)
     assert cuts == [1.5e39]
+
+
+GREEDY_LOG_SUM_ENV = "ALLOYGBM_EXPERIMENT_GREEDY_LOG_SUM_BINS"
+
+
+def test_greedy_log_sum_env_switch_and_python_mirror(monkeypatch) -> None:
+    monkeypatch.delenv(EQUAL_FREQUENCY_ENV, raising=False)
+    monkeypatch.setenv(GREEDY_LOG_SUM_ENV, "1")
+    rng = np.random.default_rng(13)
+    n = 5_000
+    columns = [
+        rng.zipf(1.4, n).clip(1, 5_000).astype(np.float32),  # > 255 distinct
+        np.where(rng.random(n) < 0.6, 0.0, rng.lognormal(size=n)).astype(np.float32),
+        np.where(rng.random(n) < 0.03, 1.0, rng.normal(size=n)).astype(np.float32),
+    ]
+    x = np.column_stack(columns)
+    y = rng.normal(size=n).astype(np.float32)
+    native = _cuts(GBMRegressor(n_estimators=1).fit(x, y))
+    for feature_index, column in enumerate(columns):
+        mirror = GBMRegressor._single_feature_quantile_cuts_from_sorted_values(
+            sorted(float(value) for value in column), 255
+        )
+        assert mirror == native[feature_index], f"feature {feature_index}"
+        assert len(mirror) == 254
+
+    monkeypatch.delenv(GREEDY_LOG_SUM_ENV)
+    greedy = _cuts(GBMRegressor(n_estimators=1).fit(x, y))
+    assert greedy != native, "the switch must change at least one feature's cuts"
