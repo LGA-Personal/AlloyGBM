@@ -243,7 +243,13 @@ Continuous-feature controls
   zero-conflict training-time bundling of sparse numeric features.
 
 Supports up to 65,535 bins per feature. The default ``quantile`` strategy gives
-more robust handling of skewed continuous features. Fitted estimators expose
+more robust handling of skewed continuous features. It chooses bin borders
+greedily, in the style of LightGBM: a feature with no more distinct values than
+data bins gets one bin per value; a value holding at least an equal share of
+the rows gets a bin of its own, and the rest of the budget is spread evenly
+over the remaining rows. Each border sits halfway between two neighbouring
+training values, so an unseen value lands in the nearer bin. Models fitted
+before this change keep their stored borders and predict exactly as before. Fitted estimators expose
 ``feature_quantile_cut_methods_`` with one ``"exact"`` or ``"sketch"`` value
 per feature, and persisted models retain the native cuts and methods.
 
@@ -260,11 +266,12 @@ feature counts, bundle counts, skipped features, and observed conflicts.
 
 .. important::
 
-   Bundle discovery treats **bin 0** as a feature's "empty" value. Only
-   ``continuous_binning_strategy="linear"`` reliably maps a raw ``0.0`` to
-   bin 0; under the default ``"quantile"`` strategy a sparse column's zeros
-   may land in a higher bin, so every candidate is skipped and training runs
-   unbundled. AlloyGBM emits a ``UserWarning`` naming this cause whenever
+   Bundle discovery treats **bin 0** as a feature's "empty" value. Linear
+   binning and the default ``"quantile"`` strategy's greedy borders both map
+   a raw ``0.0`` to bin 0 when the column has no negative values, which covers
+   one-hot and count columns. Under ``"rank"``, or for a column with negative
+   values, the zeros may land in a higher bin, so every candidate is skipped
+   and training runs unbundled. AlloyGBM emits a ``UserWarning`` naming this cause whenever
    ``feature_bundling="exact"`` yields no bundles, and
    ``feature_bundling_diagnostics_["active"]`` stays ``False``.
 

@@ -2546,11 +2546,11 @@ class _GBMEstimatorCore(
         """Warn when bundling was asked for but nothing could be bundled.
 
         Bundle discovery treats *bin 0* as a feature's "empty" value and
-        skips any column that is more than a quarter non-zero. Only
-        ``continuous_binning_strategy="linear"`` reliably maps a raw 0.0 to
-        bin 0; under the default ``"quantile"`` strategy a one-hot column's
-        zeros can land in a higher bin, so every candidate is skipped and
-        the request silently does nothing.
+        skips any column that is more than a quarter non-zero. Linear
+        binning and the default greedy ``"quantile"`` borders map a
+        nonnegative column's 0.0 to bin 0; under ``"rank"`` (or a column with
+        negative values) the zeros can land in a higher bin, so every
+        candidate is skipped and the request silently does nothing.
         """
         diagnostics = getattr(self, "feature_bundling_diagnostics_", None)
         if not diagnostics or diagnostics.get("active"):
@@ -2567,6 +2567,14 @@ class _GBMEstimatorCore(
             message += (
                 " Some candidate features were not mutually exclusive on "
                 "every row."
+            )
+        elif self.continuous_binning_strategy == "quantile":
+            message += (
+                " Bundle discovery requires each sparse feature's dominant "
+                "value to occupy bin 0. continuous_binning_strategy='quantile' "
+                "guarantees this only for columns without negative values; "
+                "for columns with negative values, try "
+                "continuous_binning_strategy='linear'."
             )
         elif self.continuous_binning_strategy != "linear":
             message += (

@@ -771,8 +771,9 @@ class GBMRegressorContractTests(unittest.TestCase):
             )
 
         # max_bins=4 reserves one slot for missing values, leaving 3 data bins
-        # delimited by 2 cuts.
-        self.assertEqual(cuts, [[2.0, 3.0], [5.0, 7.0], [10.0, 20.0]])
+        # delimited by at most 2 cuts. Greedy borders sit halfway between
+        # neighbouring values; feature 1 has only two distinct values.
+        self.assertEqual(cuts, [[2.5, 3.5], [6.0], [15.0, 25.0]])
 
     def test_native_dense_payload_reuses_contiguous_float32_array(self) -> None:
         values = np.arange(12, dtype=np.float32).reshape(4, 3)

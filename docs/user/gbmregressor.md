@@ -272,7 +272,13 @@ machine.
     features during training. `"off"` preserves the standard matrix layout.
 
 The default `quantile` strategy is more robust on skewed continuous feature
-distributions. Use `linear` when you want equal-width bins for compatibility
+distributions. It chooses bin borders greedily, in the style of LightGBM: a
+feature with no more distinct values than data bins gets one bin per value; a
+value holding at least an equal share of the rows gets a bin of its own, and
+the rest of the budget is spread evenly over the remaining rows. Each border
+sits halfway between two neighbouring training values, so an unseen value
+lands in the nearer bin. Models fitted before this change keep their stored
+borders and predict exactly as before. Use `linear` when you want equal-width bins for compatibility
 experiments. After fitting, `feature_quantile_cut_methods_` reports `"exact"`
 or `"sketch"` for each feature; persisted models retain the selected cuts and
 methods.
@@ -288,12 +294,13 @@ bundling off. `feature_bundling_diagnostics_` reports whether bundling
 activated and gives the original/effective feature counts, bundle counts,
 skipped features, and observed conflicts.
 
-**Requires `continuous_binning_strategy="linear"` in practice.** Bundle
-discovery treats *bin 0* as a feature's "empty" value, and only linear
-binning reliably maps a raw `0.0` to bin 0. Under the default `"quantile"`
-strategy a sparse column's zeros can land in a higher bin, so every candidate
-is skipped and training runs unbundled — AlloyGBM emits a `UserWarning`
-naming this cause rather than failing silently.
+**Needs zeros in bin 0.** Bundle discovery treats *bin 0* as a feature's
+"empty" value. Linear binning and the default `"quantile"` strategy's greedy
+borders both map a raw `0.0` to bin 0 when the column has no negative values,
+which covers one-hot and count columns. Under `"rank"`, or for a column with
+negative values, the zeros can land in a higher bin, so every candidate is
+skipped and training runs unbundled — AlloyGBM emits a `UserWarning` naming
+this cause rather than failing silently.
 
 **Not currently a speed knob.** Bundling reduces storage and histogram memory
 traffic, but per-original-feature histograms are still materialized and
