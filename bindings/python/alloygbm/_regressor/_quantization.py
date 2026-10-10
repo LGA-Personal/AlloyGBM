@@ -15,6 +15,11 @@ from ._base import (
 )
 
 
+# Largest finite f32. Older Pythons pack larger doubles to inf instead of
+# raising, so the f32 rounding step checks the range explicitly.
+_F32_MAX = 3.4028234663852886e38
+
+
 class _QuantizationMixin:
     """Mixin carrying quantization/binning methods for GBMRegressor.
 
@@ -343,10 +348,8 @@ class _QuantizationMixin:
         # given as Python sequences may exceed the f32 range; keep the
         # double-precision midpoint for those.
         midpoint = (lower + upper) * 0.5
-        try:
+        if abs(midpoint) <= _F32_MAX:
             midpoint = struct.unpack("f", struct.pack("f", midpoint))[0]
-        except OverflowError:
-            pass
         if lower < midpoint <= upper:
             return midpoint
         return upper
