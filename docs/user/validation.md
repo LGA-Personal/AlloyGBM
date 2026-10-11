@@ -106,7 +106,8 @@ print(model.n_estimators_)
 
 Rules:
 
-- `early_stopping_rounds` requires `eval_set`.
+- `early_stopping_rounds` requires `eval_set`, unless `n_estimators="auto"`
+  holds out its own validation rows.
 - `eval_time_index` requires `eval_set`.
 - Validation early stopping monitors the objective-appropriate metric:
   - RMSE for `GBMRegressor`

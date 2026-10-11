@@ -4,6 +4,27 @@
 
 ### Changed
 
+- **`n_estimators` and `learning_rate` default to `"auto"`: the round count
+  is chosen by early stopping.** On `GBMRegressor`, `GBMClassifier` and
+  `GBMRanker` under `training_policy="auto"`, a fit without `eval_set` holds
+  out a seeded 10% of the rows (stratified by class, whole groups for
+  rankers), trains at learning rate 0.05 for up to 2,000 rounds with patience
+  50 and a 0.1% relative tolerance, then refits on every row for the chosen
+  count × 1/0.9. With `eval_set`, that set drives the early stopping and there
+  is no refit. `auto_rounds_` and `learning_rate_` record the choice. An
+  integer `n_estimators` trains exactly as before (learning rate 0.1 unless
+  set); manual policy, continued training, DART, MorphBoost, learning-rate
+  schedules, custom objectives and some no-`eval_set` cases (neutralization,
+  `time_index`, under 50 rows) keep the old 100 rounds at 0.1, as does
+  `MultiLabelGBMRanker`. `early_stopping_rounds` no longer requires
+  `eval_set` when `n_estimators="auto"`; it sets the holdout's patience. On
+  the default-quality suite AlloyGBM's test loss improves 8% at default depth
+  (paired Wilcoxon p < 1e-4, 17 of 19 datasets better, no significant
+  regression) and 14% / 6% at depth 4 / 8, putting its defaults ahead of
+  LightGBM and XGBoost at every depth tried. Default fits cost about 7.6 times
+  as long on those small datasets; `n_estimators=100, learning_rate=0.1`
+  restores the old behaviour. See `docs/benchmarks/auto_rounds_v1.md`.
+
 - **The auto training policy is objective-aware and no longer depends on the
   target's units.** Under `training_policy="auto"`, binary classifiers get
   `min_child_hessian = 1.0` (tapered below 64 rows), multiclass classifiers get
@@ -41,6 +62,11 @@
 
 - `benchmarks/default_quality.py`: every library at its own defaults, multi-seed,
   normalized loss, and a paired gate (`compare --gate`) for default changes.
+  It also has an `alloy-fixed` arm (the old 100 rounds at 0.1), a
+  `--max-depth` option that caps every library's depth for depth sweeps, and a
+  total fit-seconds row.
+- `benchmarks/auto_rounds_variants.py`: the design sweep behind
+  `n_estimators="auto"`.
 
 ## v1.0.0 (2026-09-05)
 
