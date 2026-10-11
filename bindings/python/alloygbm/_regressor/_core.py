@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 import time
 import warnings
@@ -14,7 +15,7 @@ from ._validation import _ValidationMixin, _resolved_training_policy_to_dict
 from ._quantization import _QuantizationMixin
 from ._shap import _ShapMixin
 from ._persistence import _PersistenceMixin
-from . import _base
+from . import _auto_rounds, _base
 from ._base import (
     _GBMEstimatorBase,
     _MAX_CONTINUOUS_QUANTIZED_BIN,
@@ -65,9 +66,9 @@ class _GBMEstimatorCore(
     def _initialize_validation_probe(
         self,
         *,
-        learning_rate: float = 0.1,
+        learning_rate: float | str = "auto",
         max_depth: int = 6,
-        n_estimators: int = 100,
+        n_estimators: int | str = "auto",
         row_subsample: float = 1.0,
         col_subsample: float = 1.0,
         colsample_bynode: float = 1.0,
@@ -130,12 +131,10 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
     ) -> None:
-        if not (0.0 < learning_rate <= 1.0):
-            raise ValueError("learning_rate must be in (0.0, 1.0]")
+        learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
             raise ValueError("max_depth must be greater than 0")
-        if n_estimators <= 0:
-            raise ValueError("n_estimators must be greater than 0")
+        n_estimators = _auto_rounds.validate_n_estimators(n_estimators)
         if not (0.0 < row_subsample <= 1.0):
             raise ValueError("row_subsample must be in (0.0, 1.0]")
         if not (0.0 < col_subsample <= 1.0):
@@ -432,9 +431,9 @@ class _GBMEstimatorCore(
                     f"got {dart_skip_drop!r}"
                 )
 
-        self.learning_rate = float(learning_rate)
+        self.learning_rate = learning_rate
         self.max_depth = int(max_depth)
-        self.n_estimators = int(n_estimators)
+        self.n_estimators = n_estimators
         self.row_subsample = float(row_subsample)
         self.col_subsample = float(col_subsample)
         self.colsample_bynode = float(colsample_bynode)
@@ -539,9 +538,9 @@ class _GBMEstimatorCore(
     def __init__(
         self,
         *,
-        learning_rate: float = 0.1,
+        learning_rate: float | str = "auto",
         max_depth: int = 6,
-        n_estimators: int = 100,
+        n_estimators: int | str = "auto",
         row_subsample: float = 1.0,
         col_subsample: float = 1.0,
         colsample_bynode: float = 1.0,
@@ -687,9 +686,9 @@ class _GBMEstimatorCore(
     def __repr__(self) -> str:
         return (
             "GBMRegressor("
-            f"learning_rate={self.learning_rate}, "
+            f"learning_rate={self.learning_rate!r}, "
             f"max_depth={self.max_depth}, "
-            f"n_estimators={self.n_estimators}, "
+            f"n_estimators={self.n_estimators!r}, "
             f"row_subsample={self.row_subsample}, "
             f"col_subsample={self.col_subsample}, "
             f"colsample_bynode={self.colsample_bynode}, "
@@ -962,10 +961,7 @@ class _GBMEstimatorCore(
                 )
 
         if "learning_rate" in params:
-            learning_rate = float(params["learning_rate"])
-            if not (0.0 < learning_rate <= 1.0):
-                raise ValueError("learning_rate must be in (0.0, 1.0]")
-            self.learning_rate = learning_rate
+            self.learning_rate = _auto_rounds.validate_learning_rate(params["learning_rate"])
 
         if "max_depth" in params:
             max_depth = int(params["max_depth"])
@@ -974,10 +970,7 @@ class _GBMEstimatorCore(
             self.max_depth = max_depth
 
         if "n_estimators" in params:
-            n_estimators = int(params["n_estimators"])
-            if n_estimators <= 0:
-                raise ValueError("n_estimators must be greater than 0")
-            self.n_estimators = n_estimators
+            self.n_estimators = _auto_rounds.validate_n_estimators(params["n_estimators"])
 
         if "n_jobs" in params:
             self.n_jobs = _validate_n_jobs(params["n_jobs"])
@@ -1552,6 +1545,11 @@ class _GBMEstimatorCore(
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state.
 
+        With ``n_estimators="auto"`` (the default) the round count is chosen
+        by early stopping: on ``eval_set`` when one is given, otherwise on a
+        seeded internal holdout followed by a refit on every row. See
+        ``auto_rounds_`` after fitting for what was chosen.
+
         Parameters
         ----------
         init_model : GBMRegressor or None, optional
@@ -1568,6 +1566,237 @@ class _GBMEstimatorCore(
             evaluated after each boosting round and can drive early stopping
             (instead of the built-in loss) when ``early_stopping_rounds`` is set.
         """
+        self._validate_hyperparameters()
+        fit_kwargs = {
+            "sample_weight": sample_weight,
+            "eval_set": eval_set,
+            "eval_sample_weight": eval_sample_weight,
+            "group": group,
+            "eval_group": eval_group,
+            "eval_time_index": eval_time_index,
+            "categorical_feature_values": categorical_feature_values,
+            "categorical_feature_values_list": categorical_feature_values_list,
+            "time_index": time_index,
+            "init_model": init_model,
+            "eval_metric": eval_metric,
+            "factor_exposures": factor_exposures,
+        }
+        targets = (
+            np.asarray(self._validate_targets(y))
+            if self.n_estimators == _auto_rounds.AUTO
+            else None
+        )
+        mode = self._auto_rounds_mode(targets, fit_kwargs)
+        if mode == _auto_rounds.MODE_HOLDOUT:
+            split = self._auto_rounds_split(targets, group)
+            if split is not None:
+                return self._fit_auto_rounds_holdout(X, targets, fit_kwargs, split)
+            mode = _auto_rounds.MODE_LEGACY
+        learning_rate = self._resolved_learning_rate(mode, init_model)
+        if mode == _auto_rounds.MODE_EVAL_SET:
+            rounds = _auto_rounds.AUTO_ROUND_CAP
+            patience = self.early_stopping_rounds or _auto_rounds.AUTO_PATIENCE
+        elif mode == _auto_rounds.MODE_LEGACY:
+            rounds, patience = _auto_rounds.LEGACY_N_ESTIMATORS, self.early_stopping_rounds
+        else:
+            rounds, patience = self.n_estimators, self.early_stopping_rounds
+        with self._round_overrides(rounds, learning_rate, patience):
+            self._fit_once(X, y, **fit_kwargs)
+        self.learning_rate_ = learning_rate
+        self.auto_rounds_ = {"mode": mode, "learning_rate": learning_rate}
+        if mode == _auto_rounds.MODE_EVAL_SET:
+            self.auto_rounds_.update(round_cap=rounds, patience=patience)
+        return self
+
+    # ── Automatic rounds (n_estimators="auto") ──────────────────────────
+
+    def _auto_rounds_mode(self, targets: np.ndarray | None, fit_kwargs: dict) -> str:
+        """How this fit picks its round count; see ``_auto_rounds``."""
+        if self.n_estimators != _auto_rounds.AUTO:
+            return _auto_rounds.MODE_EXPLICIT
+        continues_training = fit_kwargs["init_model"] is not None or (
+            self.warm_start and self._is_fitted
+        )
+        unsupported = (
+            self.training_policy != "auto"
+            or continues_training
+            or callable(getattr(self, "objective", None))
+            or self.boosting_mode == "dart"
+            or self.training_mode == "morph"
+            or self.lr_schedule != "constant"
+        )
+        if unsupported:
+            return _auto_rounds.MODE_LEGACY
+        if fit_kwargs["eval_set"] is not None:
+            return _auto_rounds.MODE_EVAL_SET
+        holdout_unsupported = (
+            self.neutralization != "none"
+            or fit_kwargs["factor_exposures"] is not None
+            or fit_kwargs["time_index"] is not None
+            or self.categorical_time_aware
+            or len(targets) < _auto_rounds.AUTO_MIN_ROWS
+        )
+        return _auto_rounds.MODE_LEGACY if holdout_unsupported else _auto_rounds.MODE_HOLDOUT
+
+    def _auto_rounds_split(
+        self, targets: np.ndarray, group: object | None
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        row_count = len(targets)
+        class_labels = None
+        group_ids = None
+        if group is not None:
+            group_ids = np.asarray(self._validate_group(group, row_count))
+        elif self._objective_name() in ("binary_crossentropy", "multiclass_softmax"):
+            class_labels = targets
+        return _auto_rounds.holdout_split(
+            row_count,
+            _auto_rounds.AUTO_VALIDATION_FRACTION,
+            int(self.seed),
+            class_labels=class_labels,
+            group_ids=group_ids,
+        )
+
+    def _take_rows(self, values: object, indices: np.ndarray) -> object:
+        """Row subset of an array-like, keeping DataFrames as DataFrames."""
+        if values is None:
+            return None
+        if hasattr(values, "iloc") or isinstance(values, np.ndarray):
+            return _auto_rounds.take_rows(values, indices)
+        if hasattr(values, "__array__"):
+            return _auto_rounds.take_rows(np.asarray(values), indices)
+        rows = self._coerce_sequence_like(values, "X")
+        return _auto_rounds.take_rows(rows, indices)
+
+    def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
+        if self.learning_rate != _auto_rounds.AUTO:
+            return float(self.learning_rate)
+        if mode in (_auto_rounds.MODE_EVAL_SET, _auto_rounds.MODE_HOLDOUT):
+            return _auto_rounds.AUTO_LEARNING_RATE
+        # Continued training keeps the step size the earlier fit used.
+        previous = init_model if init_model is not None else self
+        previous_rate = getattr(previous, "learning_rate_", None)
+        if previous_rate is not None and (init_model is not None or self.warm_start):
+            return float(previous_rate)
+        return _auto_rounds.LEGACY_LEARNING_RATE
+
+    def _round_overrides(
+        self, rounds: int, learning_rate: float, patience: int | None
+    ) -> "contextlib.AbstractContextManager[None]":
+        """Run a fit with concrete round parameters, then restore ``"auto"``."""
+        estimator = self
+
+        @contextlib.contextmanager
+        def overrides():
+            saved = (
+                estimator.n_estimators,
+                estimator.learning_rate,
+                estimator.early_stopping_rounds,
+            )
+            estimator.n_estimators = int(rounds)
+            estimator.learning_rate = float(learning_rate)
+            estimator.early_stopping_rounds = patience
+            try:
+                yield
+            finally:
+                (
+                    estimator.n_estimators,
+                    estimator.learning_rate,
+                    estimator.early_stopping_rounds,
+                ) = saved
+
+        return overrides()
+
+    def _fit_auto_rounds_holdout(
+        self,
+        X: object,
+        targets: np.ndarray,
+        fit_kwargs: dict,
+        split: tuple[np.ndarray, np.ndarray],
+    ) -> "GBMRegressor":
+        """Pick the round count on a holdout, then refit on every row."""
+        train_idx, valid_idx = split
+        take = self._take_rows
+        fraction = _auto_rounds.AUTO_VALIDATION_FRACTION
+        learning_rate = self._resolved_learning_rate(_auto_rounds.MODE_HOLDOUT, None)
+        patience = self.early_stopping_rounds or _auto_rounds.AUTO_PATIENCE
+        y_array = targets
+
+        holdout_kwargs = dict(fit_kwargs)
+        holdout_kwargs["sample_weight"] = take(fit_kwargs["sample_weight"], train_idx)
+        holdout_kwargs["eval_set"] = (take(X, valid_idx), y_array[valid_idx])
+        holdout_kwargs["eval_sample_weight"] = take(fit_kwargs["sample_weight"], valid_idx)
+        if fit_kwargs["group"] is not None:
+            holdout_kwargs["group"] = take(fit_kwargs["group"], train_idx)
+            holdout_kwargs["eval_group"] = take(fit_kwargs["group"], valid_idx)
+        if fit_kwargs["categorical_feature_values"] is not None:
+            holdout_kwargs["categorical_feature_values"] = take(
+                fit_kwargs["categorical_feature_values"], train_idx
+            )
+        if fit_kwargs["categorical_feature_values_list"] is not None:
+            holdout_kwargs["categorical_feature_values_list"] = [
+                take(values, train_idx)
+                for values in fit_kwargs["categorical_feature_values_list"]
+            ]
+
+        holdout_started = time.perf_counter()
+        with self._round_overrides(_auto_rounds.AUTO_ROUND_CAP, learning_rate, patience):
+            self._fit_once(take(X, train_idx), y_array[train_idx], **holdout_kwargs)
+        holdout_seconds = time.perf_counter() - holdout_started
+        validation_curves = self.evals_result_.get("validation", {})
+        curve = next(
+            (values for name, values in validation_curves.items() if name != "rmse"),
+            validation_curves.get("rmse"),
+        )
+        # Early stopping truncates the model (and its curves) to the best round.
+        engine_best = int(self.rounds_completed_)
+        best_round = (
+            _auto_rounds.best_round_with_relative_tolerance(
+                list(curve), patience, _auto_rounds.AUTO_RELATIVE_TOLERANCE
+            )
+            if curve
+            else engine_best
+        )
+        best_round = max(1, min(best_round, engine_best))
+        rounds = _auto_rounds.refit_rounds(best_round, fraction)
+
+        # The refit must start from scratch even under warm_start=True.
+        self._reset_fitted_state()
+        with self._round_overrides(rounds, learning_rate, None):
+            self._fit_once(X, targets, **fit_kwargs)
+        self.learning_rate_ = learning_rate
+        self.auto_rounds_ = {
+            "mode": _auto_rounds.MODE_HOLDOUT,
+            "learning_rate": learning_rate,
+            "validation_fraction": fraction,
+            "validation_rows": int(len(valid_idx)),
+            "round_cap": _auto_rounds.AUTO_ROUND_CAP,
+            "patience": patience,
+            "relative_tolerance": _auto_rounds.AUTO_RELATIVE_TOLERANCE,
+            "holdout_best_round": best_round,
+            "refit_rounds": rounds,
+            "holdout_fit_seconds": holdout_seconds,
+        }
+        return self
+
+    def _fit_once(
+        self,
+        X: object,
+        y: object,
+        *,
+        sample_weight: object | None = None,
+        eval_set: tuple[object, object] | None = None,
+        eval_sample_weight: object | None = None,
+        group: object | None = None,
+        eval_group: object | None = None,
+        eval_time_index: object | None = None,
+        categorical_feature_values: object | None = None,
+        categorical_feature_values_list: object | None = None,
+        time_index: object | None = None,
+        init_model: "GBMRegressor | None" = None,
+        eval_metric: object | None = None,
+        factor_exposures: object | None = None,
+    ) -> "GBMRegressor":
+        """One native fit with concrete ``n_estimators`` and ``learning_rate``."""
         self._validate_hyperparameters()
         fit_start = time.perf_counter()
         self._fit_start_time = fit_start

@@ -342,9 +342,9 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
     def __repr__(self) -> str:
         return (
             "GBMClassifier("
-            f"learning_rate={self.learning_rate}, "
+            f"learning_rate={self.learning_rate!r}, "
             f"max_depth={self.max_depth}, "
-            f"n_estimators={self.n_estimators}, "
+            f"n_estimators={self.n_estimators!r}, "
             f"row_subsample={self.row_subsample}, "
             f"col_subsample={self.col_subsample}, "
             f"colsample_bynode={self.colsample_bynode}, "

@@ -43,6 +43,8 @@ class _PersistenceMixin:
             "feature_bundling_diagnostics_",
             "evals_result_",
             "fit_timing_",
+            "learning_rate_",
+            "auto_rounds_",
             "classes_",
             "n_classes_",
         ):
