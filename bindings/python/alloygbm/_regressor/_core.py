@@ -1588,6 +1588,7 @@ class _GBMEstimatorCore(
         )
         mode = self._auto_rounds_mode(targets, fit_kwargs)
         if mode == _auto_rounds.MODE_HOLDOUT:
+            self._check_holdout_inputs(X, targets, fit_kwargs)
             split = self._auto_rounds_split(targets, group)
             if split is not None and not self._split_has_weight_on_both_sides(
                 sample_weight, split
@@ -1602,6 +1603,10 @@ class _GBMEstimatorCore(
             patience = self.early_stopping_rounds or _auto_rounds.AUTO_PATIENCE
         elif mode == _auto_rounds.MODE_LEGACY:
             rounds, patience = _auto_rounds.LEGACY_N_ESTIMATORS, self.early_stopping_rounds
+            if self.n_estimators == _auto_rounds.AUTO and eval_set is None:
+                # Without eval_set, early_stopping_rounds only set the holdout's
+                # patience; with no holdout there is nothing to stop on.
+                patience = None
         else:
             rounds, patience = self.n_estimators, self.early_stopping_rounds
         with self._round_overrides(rounds, learning_rate, patience):
@@ -1659,6 +1664,24 @@ class _GBMEstimatorCore(
             class_labels=class_labels,
             group_ids=group_ids,
         )
+
+    def _check_holdout_inputs(self, X: object, targets: np.ndarray, fit_kwargs: dict) -> None:
+        """Reject bad inputs before the holdout pass, not after it.
+
+        The holdout fit supplies its own ``eval_set``, so the full-data checks
+        in ``_fit_once`` would otherwise only run at the refit.
+        """
+        for name in ("eval_sample_weight", "eval_group", "eval_time_index", "eval_metric"):
+            if fit_kwargs[name] is not None:
+                raise ValueError(f"{name} requires eval_set to be provided")
+        if hasattr(X, "shape") and len(getattr(X, "shape")) > 0:
+            x_rows = int(X.shape[0])
+        elif hasattr(X, "__len__"):
+            x_rows = len(X)
+        else:
+            x_rows = int(np.asarray(X).shape[0])
+        if x_rows != len(targets):
+            raise ValueError("X and y must contain the same number of rows")
 
     def _split_has_weight_on_both_sides(
         self, sample_weight: object | None, split: tuple[np.ndarray, np.ndarray]

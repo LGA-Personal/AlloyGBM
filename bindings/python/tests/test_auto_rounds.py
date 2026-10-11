@@ -102,6 +102,42 @@ def test_unsupported_configurations_keep_fixed_defaults(params):
     assert model.learning_rate_ == pytest.approx(_auto_rounds.LEGACY_LEARNING_RATE)
 
 
+def test_early_stopping_rounds_without_a_holdout_is_ignored_in_the_fallback():
+    X, y = _regression(_auto_rounds.AUTO_MIN_ROWS - 1)
+    model = GBMRegressor(early_stopping_rounds=5).fit(X, y)
+    assert model.auto_rounds_["mode"] == "legacy"
+    warm = GBMRegressor(early_stopping_rounds=5, warm_start=True)
+    warm.fit(*_regression())
+    warm.fit(*_regression())
+    assert warm.auto_rounds_["mode"] == "legacy"
+    # An explicit round count keeps the existing contract.
+    with pytest.raises(ValueError, match="early_stopping_rounds requires eval_set"):
+        GBMRegressor(n_estimators=10, early_stopping_rounds=5).fit(X, y)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"eval_sample_weight": np.ones(10)},
+        {"eval_group": np.zeros(10)},
+        {"eval_metric": lambda y_true, y_pred: 0.0},
+    ],
+)
+def test_orphan_eval_arguments_fail_before_the_holdout(kwargs):
+    X, y = _regression()
+    with pytest.raises(ValueError, match="requires eval_set"):
+        GBMRegressor().fit(X, y, **kwargs)
+
+
+def test_row_count_mismatch_fails_before_the_holdout():
+    X, y = _regression()
+    for rows in (X[:-1], np.vstack([X, X[:1]])):
+        with pytest.raises(ValueError, match="same number of rows"):
+            GBMRegressor().fit(rows, y)
+        with pytest.raises(ValueError, match="same number of rows"):
+            GBMRegressor().fit(rows.tolist(), y)
+
+
 def test_manual_policy_trains_exactly_the_legacy_round_count():
     X, y = _regression(300)
     model = GBMRegressor(training_policy="manual").fit(X, y)

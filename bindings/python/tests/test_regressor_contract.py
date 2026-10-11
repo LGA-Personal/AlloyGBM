@@ -409,7 +409,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             )
 
     def test_fit_requires_eval_set_when_early_stopping_is_enabled(self) -> None:
-        model = GBMRegressor(early_stopping_rounds=3)
+        model = GBMRegressor(n_estimators=10, early_stopping_rounds=3)
         with self.assertRaisesRegex(ValueError, "early_stopping_rounds"):
             model.fit([[1.0], [2.0]], [1.0, 2.0])
 

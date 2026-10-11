@@ -213,7 +213,8 @@ metadata, or an unfitted or reset estimator.
 With an integer `n_estimators`, early stopping is explicit-only: if
 `early_stopping_rounds` is set, you must call
 `fit(..., eval_set=(X_valid, y_valid))`. With `n_estimators="auto"` it sets the
-patience of the automatic holdout instead.
+patience of the automatic holdout instead, and it is ignored when the fit falls
+back to the fixed 100 rounds without an `eval_set`.
 
 ## Leaf And Split Controls
 
