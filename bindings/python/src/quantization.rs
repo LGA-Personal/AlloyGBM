@@ -503,16 +503,8 @@ pub(crate) fn greedy_cuts_from_sorted_values(
     sorted_values: &[f32],
     data_bin_count: usize,
 ) -> Vec<f32> {
-    let mut distinct_values = Vec::new();
-    let mut counts: Vec<f64> = Vec::new();
-    for value in sorted_values {
-        if distinct_values.last() == Some(value) {
-            *counts.last_mut().expect("counts track distinct values") += 1.0;
-        } else {
-            distinct_values.push(*value);
-            counts.push(1.0);
-        }
-    }
+    let (distinct_values, counts) =
+        distinct_values_and_counts(sorted_values.iter().map(|value| (*value, 1.0)));
     greedy_cuts_from_distinct_values(&distinct_values, &counts, data_bin_count)
 }
 
@@ -525,24 +517,210 @@ pub(crate) fn greedy_cuts_from_weighted_values(
     sorted_values: &[(f32, f32)],
     data_bin_count: usize,
 ) -> Vec<f32> {
-    let mut distinct_values = Vec::new();
-    let mut counts: Vec<f64> = Vec::new();
-    for (value, weight) in sorted_values {
-        let count = f64::from(*weight);
-        if distinct_values.last() == Some(value) {
-            *counts.last_mut().expect("counts track distinct values") += count;
-        } else {
-            distinct_values.push(*value);
-            counts.push(count);
-        }
-    }
+    let (distinct_values, counts) = distinct_values_and_counts(
+        sorted_values
+            .iter()
+            .map(|(value, weight)| (*value, f64::from(*weight))),
+    );
     greedy_cuts_from_distinct_values(&distinct_values, &counts, data_bin_count)
 }
 
+/// One candidate bin in [`greedy_log_sum_cuts_from_distinct_values`]: the
+/// distinct values `start..end` and the best place to split them.
+struct LogSumBin {
+    start: usize,
+    end: usize,
+    split: usize,
+    score: f64,
+}
+
+impl LogSumBin {
+    /// `cumulative[i]` is the total weight of distinct values `0..=i`.
+    fn new(start: usize, end: usize, cumulative: &[f64]) -> Self {
+        let before = if start == 0 {
+            0.0
+        } else {
+            cumulative[start - 1]
+        };
+        let total = cumulative[end - 1] - before;
+        let score_at = |split: usize| {
+            if split <= start || split >= end {
+                return f64::NEG_INFINITY;
+            }
+            let left = cumulative[split - 1] - before;
+            let right = total - left;
+            left.ln() + right.ln() - total.ln()
+        };
+        // The distinct value holding the weighted median goes wholly to one
+        // side; try both and keep the better.
+        let midpoint = before + 0.5 * total;
+        let median = start + cumulative[start..end].partition_point(|&c| c < midpoint);
+        let median = median.min(end - 1);
+        let (left_score, right_score) = (score_at(median), score_at(median + 1));
+        let (split, score) = if left_score >= right_score {
+            (median, left_score)
+        } else {
+            (median + 1, right_score)
+        };
+        Self {
+            start,
+            end,
+            split,
+            score,
+        }
+    }
+
+    fn can_split(&self) -> bool {
+        self.score.is_finite()
+    }
+}
+
+impl PartialEq for LogSumBin {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for LogSumBin {}
+
+impl PartialOrd for LogSumBin {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LogSumBin {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.start.cmp(&self.start))
+    }
+}
+
+/// Greedy border selection maximising the sum of log bin weights.
+///
+/// Port of CatBoost's `GreedyLogSum` (its default border type, weighted
+/// variant in `library/cpp/grid_creator/binarization.cpp`). Starting from a
+/// single bin, repeatedly split the bin whose split most increases
+/// `sum(log(bin weight))`, at its weighted median rounded to a distinct-value
+/// boundary, until `data_bin_count` bins exist or no bin can be split. The
+/// log objective favours equal bins, and a bin holding one distinct value
+/// simply cannot be split, so heavy values end up isolated without a special
+/// rule. CatBoost adds `1e-8` inside the log; weights here are strictly
+/// positive so it is dropped, which makes cuts exactly invariant to
+/// rescaling the weights.
+///
+/// Cuts sit halfway between adjacent distinct values, as in
+/// [`greedy_cuts_from_distinct_values`].
+fn greedy_log_sum_cuts_from_distinct_values(
+    distinct_values: &[f32],
+    counts: &[f64],
+    data_bin_count: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(distinct_values.len(), counts.len());
+    let distinct_count = distinct_values.len();
+    if distinct_count <= 1 || data_bin_count <= 1 {
+        return Vec::new();
+    }
+    if distinct_count <= data_bin_count {
+        return distinct_values
+            .windows(2)
+            .map(|pair| midpoint_cut(pair[0], pair[1]))
+            .collect();
+    }
+
+    let mut cumulative = Vec::with_capacity(distinct_count);
+    let mut running = 0.0_f64;
+    for count in counts {
+        running += count;
+        cumulative.push(running);
+    }
+
+    // Max-heap on score; equal scores pop the leftmost bin first so the
+    // result is deterministic. Unsplittable bins score -inf and sink.
+    let mut bins = std::collections::BinaryHeap::new();
+    bins.push(LogSumBin::new(0, distinct_count, &cumulative));
+    while bins.len() < data_bin_count && bins.peek().is_some_and(LogSumBin::can_split) {
+        let bin = bins.pop().expect("peeked");
+        bins.push(LogSumBin::new(bin.start, bin.split, &cumulative));
+        bins.push(LogSumBin::new(bin.split, bin.end, &cumulative));
+    }
+
+    let mut starts: Vec<usize> = bins
+        .iter()
+        .map(|bin| bin.start)
+        .filter(|&start| start > 0)
+        .collect();
+    starts.sort_unstable();
+    starts
+        .into_iter()
+        .map(|start| midpoint_cut(distinct_values[start - 1], distinct_values[start]))
+        .collect()
+}
+
+/// Collapse sorted `(value, weight)` pairs into distinct values and their
+/// total weights.
+fn distinct_values_and_counts(values: impl Iterator<Item = (f32, f64)>) -> (Vec<f32>, Vec<f64>) {
+    let mut distinct_values = Vec::new();
+    let mut counts: Vec<f64> = Vec::new();
+    for (value, count) in values {
+        if distinct_values.last() == Some(&value) {
+            *counts.last_mut().expect("counts track distinct values") += count;
+        } else {
+            distinct_values.push(value);
+            counts.push(count);
+        }
+    }
+    (distinct_values, counts)
+}
+
+/// GreedyLogSum cut points for one unweighted feature column (sorted,
+/// NaN-free). `data_bin_count` has the same meaning as in
+/// [`quantile_cuts_from_sorted_values`].
+pub(crate) fn greedy_log_sum_cuts_from_sorted_values(
+    sorted_values: &[f32],
+    data_bin_count: usize,
+) -> Vec<f32> {
+    let (distinct_values, counts) =
+        distinct_values_and_counts(sorted_values.iter().map(|value| (*value, 1.0)));
+    greedy_log_sum_cuts_from_distinct_values(&distinct_values, &counts, data_bin_count)
+}
+
+/// Weighted counterpart of [`greedy_log_sum_cuts_from_sorted_values`]. Rows
+/// must already be filtered to positive weights and sorted by value.
+pub(crate) fn greedy_log_sum_cuts_from_weighted_values(
+    sorted_values: &[(f32, f32)],
+    data_bin_count: usize,
+) -> Vec<f32> {
+    let (distinct_values, counts) = distinct_values_and_counts(
+        sorted_values
+            .iter()
+            .map(|(value, weight)| (*value, f64::from(*weight))),
+    );
+    greedy_log_sum_cuts_from_distinct_values(&distinct_values, &counts, data_bin_count)
+}
+
+/// Border selection method for `continuous_binning_strategy="quantile"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuantileBorderMethod {
+    Greedy,
+    EqualFrequency,
+    GreedyLogSum,
+}
+
 /// `ALLOYGBM_EXPERIMENT_EQUAL_FREQUENCY_BINS=1` restores the equal-frequency
-/// cut selection used before greedy borders, for A/B benchmarking.
-fn equal_frequency_bins_enabled_from_env() -> bool {
-    env_toggle_enabled(crate::EQUAL_FREQUENCY_BINS_ENV_VAR)
+/// cut selection used before greedy borders, and
+/// `ALLOYGBM_EXPERIMENT_GREEDY_LOG_SUM_BINS=1` selects CatBoost's
+/// GreedyLogSum, both for A/B benchmarking. Equal-frequency wins if both
+/// are set.
+fn quantile_border_method_from_env() -> QuantileBorderMethod {
+    if env_toggle_enabled(crate::EQUAL_FREQUENCY_BINS_ENV_VAR) {
+        QuantileBorderMethod::EqualFrequency
+    } else if env_toggle_enabled(crate::GREEDY_LOG_SUM_BINS_ENV_VAR) {
+        QuantileBorderMethod::GreedyLogSum
+    } else {
+        QuantileBorderMethod::Greedy
+    }
 }
 
 fn evenly_spaced_row_index(sample_index: usize, sample_count: usize, row_count: usize) -> usize {
@@ -566,7 +744,7 @@ pub(crate) fn derive_dense_feature_quantile_cuts(
     // budget emits one cut too many and `quantize_quantile_value` clamps the
     // top interval into its neighbour, merging the two highest quantiles.
     let data_bin_count = max_bins.saturating_sub(1);
-    let equal_frequency = equal_frequency_bins_enabled_from_env();
+    let border_method = quantile_border_method_from_env();
     let sampled_row_count = sketch_max_rows.filter(|max_rows| row_count > *max_rows);
     let selected_row_count = sampled_row_count.unwrap_or(row_count);
     let derive_feature_cuts = |feature_index: usize| {
@@ -585,10 +763,16 @@ pub(crate) fn derive_dense_feature_quantile_cuts(
                 }
             }
             column.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
-            if equal_frequency {
-                quantile_cuts_from_weighted_values(&column, data_bin_count)
-            } else {
-                greedy_cuts_from_weighted_values(&column, data_bin_count)
+            match border_method {
+                QuantileBorderMethod::Greedy => {
+                    greedy_cuts_from_weighted_values(&column, data_bin_count)
+                }
+                QuantileBorderMethod::EqualFrequency => {
+                    quantile_cuts_from_weighted_values(&column, data_bin_count)
+                }
+                QuantileBorderMethod::GreedyLogSum => {
+                    greedy_log_sum_cuts_from_weighted_values(&column, data_bin_count)
+                }
             }
         } else {
             let mut column = Vec::with_capacity(selected_row_count);
@@ -604,10 +788,16 @@ pub(crate) fn derive_dense_feature_quantile_cuts(
                 }
             }
             column.sort_unstable_by(f32::total_cmp);
-            if equal_frequency {
-                quantile_cuts_from_sorted_values(&column, data_bin_count)
-            } else {
-                greedy_cuts_from_sorted_values(&column, data_bin_count)
+            match border_method {
+                QuantileBorderMethod::Greedy => {
+                    greedy_cuts_from_sorted_values(&column, data_bin_count)
+                }
+                QuantileBorderMethod::EqualFrequency => {
+                    quantile_cuts_from_sorted_values(&column, data_bin_count)
+                }
+                QuantileBorderMethod::GreedyLogSum => {
+                    greedy_log_sum_cuts_from_sorted_values(&column, data_bin_count)
+                }
             }
         }
     };

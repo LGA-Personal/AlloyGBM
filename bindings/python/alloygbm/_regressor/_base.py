@@ -38,6 +38,9 @@ _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD = 0.10
 # Restores equal-frequency quantile cuts (pre-greedy borders) for A/B runs.
 # Mirrors EQUAL_FREQUENCY_BINS_ENV_VAR in bindings/python/src/lib.rs.
 _EQUAL_FREQUENCY_BINS_ENV_VAR = "ALLOYGBM_EXPERIMENT_EQUAL_FREQUENCY_BINS"
+# Selects CatBoost-style GreedyLogSum quantile cuts for A/B runs.
+# Mirrors GREEDY_LOG_SUM_BINS_ENV_VAR in bindings/python/src/lib.rs.
+_GREEDY_LOG_SUM_BINS_ENV_VAR = "ALLOYGBM_EXPERIMENT_GREEDY_LOG_SUM_BINS"
 
 
 def _load_native_predictor_predict_batch():
@@ -349,6 +352,10 @@ def _linear_tail_rank_enabled_from_env() -> bool:
 
 def _equal_frequency_bins_enabled_from_env() -> bool:
     return _parse_env_toggle(_EQUAL_FREQUENCY_BINS_ENV_VAR)
+
+
+def _greedy_log_sum_bins_enabled_from_env() -> bool:
+    return _parse_env_toggle(_GREEDY_LOG_SUM_BINS_ENV_VAR)
 
 
 def _linear_tail_core_span_ratio_threshold_from_env() -> float:

@@ -1216,3 +1216,86 @@ fn weighted_greedy_cuts_isolate_a_value_that_is_heavy_by_weight() {
     let cuts = crate::quantization::greedy_cuts_from_weighted_values(&weighted, 255);
     assert_eq!(cuts[0], 0.5, "the heavy value closes its own bin");
 }
+
+#[test]
+fn greedy_log_sum_cuts_give_every_distinct_value_its_own_bin_when_they_fit() {
+    let mut values = Vec::new();
+    for value in 1..=40u32 {
+        let repeats = 4_000 / (value * value) + 1;
+        values.extend(std::iter::repeat_n(value as f32, repeats as usize));
+    }
+    assert_eq!(
+        crate::quantization::greedy_log_sum_cuts_from_sorted_values(&values, 255),
+        crate::quantization::greedy_cuts_from_sorted_values(&values, 255),
+    );
+}
+
+#[test]
+fn greedy_log_sum_cuts_bisect_continuous_data_at_medians() {
+    // 8 equal-weight values into 4 bins: two rounds of median splits.
+    let values: Vec<f32> = (0..8).map(|value| value as f32).collect();
+    let cuts = crate::quantization::greedy_log_sum_cuts_from_sorted_values(&values, 4);
+    assert_eq!(cuts, vec![1.5, 3.5, 5.5]);
+
+    let values: Vec<f32> = (1..=100_000).map(|value| value as f32).collect();
+    let cuts = crate::quantization::greedy_log_sum_cuts_from_sorted_values(&values, 255);
+    assert_eq!(cuts.len(), 254);
+    let counts = bin_counts_for_cuts(&values, &cuts, 254);
+    let max = *counts.iter().max().expect("bins");
+    let min = *counts.iter().min().expect("bins");
+    assert!(min > 0, "every data bin is reachable");
+    // Bisection yields bins of two sizes, one roughly double the other.
+    assert!(max <= min * 2 + 2, "min {min}, max {max}");
+}
+
+#[test]
+fn greedy_log_sum_cuts_use_the_whole_budget_and_isolate_heavy_values() {
+    let mut values = Vec::new();
+    for value in 1..=2_000u32 {
+        let repeats = (200_000.0 / f64::from(value).powf(1.6)).ceil() as usize;
+        values.extend(std::iter::repeat_n(value as f32, repeats));
+    }
+    let cuts = crate::quantization::greedy_log_sum_cuts_from_sorted_values(&values, 255);
+    assert_eq!(cuts.len(), 254);
+    assert!(cuts.windows(2).all(|pair| pair[0] < pair[1]));
+    let counts = bin_counts_for_cuts(&values, &cuts, 254);
+    assert_eq!(counts[0], values.iter().filter(|v| **v == 1.0).count());
+    assert_eq!(counts[1], values.iter().filter(|v| **v == 2.0).count());
+}
+
+#[test]
+fn greedy_log_sum_cuts_handle_degenerate_columns() {
+    use crate::quantization::{
+        greedy_log_sum_cuts_from_sorted_values as cuts_of,
+        greedy_log_sum_cuts_from_weighted_values as weighted_cuts_of,
+    };
+    assert!(cuts_of(&[], 255).is_empty());
+    assert!(cuts_of(&[3.0], 255).is_empty());
+    assert!(cuts_of(&[3.0, 3.0, 3.0], 255).is_empty());
+    let values: Vec<f32> = (0..100).map(|value| value as f32).collect();
+    assert_eq!(cuts_of(&values, 2), vec![49.5]);
+    assert!(weighted_cuts_of(&[], 255).is_empty());
+    // One dominant value with a single row on either side still splits.
+    let mut values = vec![0.0_f32];
+    values.extend(std::iter::repeat_n(1.0, 1_000));
+    values.push(2.0);
+    assert_eq!(cuts_of(&values, 3), vec![0.5, 1.5]);
+}
+
+#[test]
+fn weighted_greedy_log_sum_cuts_match_row_repetition_and_ignore_weight_scale() {
+    let mut values = Vec::new();
+    for value in 1..=1_000u32 {
+        let repeats = (50_000.0 / f64::from(value).powf(1.3)).ceil() as usize;
+        values.extend(std::iter::repeat_n(value as f32, repeats));
+    }
+    let unweighted = crate::quantization::greedy_log_sum_cuts_from_sorted_values(&values, 255);
+    for weight in [1.0_f32, 0.25, 2.0, 1_000.0] {
+        let weighted: Vec<(f32, f32)> = values.iter().map(|value| (*value, weight)).collect();
+        assert_eq!(
+            crate::quantization::greedy_log_sum_cuts_from_weighted_values(&weighted, 255),
+            unweighted,
+            "uniform weight {weight} must not change the borders"
+        );
+    }
+}
