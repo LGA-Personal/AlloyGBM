@@ -2,6 +2,43 @@
 
 This directory organizes benchmark dataset preparation and cross-library model comparison for AlloyGBM.
 
+### Frontier matrix: every axis against every peer
+
+`benchmarks/frontier_matrix.py` is the robustness suite: it compares AlloyGBM
+with LightGBM, XGBoost and CatBoost across the situations a user can hand a
+GBDT library, one factor at a time around a 10,000 x 20 base dataset, so each
+cell says where AlloyGBM wins or loses and why.
+
+- **Data axes:** rows (300 to 1M), columns (5 to 1,000, and more columns than
+  rows), task (regression, binary, imbalanced binary, 3/5/20-class multiclass,
+  ranking), feature type (skewed, discrete, sparse, redundant, mostly
+  irrelevant), categorical columns (low and Zipf high cardinality), missing
+  values (random and informative), signal shape and noise.
+- **Hyperparameter regimes**, mapped onto each library's own knobs:
+  `defaults`, `standard`, `stumps`, `shallow`, `deep`, `few_trees`,
+  `many_trees`, `very_many_trees`, `light_reg`, `heavy_reg`, `leafwise` and
+  `early_stopping`. Knobs a library has no equivalent for are recorded on
+  every fit.
+- **Tiers:** `smoke` (8 cells, CI), `quick` (86 cells, every axis and
+  regime), `full` (148 cells, up to 1M rows). `--openml-suite cc18|ctr23|<id>`
+  adds real OpenML datasets where the network allows.
+
+```bash
+python benchmarks/frontier_matrix.py list --tier quick
+python benchmarks/frontier_matrix.py run --tier quick --output quick.json --report quick.md
+python benchmarks/frontier_matrix.py run --tier quick --axes categorical missing \
+    --arms alloy alloy-native-cat=alloygbm:max_cat_threshold=255 lightgbm catboost \
+    --output cats.json
+python benchmarks/frontier_matrix.py compare base.json cand.json \
+    --baseline alloy --candidate alloy --gate
+```
+
+The report gives AlloyGBM's loss relative to the best peer (geometric mean)
+and win/tie/loss counts per axis level and per regime, with differences
+inside two seed standard errors (or under 0.5%) counted as ties. Design,
+industry background and the first results:
+[`docs/benchmarks/frontier_matrix_v1.md`](../docs/benchmarks/frontier_matrix_v1.md).
+
 ### Manifest-driven competitiveness runner
 
 The reproducible competitiveness fixtures and raw repetition contract live in
