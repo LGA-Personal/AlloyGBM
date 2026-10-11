@@ -64,6 +64,13 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
             "min_validation_improvement must be finite and >= 0".to_string(),
         ));
     }
+    if !params.early_stopping_relative_tolerance.is_finite()
+        || !(0.0..1.0).contains(&params.early_stopping_relative_tolerance)
+    {
+        return Err(CoreError::InvalidConfig(
+            "early_stopping_relative_tolerance must be finite and in [0, 1)".to_string(),
+        ));
+    }
 
     if params.min_data_in_leaf == 0 {
         return Err(CoreError::InvalidConfig(

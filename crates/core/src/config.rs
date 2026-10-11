@@ -234,6 +234,15 @@ pub struct TrainParams {
     /// otherwise it is a no-op. Native-categorical and MorphBoost joint splits
     /// are unaffected even when this flag is on (deferred scope).
     pub joint_dro_robust_split_gain: bool,
+    /// Relative validation tolerance for early stopping. When positive (and
+    /// `early_stopping_rounds` is set), training also stops once
+    /// `early_stopping_rounds` consecutive rounds have failed to beat the best
+    /// validation loss so far by this fraction of it. The model is still
+    /// truncated to the best round under `min_validation_improvement`; this
+    /// only ends a long, nearly flat tail sooner. `0.0` (default) disables it.
+    /// `f64` so a caller replaying the same rule on the reported curve in
+    /// double precision makes identical decisions.
+    pub early_stopping_relative_tolerance: f64,
 }
 
 impl Default for TrainParams {
@@ -269,6 +278,7 @@ impl Default for TrainParams {
             pl_split_candidates: 0,
             colsample_bynode: 1.0,
             joint_dro_robust_split_gain: false,
+            early_stopping_relative_tolerance: 0.0,
         }
     }
 }

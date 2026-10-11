@@ -163,6 +163,7 @@ pub(crate) fn build_train_params(
         // reads it, so it's hardcoded off here rather than threading a dead
         // kwarg through `GBMRegressor`/`GBMClassifier`/`GBMRanker`.
         joint_dro_robust_split_gain: false,
+        early_stopping_relative_tolerance: 0.0,
     }
 }
 

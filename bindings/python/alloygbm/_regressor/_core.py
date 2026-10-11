@@ -1712,6 +1712,17 @@ class _GBMEstimatorCore(
         rows = self._coerce_sequence_like(values, "X")
         return _auto_rounds.take_rows(rows, indices)
 
+    def _early_stopping_relative_kwargs(self) -> dict:
+        """Native kwargs for the holdout pass's relative early stopping.
+
+        Empty outside that pass, so ordinary fits call the native trainer
+        exactly as before.
+        """
+        tolerance = getattr(self, "_holdout_relative_tolerance", 0.0)
+        if not tolerance or self.early_stopping_rounds is None:
+            return {}
+        return {"early_stopping_relative_tolerance": float(tolerance)}
+
     def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
         if self.learning_rate != _auto_rounds.AUTO:
             return float(self.learning_rate)
@@ -1786,8 +1797,15 @@ class _GBMEstimatorCore(
             ]
 
         holdout_started = time.perf_counter()
-        with self._round_overrides(_auto_rounds.AUTO_ROUND_CAP, learning_rate, patience):
-            self._fit_once(take(X, train_idx), y_array[train_idx], **holdout_kwargs)
+        # The engine stops the holdout pass under the same relative rule that
+        # picks the round below, so it does not train out a long flat tail
+        # that the rule ignores anyway. The chosen round is unchanged.
+        self._holdout_relative_tolerance = _auto_rounds.AUTO_RELATIVE_TOLERANCE
+        try:
+            with self._round_overrides(_auto_rounds.AUTO_ROUND_CAP, learning_rate, patience):
+                self._fit_once(take(X, train_idx), y_array[train_idx], **holdout_kwargs)
+        finally:
+            self._holdout_relative_tolerance = 0.0
         holdout_seconds = time.perf_counter() - holdout_started
         validation_curves = self.evals_result_.get("validation", {})
         curve = next(
@@ -2402,6 +2420,7 @@ class _GBMEstimatorCore(
                         else None
                     ),
                     n_jobs=self.n_jobs,
+                    **self._early_stopping_relative_kwargs(),
                     **ranking_sigma_kwargs,
                 )
                 return self._finalize_training_result(
@@ -2566,6 +2585,7 @@ class _GBMEstimatorCore(
                     else None
                 ),
                 n_jobs=self.n_jobs,
+                **self._early_stopping_relative_kwargs(),
                 **ranking_sigma_kwargs,
             )
         else:
@@ -2680,6 +2700,7 @@ class _GBMEstimatorCore(
                     else None
                 ),
                 n_jobs=self.n_jobs,
+                **self._early_stopping_relative_kwargs(),
                 **ranking_sigma_kwargs,
             )
 

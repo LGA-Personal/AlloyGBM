@@ -54,6 +54,42 @@ pub struct Trainer {
 
 type MulticlassDartRoundBookkeeping = (Vec<Vec<usize>>, Vec<Vec<usize>>);
 
+/// Early-stopping counter for a relative validation tolerance (see
+/// `TrainParams::early_stopping_relative_tolerance`).
+///
+/// A round improves only when its loss beats the best so far by `tolerance`
+/// of that best. The comparison runs in `f64` on the `f32` losses the summary
+/// reports, so a caller replaying the rule on the reported curve (the Python
+/// auto-rounds holdout does) reaches the same decision at every round.
+#[derive(Debug, Default)]
+pub(crate) struct RelativeValidationPlateau {
+    best: Option<f64>,
+    rounds_since_best: usize,
+}
+
+impl RelativeValidationPlateau {
+    /// Record one completed round's validation loss and report whether
+    /// `patience` rounds have now passed without a relative improvement.
+    /// Always `false` when `tolerance` is zero (the rule is off).
+    pub(crate) fn observe(&mut self, loss: f32, tolerance: f64, patience: usize) -> bool {
+        if tolerance <= 0.0 {
+            return false;
+        }
+        let loss = f64::from(loss);
+        // The first round sets the reference; a NaN loss never improves.
+        let improved = self
+            .best
+            .is_none_or(|best| loss < best - tolerance * best.abs());
+        if improved {
+            self.best = Some(loss);
+            self.rounds_since_best = 0;
+        } else {
+            self.rounds_since_best += 1;
+        }
+        self.rounds_since_best >= patience
+    }
+}
+
 pub(crate) fn allocate_dart_contribution_buffer(
     dart_enabled: bool,
     row_count: usize,
@@ -1230,6 +1266,7 @@ impl Trainer {
         let mut diagnostics_per_round: Vec<IterationDiagnostics> = Vec::new();
         let mut best_validation_loss = initial_validation_loss;
         let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
+        let mut relative_plateau = RelativeValidationPlateau::default();
         let mut validation_no_improvement_rounds = 0_usize;
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
@@ -1917,7 +1954,12 @@ impl Trainer {
                     validation_no_improvement_rounds += 1;
                 }
                 if let Some(patience) = controls.early_stopping_rounds
-                    && validation_no_improvement_rounds >= patience
+                    && (validation_no_improvement_rounds >= patience
+                        || relative_plateau.observe(
+                            next_validation_loss,
+                            controls.relative_validation_improvement,
+                            patience,
+                        ))
                 {
                     stop_for_validation_plateau = true;
                 }
@@ -2145,10 +2187,14 @@ impl Trainer {
         )?
         .with_subsample_rates(self.params.row_subsample, self.params.col_subsample)?;
         if let Some(early_stopping_rounds) = self.params.early_stopping_rounds {
-            controls = controls.with_validation_early_stopping(
-                early_stopping_rounds as usize,
-                self.params.min_validation_improvement,
-            )?;
+            controls = controls
+                .with_validation_early_stopping(
+                    early_stopping_rounds as usize,
+                    self.params.min_validation_improvement,
+                )?
+                .with_relative_validation_improvement(
+                    self.params.early_stopping_relative_tolerance,
+                )?;
         }
         controls = controls.with_max_leaves(self.params.max_leaves)?;
         Ok(controls)
@@ -2509,6 +2555,7 @@ impl Trainer {
         let mut diagnostics_per_round: Vec<IterationDiagnostics> = Vec::new();
         let mut best_validation_loss = initial_validation_loss;
         let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
+        let mut relative_plateau = RelativeValidationPlateau::default();
         let mut validation_no_improvement_rounds = 0_usize;
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
@@ -3148,7 +3195,12 @@ impl Trainer {
                         validation_no_improvement_rounds += 1;
                     }
                     if let Some(patience) = controls.early_stopping_rounds
-                        && validation_no_improvement_rounds >= patience
+                        && (validation_no_improvement_rounds >= patience
+                            || relative_plateau.observe(
+                                next_validation_loss,
+                                controls.relative_validation_improvement,
+                                patience,
+                            ))
                     {
                         stop_for_validation_plateau = true;
                     }

@@ -116,6 +116,9 @@ pub struct IterationControls {
     /// Minimum child Hessian sum chosen by the auto policy, under the same
     /// rule as `auto_lambda_l2`. `0.0` means "no auto value".
     pub auto_min_child_hessian: f32,
+    /// Relative validation tolerance for early stopping; see
+    /// `TrainParams::early_stopping_relative_tolerance`. `0.0` disables it.
+    pub relative_validation_improvement: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,6 +472,7 @@ impl IterationControls {
             requested_policy_mode: TrainingPolicyMode::Manual,
             auto_lambda_l2: 0.0,
             auto_min_child_hessian: 0.0,
+            relative_validation_improvement: 0.0,
         })
     }
 
@@ -536,6 +540,19 @@ impl IterationControls {
         }
         self.early_stopping_rounds = Some(early_stopping_rounds);
         self.min_validation_improvement = min_validation_improvement;
+        Ok(self)
+    }
+
+    /// Also stop once `early_stopping_rounds` consecutive rounds fail to beat
+    /// the best validation loss by `tolerance` of it (relative). Has no effect
+    /// without validation early stopping.
+    pub fn with_relative_validation_improvement(mut self, tolerance: f64) -> EngineResult<Self> {
+        if !tolerance.is_finite() || !(0.0..1.0).contains(&tolerance) {
+            return Err(EngineError::InvalidConfig(
+                "relative validation improvement must be finite and in [0, 1)".to_string(),
+            ));
+        }
+        self.relative_validation_improvement = tolerance;
         Ok(self)
     }
 }
