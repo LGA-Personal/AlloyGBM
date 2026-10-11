@@ -1434,7 +1434,8 @@ pub(crate) fn train_regression_artifact_dense(
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<FitThreadCount>
+    n_jobs=None::<FitThreadCount>,
+    early_stopping_relative_tolerance=0.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1519,6 +1520,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
     n_jobs: Option<FitThreadCount>,
+    early_stopping_relative_tolerance: f64,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -1554,7 +1556,7 @@ pub(crate) fn train_regression_artifact_with_summary(
         dart_sample_type,
         dart_skip_drop,
     )?;
-    let params = build_train_params(
+    let mut params = build_train_params(
         learning_rate,
         max_depth,
         row_subsample,
@@ -1585,6 +1587,7 @@ pub(crate) fn train_regression_artifact_with_summary(
         pl_split_candidates,
         colsample_bynode,
     );
+    params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -1814,7 +1817,8 @@ mod tests {
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<FitThreadCount>
+    n_jobs=None::<FitThreadCount>,
+    early_stopping_relative_tolerance=0.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -1902,6 +1906,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
     n_jobs: Option<FitThreadCount>,
+    early_stopping_relative_tolerance: f64,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -1937,7 +1942,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         dart_sample_type,
         dart_skip_drop,
     )?;
-    let params = build_train_params(
+    let mut params = build_train_params(
         learning_rate,
         max_depth,
         row_subsample,
@@ -1968,6 +1973,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         pl_split_candidates,
         colsample_bynode,
     );
+    params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -2139,7 +2145,8 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<FitThreadCount>
+    n_jobs=None::<FitThreadCount>,
+    early_stopping_relative_tolerance=0.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -2227,6 +2234,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
     n_jobs: Option<FitThreadCount>,
+    early_stopping_relative_tolerance: f64,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let values = dense_input_to_f32_vec(values_bytes)?;
@@ -2268,7 +2276,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         dart_sample_type,
         dart_skip_drop,
     )?;
-    let params = build_train_params(
+    let mut params = build_train_params(
         learning_rate,
         max_depth,
         row_subsample,
@@ -2299,6 +2307,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         pl_split_candidates,
         colsample_bynode,
     );
+    params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,

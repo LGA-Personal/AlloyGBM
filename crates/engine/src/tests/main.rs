@@ -10746,3 +10746,98 @@ fn colsample_bynode_keeps_feature_empty_draw_falls_back() {
         );
     }
 }
+
+/// Reference for the relative early-stopping rule, written the way the
+/// Python auto-rounds holdout applies it to the reported curve
+/// (`best_round_with_relative_tolerance`): the index of the curve entry at
+/// which it stops, if it stops.
+fn relative_rule_stop_index(curve: &[f32], tolerance: f64, patience: usize) -> Option<usize> {
+    let mut best = f64::from(curve[0]);
+    let mut best_index = 0;
+    for (index, &value) in curve.iter().enumerate() {
+        let value = f64::from(value);
+        if value < best - tolerance * best.abs() {
+            best = value;
+            best_index = index;
+        }
+        if index - best_index >= patience {
+            return Some(index);
+        }
+    }
+    None
+}
+
+#[test]
+fn relative_validation_plateau_stops_where_the_python_rule_does() {
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut next_unit = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let mut stopped_cases = 0;
+    for case in 0..200 {
+        // A decaying loss with noise and a long, nearly flat tail.
+        let mut loss = 1.0_f32 + next_unit();
+        let curve: Vec<f32> = (0..400)
+            .map(|round| {
+                let step = if round < 60 { 0.03 } else { 0.0004 };
+                loss -= step * loss * (next_unit() - 0.2);
+                loss
+            })
+            .collect();
+        let tolerance = [1e-3, 1e-2, 1e-4][case % 3];
+        let patience = 1 + case % 40;
+        let mut plateau = crate::trainer::RelativeValidationPlateau::default();
+        let engine_stop = curve
+            .iter()
+            .position(|&value| plateau.observe(value, tolerance, patience));
+        assert_eq!(
+            engine_stop,
+            relative_rule_stop_index(&curve, tolerance, patience),
+            "case {case}: tolerance {tolerance}, patience {patience}"
+        );
+        stopped_cases += usize::from(engine_stop.is_some());
+    }
+    assert!(
+        stopped_cases > 100,
+        "only {stopped_cases} cases stopped early"
+    );
+}
+
+#[test]
+fn relative_validation_plateau_is_inert_at_zero_tolerance() {
+    let mut plateau = crate::trainer::RelativeValidationPlateau::default();
+    assert!((0..100).all(|_| !plateau.observe(1.0, 0.0, 1)));
+}
+
+#[test]
+fn relative_validation_improvement_rejects_out_of_range_tolerance() {
+    let controls =
+        IterationControls::new(10, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("controls are valid");
+    for tolerance in [-1e-3, 1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            controls
+                .with_relative_validation_improvement(tolerance)
+                .is_err(),
+            "tolerance {tolerance} should be rejected"
+        );
+    }
+    assert_eq!(
+        controls
+            .with_relative_validation_improvement(1e-3)
+            .expect("1e-3 is valid")
+            .relative_validation_improvement,
+        1e-3
+    );
+}
+
+#[test]
+fn train_params_reject_out_of_range_relative_tolerance() {
+    let params = TrainParams {
+        early_stopping_relative_tolerance: 1.5,
+        ..TrainParams::default()
+    };
+    assert!(Trainer::new(params).is_err());
+}

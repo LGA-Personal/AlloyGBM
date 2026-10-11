@@ -29,6 +29,14 @@ stopping (cuts the holdout pass), the same treatment for
 learning rate and depth. See the
 [auto rounds evidence report](../benchmarks/auto_rounds_v1.md).
 
+**Fit speed follow-up (implemented).** The split search now skips empty
+thresholds and redundant missing-value passes, and the engine stops the
+holdout pass under the relative tolerance. Models are bit-identical; default
+fits take 29% less time (36% at 100 fixed rounds), which brings auto-rounds
+fits level with CatBoost's default cost. Remaining speed work: per-feature
+histogram widths and the refit pass. See the
+[fit speed report](../benchmarks/fit_speed_v1.md).
+
 ## DART Expected-Drop Calibration (PR #137)
 
 **Status: implemented.** The public Python default for `dart_max_drop` is now

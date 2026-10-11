@@ -1,6 +1,7 @@
 use alloygbm_core::{
-    BinnedMatrix, Device, FeatureTile, GradientPair, HistogramBundle, HistogramFeatureView,
-    NodeSlice, NodeStats, PartitionResult, SplitCandidate, leaf_effective_gradient,
+    BinColumn, BinnedMatrix, Device, FeatureTile, GradientPair, HistogramBundle,
+    HistogramFeatureView, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    leaf_effective_gradient,
 };
 use alloygbm_engine::{
     CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext, MorphContext,
@@ -36,7 +37,7 @@ use split_helpers::{
     categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, feature_weight_allows_split,
     gain_materially_exceeds, goes_left_for_split, l1_threshold_gradient, split_gain_term,
 };
-use split_scan::with_split_scan_scratch;
+use split_scan::with_compact_split_scan_scratch;
 
 pub use alloygbm_core::simd;
 
@@ -148,6 +149,35 @@ impl CpuBackend {
         arena.counts[target] += 1;
     }
 
+    #[inline(always)]
+    fn accumulate_slot<const INCLUDE_GRAD_SQ: bool>(
+        slot: &mut BinAccumulator,
+        gradient: GradientPair,
+    ) {
+        slot.grad += gradient.grad;
+        slot.hess += gradient.hess;
+        if INCLUDE_GRAD_SQ {
+            slot.grad_sq += gradient.grad * gradient.grad;
+        }
+        slot.count += 1;
+    }
+
+    /// Accumulate a node's rows of one column into the interleaved scratch.
+    /// Rows are visited in node order, so the sums are bit-identical to the
+    /// per-row `col_bin` path.
+    #[inline(always)]
+    fn accumulate_column<T: Copy + Into<usize>, const INCLUDE_GRAD_SQ: bool>(
+        column: &[T],
+        node_gradients: &[GradientPair],
+        row_indices: &[u32],
+        scratch: &mut [BinAccumulator],
+    ) {
+        for (&row_index, &gradient) in row_indices.iter().zip(node_gradients) {
+            let bin_index: usize = column[row_index as usize].into();
+            Self::accumulate_slot::<INCLUDE_GRAD_SQ>(&mut scratch[bin_index], gradient);
+        }
+    }
+
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
     /// [`gather_node_gradients`]. Reading by position keeps this loop's
     /// gradient access sequential; only the bin lookup still gathers.
@@ -179,16 +209,33 @@ impl CpuBackend {
                 // and rows are summed in the same order either way.
                 let col_base = feature_index * row_count;
                 arena.scratch.fill(BinAccumulator::default());
-                for (position, &row_index) in node.row_indices.iter().enumerate() {
-                    let bin_index = binned_matrix.col_bin(col_base + row_index as usize) as usize;
-                    let gradient = node_gradients[position];
-                    let slot = &mut arena.scratch[bin_index];
-                    slot.grad += gradient.grad;
-                    slot.hess += gradient.hess;
-                    if INCLUDE_GRAD_SQ {
-                        slot.grad_sq += gradient.grad * gradient.grad;
+                // Dispatch on the storage width once per column rather than
+                // once per row.
+                match binned_matrix.col_bins(feature_index) {
+                    Some(BinColumn::U8(column)) => Self::accumulate_column::<u8, INCLUDE_GRAD_SQ>(
+                        column,
+                        node_gradients,
+                        &node.row_indices,
+                        &mut arena.scratch,
+                    ),
+                    Some(BinColumn::U16(column)) => {
+                        Self::accumulate_column::<u16, INCLUDE_GRAD_SQ>(
+                            column,
+                            node_gradients,
+                            &node.row_indices,
+                            &mut arena.scratch,
+                        )
                     }
-                    slot.count += 1;
+                    None => {
+                        for (position, &row_index) in node.row_indices.iter().enumerate() {
+                            let bin_index =
+                                binned_matrix.col_bin(col_base + row_index as usize) as usize;
+                            Self::accumulate_slot::<INCLUDE_GRAD_SQ>(
+                                &mut arena.scratch[bin_index],
+                                node_gradients[position],
+                            );
+                        }
+                    }
                 }
                 for bin_index in 0..arena.bin_count {
                     let slot = arena.scratch[bin_index];
@@ -731,48 +778,91 @@ impl CpuBackend {
                 (0.0_f32, 0.0_f32, 0_u32)
             };
 
-        let mut total_grad = 0.0_f32;
-        let mut total_hess = 0.0_f32;
-        let mut total_count = 0_u32;
-        for index in 0..feature_histogram.len() {
-            total_grad += grad_sums[index];
-            total_hess += hess_sums[index];
-            total_count += counts[index];
-        }
-
-        if total_hess <= options.min_child_hessian {
-            return None;
-        }
-
-        let nm_total_grad = total_grad - missing_grad;
-        let nm_total_hess = total_hess - missing_hess;
-        let nm_total_count = total_count.saturating_sub(missing_count);
-
-        let parent_denom = total_hess + options.l2_lambda + EPSILON;
-        let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
-        let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
-
-        let scan_limit = feature_histogram.len().min(missing_bin_idx);
+        let bin_len = feature_histogram.len();
+        let scan_limit = bin_len.min(missing_bin_idx);
         if scan_limit == 0 {
             return None;
         }
 
-        with_split_scan_scratch(
+        with_compact_split_scan_scratch(
             scan_limit,
-            |cum_left_grad, cum_left_hess, cum_left_count| {
+            |cum_left_grad, cum_left_hess, cum_left_count, candidate_bins| {
                 // Pre-compute scalar cumulative left-side stats. The prefix scan is
                 // inherently sequential, so we keep it in scalar code.
+                //
+                // Only thresholds whose cumulative left stats differ from the
+                // previous threshold's are kept as candidates (compacted into the
+                // front of the scratch arrays, with their bin in
+                // `candidate_bins`). A threshold whose left stats are bitwise
+                // equal to its predecessor's -- an empty bin -- has a bitwise
+                // equal gain, and the argmax below only replaces the running
+                // best on a material improvement, so it can never be chosen.
+                // Dropping it leaves the selected split unchanged, while a deep
+                // node with a few dozen rows now evaluates a few dozen
+                // thresholds per feature instead of every bin. Low-cardinality
+                // features benefit at every depth.
+                //
+                // Runs of eight exactly-zero bins are skipped without touching
+                // the accumulators: adding +0.0 leaves any value other than
+                // -0.0 bitwise unchanged. Bin 0 is always a candidate (it is
+                // the "only missing rows go left" threshold).
                 let mut g = 0.0_f32;
                 let mut h = 0.0_f32;
                 let mut c = 0_u32;
-                for i in 0..scan_limit {
-                    g += grad_sums[i];
-                    h += hess_sums[i];
-                    c += counts[i];
-                    cum_left_grad[i] = g;
-                    cum_left_hess[i] = h;
-                    cum_left_count[i] = c;
+                let mut candidate_count = 0usize;
+                let mut chunk_start = 0usize;
+                while chunk_start < scan_limit {
+                    let chunk_end = (chunk_start + 8).min(scan_limit);
+                    if chunk_start != 0
+                        && !is_negative_zero(g)
+                        && !is_negative_zero(h)
+                        && bins_are_exactly_zero(
+                            &grad_sums[chunk_start..chunk_end],
+                            &hess_sums[chunk_start..chunk_end],
+                            &counts[chunk_start..chunk_end],
+                        )
+                    {
+                        chunk_start = chunk_end;
+                        continue;
+                    }
+                    for i in chunk_start..chunk_end {
+                        let previous = (g.to_bits(), h.to_bits(), c);
+                        g += grad_sums[i];
+                        h += hess_sums[i];
+                        c += counts[i];
+                        if i == 0 || (g.to_bits(), h.to_bits(), c) != previous {
+                            cum_left_grad[candidate_count] = g;
+                            cum_left_hess[candidate_count] = h;
+                            cum_left_count[candidate_count] = c;
+                            candidate_bins[candidate_count] = i as u32;
+                            candidate_count += 1;
+                        }
+                    }
+                    chunk_start = chunk_end;
                 }
+
+                // Node totals: the same left-to-right sum over every bin, so the
+                // prefix above is its first `scan_limit` terms.
+                let mut total_grad = g;
+                let mut total_hess = h;
+                let mut total_count = c;
+                for index in scan_limit..bin_len {
+                    total_grad += grad_sums[index];
+                    total_hess += hess_sums[index];
+                    total_count += counts[index];
+                }
+
+                if total_hess <= options.min_child_hessian {
+                    return None;
+                }
+
+                let nm_total_grad = total_grad - missing_grad;
+                let nm_total_hess = total_hess - missing_hess;
+                let nm_total_count = total_count.saturating_sub(missing_count);
+
+                let parent_denom = total_hess + options.l2_lambda + EPSILON;
+                let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
+                let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
 
                 // Per-NaN-direction broadcast values.
                 let l1_alpha = options.l1_alpha;
@@ -799,16 +889,26 @@ impl CpuBackend {
                 // Best result tracking — store as (gain, threshold_bin, default_left).
                 // Final SplitCandidate is built once at the end from the cumulative arrays.
                 let mut best_gain = 0.0_f32;
-                let mut best_threshold: usize = usize::MAX;
+                let mut best_candidate: usize = usize::MAX;
                 let mut best_default_left = false;
 
-                // For each NaN direction, evaluate gain across all bins in 8-wide chunks.
-                for &default_left in &[true, false] {
+                // With no missing rows in the node (all three missing stats
+                // exactly zero), routing them right produces bitwise the same
+                // candidates as routing them left, so the second pass could
+                // never materially beat the first and is skipped.
+                let has_missing = missing_count != 0
+                    || missing_grad.to_bits() != 0
+                    || missing_hess.to_bits() != 0;
+                let directions: &[bool] = if has_missing { &[true, false] } else { &[true] };
+
+                // For each NaN direction, evaluate gain across the candidate
+                // thresholds in 8-wide chunks.
+                for &default_left in directions {
                     let nan_left_mask = default_left;
                     // For each chunk-of-8 starting at `chunk_start`:
                     let mut chunk_start = 0usize;
-                    while chunk_start < scan_limit {
-                        let chunk_end = (chunk_start + 8).min(scan_limit);
+                    while chunk_start < candidate_count {
+                        let chunk_end = (chunk_start + 8).min(candidate_count);
                         let chunk_len = chunk_end - chunk_start;
 
                         // Load 8 lanes of cumulative left stats (zero-pad the tail).
@@ -903,8 +1003,8 @@ impl CpuBackend {
                         // Replicates the scalar check:
                         //   if threshold_bin + 1 >= scan_limit && nm_total_count == left_count { skip }
                         for (j, slot) in g_arr.iter_mut().take(chunk_len).enumerate() {
-                            let threshold_bin = chunk_start + j;
-                            let left_count = cum_left_count[threshold_bin];
+                            let threshold_bin = candidate_bins[chunk_start + j] as usize;
+                            let left_count = cum_left_count[chunk_start + j];
                             if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
                                 *slot = f32::NEG_INFINITY;
                             }
@@ -913,7 +1013,7 @@ impl CpuBackend {
                         for (j, &g) in g_arr.iter().take(chunk_len).enumerate() {
                             if gain_materially_exceeds(g, best_gain) {
                                 best_gain = g;
-                                best_threshold = chunk_start + j;
+                                best_candidate = chunk_start + j;
                                 best_default_left = default_left;
                             }
                         }
@@ -922,15 +1022,15 @@ impl CpuBackend {
                     }
                 }
 
-                if best_threshold == usize::MAX {
+                if best_candidate == usize::MAX {
                     return None;
                 }
 
                 // Reconstruct the chosen candidate's stats from the cumulative arrays.
-                let threshold_bin = best_threshold;
-                let left_grad = cum_left_grad[threshold_bin];
-                let left_hess = cum_left_hess[threshold_bin];
-                let left_count = cum_left_count[threshold_bin];
+                let threshold_bin = candidate_bins[best_candidate] as usize;
+                let left_grad = cum_left_grad[best_candidate];
+                let left_hess = cum_left_hess[best_candidate];
+                let left_count = cum_left_count[best_candidate];
                 let right_grad = nm_total_grad - left_grad;
                 let right_hess = nm_total_hess - left_hess;
                 let right_count = nm_total_count.saturating_sub(left_count);
@@ -1897,6 +1997,21 @@ impl CpuBackend {
             right.into_node_stats(right_count),
         )
     }
+}
+
+#[inline]
+fn is_negative_zero(value: f32) -> bool {
+    value.to_bits() == (-0.0_f32).to_bits()
+}
+
+/// Whether every bin in the run is exactly empty: zero count and +0.0 sums.
+#[inline]
+fn bins_are_exactly_zero(grad_sums: &[f32], hess_sums: &[f32], counts: &[u32]) -> bool {
+    let mut bits = 0_u32;
+    for ((grad, hess), count) in grad_sums.iter().zip(hess_sums).zip(counts) {
+        bits |= grad.to_bits() | hess.to_bits() | count;
+    }
+    bits == 0
 }
 
 #[cfg(test)]

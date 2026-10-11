@@ -12,6 +12,14 @@ pub enum BinStorage {
     U16(Vec<u16>),
 }
 
+/// A borrowed column of bins in its storage width; see
+/// [`BinnedMatrix::col_bins`].
+#[derive(Debug, Clone, Copy)]
+pub enum BinColumn<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+}
+
 impl BinStorage {
     /// Get the bin value at the given index as a u16.
     #[inline]
@@ -271,6 +279,23 @@ impl BinnedMatrix {
         self.feature_bundle_map
             .as_ref()
             .map_or(self.nan_bin_index, FeatureBundleMap::logical_missing_bin)
+    }
+
+    /// One feature's column-major bins as a typed slice, for kernels that
+    /// read a whole column and should not re-dispatch on the storage width
+    /// per row. `None` when the matrix has no column-major copy or stores
+    /// bundled features (whose bins need decoding).
+    #[inline]
+    pub fn col_bins(&self, feature: usize) -> Option<BinColumn<'_>> {
+        if self.feature_bundle_map.is_some() || !self.has_col_major() {
+            return None;
+        }
+        let start = feature * self.row_count;
+        let end = start + self.row_count;
+        match &self.bins_col_adaptive {
+            BinStorage::U8(bins) => bins.get(start..end).map(BinColumn::U8),
+            BinStorage::U16(bins) => bins.get(start..end).map(BinColumn::U16),
+        }
     }
 
     /// Whether column-major adaptive storage is available (non-empty).

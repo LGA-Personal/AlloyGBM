@@ -11,6 +11,7 @@ struct SplitScanScratch {
     cumulative_hess: Vec<f32>,
     cumulative_grad_sq: Vec<f32>,
     cumulative_count: Vec<u32>,
+    candidate_bins: Vec<u32>,
 }
 
 impl SplitScanScratch {
@@ -47,6 +48,32 @@ pub(super) fn with_split_scan_scratch<R>(
     })
 }
 
+/// Like [`with_split_scan_scratch`], plus a `u32` buffer for the bin index of
+/// each compacted threshold candidate.
+pub(super) fn with_compact_split_scan_scratch<R>(
+    scan_limit: usize,
+    f: impl FnOnce(&mut [f32], &mut [f32], &mut [u32], &mut [u32]) -> R,
+) -> R {
+    THREAD_SPLIT_SCAN_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        scratch.resize_standard(scan_limit);
+        scratch.candidate_bins.resize(scan_limit, 0);
+        let SplitScanScratch {
+            cumulative_grad,
+            cumulative_hess,
+            cumulative_count,
+            candidate_bins,
+            ..
+        } = &mut *scratch;
+        f(
+            cumulative_grad.as_mut_slice(),
+            cumulative_hess.as_mut_slice(),
+            cumulative_count.as_mut_slice(),
+            candidate_bins.as_mut_slice(),
+        )
+    })
+}
+
 pub(super) fn with_dro_split_scan_scratch<R>(
     scan_limit: usize,
     f: impl FnOnce(&mut [f32], &mut [f32], &mut [f32], &mut [u32]) -> R,
@@ -59,6 +86,7 @@ pub(super) fn with_dro_split_scan_scratch<R>(
             cumulative_hess,
             cumulative_grad_sq,
             cumulative_count,
+            ..
         } = &mut *scratch;
         f(
             cumulative_grad.as_mut_slice(),

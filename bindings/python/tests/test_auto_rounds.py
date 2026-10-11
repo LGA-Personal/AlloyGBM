@@ -293,3 +293,70 @@ def test_relative_tolerance_ignores_a_flat_tail():
     curve = [1.0, 0.5, 0.4, 0.39999, 0.39998, 0.39997, 0.39996]
     assert _auto_rounds.best_round_with_relative_tolerance(curve, 3, 1e-3) == 3
     assert _auto_rounds.best_round_with_relative_tolerance(curve, 3, 0.0) == 7
+
+
+def _record_native_relative_tolerance(monkeypatch):
+    """Spy on the native summary trainers; record each call's relative tolerance."""
+    import alloygbm._alloygbm as native
+
+    seen: list[float] = []
+    for name in (
+        "train_regression_artifact_dense_with_summary_bytes",
+        "train_regression_artifact_dense_with_summary",
+        "train_regression_artifact_with_summary",
+    ):
+        original = getattr(native, name)
+
+        def spy(*args, _original=original, **kwargs):
+            seen.append(kwargs.get("early_stopping_relative_tolerance", 0.0))
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(native, name, spy)
+    return seen
+
+
+def test_engine_stops_the_holdout_under_the_relative_rule(monkeypatch):
+    seen = _record_native_relative_tolerance(monkeypatch)
+    X, y = _regression()
+    GBMRegressor(seed=3).fit(X, y)
+    # Holdout pass, then the refit (which has no validation to stop on).
+    assert seen == [_auto_rounds.AUTO_RELATIVE_TOLERANCE, 0.0]
+
+    seen.clear()
+    GBMRegressor(n_estimators=20).fit(X, y)
+    GBMRegressor(seed=3).fit(X, y, eval_set=(X[:50], y[:50]))
+    assert seen == [0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    ("cls", "make"),
+    [
+        (GBMRegressor, lambda: _regression(n=800, seed=4)),
+        (
+            GBMClassifier,
+            lambda: (
+                (lambda X: (X, (X[:, 0] + X[:, 1] > 0).astype(int)))(
+                    np.random.default_rng(5).normal(size=(800, 6))
+                )
+            ),
+        ),
+        (
+            GBMClassifier,
+            lambda: (
+                (lambda X: (X, np.digitize(X[:, 0] + 0.5 * X[:, 1], [-0.7, 0.0, 0.7])))(
+                    np.random.default_rng(6).normal(size=(800, 6))
+                )
+            ),
+        ),
+    ],
+)
+def test_engine_relative_stop_keeps_the_chosen_rounds(monkeypatch, cls, make):
+    """Stopping the holdout early in the engine must not move the round count."""
+    X, y = make()
+    fast = cls(seed=1).fit(X, y)
+    monkeypatch.setattr(cls, "_early_stopping_relative_kwargs", lambda self: {})
+    slow = cls(seed=1).fit(X, y)
+    for key in ("holdout_best_round", "refit_rounds"):
+        assert fast.auto_rounds_[key] == slow.auto_rounds_[key]
+    predict = "predict_proba" if cls is GBMClassifier else "predict"
+    np.testing.assert_array_equal(getattr(fast, predict)(X), getattr(slow, predict)(X))
