@@ -197,6 +197,8 @@ class Arm:
 BUILTIN_ARMS: dict[str, Arm] = {
     "alloy": Arm("alloy", "alloygbm"),
     "alloy-manual": Arm("alloy-manual", "alloygbm", {"training_policy": "manual"}),
+    # The pre-auto-rounds defaults: 100 rounds at learning rate 0.1.
+    "alloy-fixed": Arm("alloy-fixed", "alloygbm", {"n_estimators": 100, "learning_rate": 0.1}),
     "lightgbm": Arm("lightgbm", "lightgbm"),
     "xgboost": Arm("xgboost", "xgboost"),
     "catboost": Arm("catboost", "catboost"),
@@ -230,8 +232,24 @@ def parse_arm(spec: str) -> Arm:
     return Arm(name, library, params)
 
 
-def _make_estimator(arm: Arm, task: str, seed: int, threads: int):
+def depth_params(library: str, max_depth: int) -> dict:
+    """The parameters that cap tree depth at ``max_depth`` in ``library``.
+
+    LightGBM grows leaf-wise and is limited by ``num_leaves`` (31 by
+    default), so a matched depth also lifts ``num_leaves`` to ``2**depth``.
+    """
+    if library == "lightgbm":
+        return {"max_depth": max_depth, "num_leaves": 2 ** max_depth}
+    if library == "catboost":
+        return {"depth": max_depth}
+    return {"max_depth": max_depth}
+
+
+def _make_estimator(arm: Arm, task: str, seed: int, threads: int,
+                    max_depth: int | None = None):
     params = dict(arm.params)
+    if max_depth is not None:
+        params = depth_params(arm.library, max_depth) | params
     classifier = task in (BINARY, MULTICLASS)
     if arm.library == "alloygbm":
         from alloygbm import GBMClassifier, GBMRegressor
@@ -284,9 +302,10 @@ def split(ds: Dataset, seed: int, test_size: float = 0.25):
     return train_test_split(ds.X, ds.y, test_size=test_size, random_state=seed, stratify=stratify)
 
 
-def fit_and_score(arm: Arm, ds: Dataset, seed: int, threads: int) -> dict:
+def fit_and_score(arm: Arm, ds: Dataset, seed: int, threads: int,
+                  max_depth: int | None = None) -> dict:
     X_train, X_test, y_train, y_test = split(ds, seed)
-    model = _make_estimator(arm, ds.task, seed, threads)
+    model = _make_estimator(arm, ds.task, seed, threads, max_depth)
     started = time.perf_counter()
     if ds.task == REGRESSION:
         model.fit(X_train, y_train * ds.target_scale)
@@ -304,14 +323,14 @@ def fit_and_score(arm: Arm, ds: Dataset, seed: int, threads: int) -> dict:
 
 
 def run(arms: list[Arm], suite: list[Dataset], seeds: list[int], threads: int,
-        log: Callable[[str], None] = print) -> dict:
+        log: Callable[[str], None] = print, max_depth: int | None = None) -> dict:
     warnings.filterwarnings("ignore")
     records = []
     for ds in suite:
         for seed in seeds:
             for arm in arms:
                 try:
-                    result = fit_and_score(arm, ds, seed, threads)
+                    result = fit_and_score(arm, ds, seed, threads, max_depth)
                     error = None
                 except Exception as exc:  # recorded, and the gate fails closed on it
                     result, error = {"loss": None, "fit_seconds": None}, f"{type(exc).__name__}: {exc}"
@@ -325,6 +344,7 @@ def run(arms: list[Arm], suite: list[Dataset], seeds: list[int], threads: int,
         "arms": [asdict(arm) | {"version": _library_version(arm.library)} for arm in arms],
         "seeds": seeds,
         "threads": threads,
+        "max_depth": max_depth,
         "datasets": [{"name": ds.name, "task": ds.task, "stratum": ds.stratum,
                       "rows": int(ds.X.shape[0]), "features": int(ds.X.shape[1]),
                       "target_scale": ds.target_scale} for ds in suite],
@@ -457,6 +477,9 @@ def render_summary(result: dict) -> str:
     agg = summary["aggregate"]
     lines.append("| **geomean** | " + " | ".join(
         f"**{agg[a]['geomean_normalized_loss']:.3f}**" if a in agg else "n/a" for a in arms) + " |")
+    seconds = {a: sum(r["fit_seconds"] for r in result["records"]
+                      if r["arm"] == a and r.get("fit_seconds") is not None) for a in arms}
+    lines.append("| total fit seconds | " + " | ".join(f"{seconds[a]:.1f}" for a in arms) + " |")
     return "\n".join(lines)
 
 
@@ -485,6 +508,8 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--seeds", type=int, default=5)
     run_p.add_argument("--threads", type=int, default=1)
     run_p.add_argument("--quick", action="store_true")
+    run_p.add_argument("--max-depth", type=int, default=None,
+                       help="cap every library's tree depth (LightGBM also gets num_leaves=2**depth)")
     run_p.add_argument("--output", type=Path, required=True)
     cmp_p = sub.add_parser("compare", help="paired comparison of two arms")
     cmp_p.add_argument("files", type=Path, nargs="+", help="one result file, or baseline then candidate")
@@ -498,7 +523,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         arms = [parse_arm(spec) for spec in args.arms]
         suite = build_suite(quick=args.quick)
-        result = run(arms, suite, list(range(args.seeds)), args.threads)
+        result = run(arms, suite, list(range(args.seeds)), args.threads,
+                     max_depth=args.max_depth)
         args.output.write_text(json.dumps(result, indent=2) + "\n")
         print(render_summary(result))
         return 0
