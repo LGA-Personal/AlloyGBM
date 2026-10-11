@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Performance
+
+- **Faster fits with bit-identical models.** The split search skips
+  thresholds whose left statistics did not change (empty bins) and the
+  second missing-value pass when a node has no missing rows; the histogram
+  kernel dispatches on bin width once per column; and the auto-rounds
+  holdout now stops in the engine under its own 0.1% relative rule instead
+  of training out the flat tail (new
+  `TrainParams::early_stopping_relative_tolerance`, default off). On the
+  default-quality suite total fit time falls 29% with auto rounds and 36% at
+  100 fixed rounds (depth 6; 19%–43% across depths 4 to 8), with every test
+  loss identical to the previous build. See `docs/benchmarks/fit_speed_v1.md`.
+
 ### Changed
 
 - **`n_estimators` and `learning_rate` default to `"auto"`: the round count
