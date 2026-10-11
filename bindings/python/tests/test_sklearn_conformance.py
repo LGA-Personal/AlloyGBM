@@ -186,8 +186,8 @@ sys.meta_path.insert(0, BlockSklearn())
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
 
-assert GBMRegressor().get_params()["n_estimators"] == 100
-assert GBMClassifier().get_params()["n_estimators"] == 100
+assert GBMRegressor().get_params()["n_estimators"] == "auto"
+assert GBMClassifier().get_params()["n_estimators"] == "auto"
 assert GBMRanker().get_params()["ranking_objective"] == "rank:ndcg"
 """
     # Import alloygbm the same way the parent process does (installed package),

@@ -12,6 +12,23 @@ The remaining user-facing limitations are unchanged: CPU-only runtime, Classifie
 
 **No artifact format change.** Test counts: 792 cargo + 1,001 pytest (plus 62 subtests).
 
+## Automatic Rounds and Learning Rate (`n_estimators="auto"`)
+
+**Status: implemented, on by default.** `GBMRegressor`, `GBMClassifier` and
+`GBMRanker` default to `n_estimators="auto"` and `learning_rate="auto"`: under
+the auto training policy, the round count comes from early stopping on
+`eval_set`, or on a seeded 10% holdout followed by a refit on every row, at
+learning rate 0.05 (cap 2,000, patience 50, 0.1% relative tolerance). It is
+item 4 of the 2026-10 tuning plan, after the scale-free auto policy, greedy
+borders and the default-quality suite. On that suite AlloyGBM's defaults
+improve 8% at depth 6 and now beat LightGBM's and XGBoost's at depths 4, 6
+and 8; CatBoost remains best. Default fits cost about 7.6 times as long on
+small data. Follow-ups: a relative tolerance inside the engine's early
+stopping (cuts the holdout pass), the same treatment for
+`MultiLabelGBMRanker`, DART and MorphBoost, and a learned policy for the
+learning rate and depth. See the
+[auto rounds evidence report](../benchmarks/auto_rounds_v1.md).
+
 ## DART Expected-Drop Calibration (PR #137)
 
 **Status: implemented.** The public Python default for `dart_max_drop` is now

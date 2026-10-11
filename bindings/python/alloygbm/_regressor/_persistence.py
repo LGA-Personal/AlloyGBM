@@ -43,6 +43,8 @@ class _PersistenceMixin:
             "feature_bundling_diagnostics_",
             "evals_result_",
             "fit_timing_",
+            "learning_rate_",
+            "auto_rounds_",
             "classes_",
             "n_classes_",
         ):
@@ -138,6 +140,8 @@ class _PersistenceMixin:
             "best_iteration": self.best_iteration_,
             "best_score": self.best_score_,
             "n_estimators_actual": self.n_estimators_,
+            "learning_rate_actual": getattr(self, "learning_rate_", None),
+            "auto_rounds": getattr(self, "auto_rounds_", None),
             "evals_result": self.evals_result_,
             "feature_names_in": (
                 self.feature_names_in_.tolist()
@@ -249,6 +253,10 @@ class _PersistenceMixin:
         model.best_iteration_ = metadata.get("best_iteration")
         model.best_score_ = metadata.get("best_score")
         model.n_estimators_ = metadata.get("n_estimators_actual")
+        if metadata.get("learning_rate_actual") is not None:
+            model.learning_rate_ = metadata["learning_rate_actual"]
+        if metadata.get("auto_rounds") is not None:
+            model.auto_rounds_ = metadata["auto_rounds"]
         model.evals_result_ = metadata.get("evals_result")
         saved_feature_names = metadata.get("feature_names_in")
         if saved_feature_names is not None:

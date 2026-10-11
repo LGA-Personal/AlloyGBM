@@ -118,3 +118,28 @@ def test_scale_variant_scores_in_original_units():
     loss = dq.fit_and_score(arm, ds, seed=0, threads=1)["loss"]
     # Scored in the original units (targets 0..39), not the rescaled ones.
     assert 0.0 < loss < 20.0
+
+
+def test_depth_params_match_each_library():
+    assert dq.depth_params("alloygbm", 4) == {"max_depth": 4}
+    assert dq.depth_params("xgboost", 4) == {"max_depth": 4}
+    assert dq.depth_params("catboost", 4) == {"depth": 4}
+    assert dq.depth_params("lightgbm", 4) == {"max_depth": 4, "num_leaves": 16}
+
+
+def test_explicit_arm_params_override_depth():
+    arm = dq.parse_arm("shallow=alloygbm:max_depth=3")
+    model = dq._make_estimator(arm, dq.REGRESSION, seed=0, threads=1, max_depth=8)
+    assert model.max_depth == 3
+
+
+def test_fixed_arm_keeps_legacy_round_defaults():
+    arm = dq.BUILTIN_ARMS["alloy-fixed"]
+    assert arm.params == {"n_estimators": 100, "learning_rate": 0.1}
+
+
+def test_render_summary_reports_fit_seconds():
+    result = _result({"a": {("d0", 0): 1.0}, "b": {("d0", 0): 2.0}})
+    for record in result["records"]:
+        record["fit_seconds"] = 0.5
+    assert "| total fit seconds | 0.5 | 0.5 |" in dq.render_summary(result)

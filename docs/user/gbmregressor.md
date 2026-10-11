@@ -11,12 +11,15 @@ one-dimensional inputs are rejected before native training.
 
 ## Core Training Parameters
 
-- `learning_rate: float = 0.1`
-  - Step size for additive boosting updates.
+- `learning_rate: float | "auto" = "auto"`
+  - Step size for additive boosting updates. `"auto"` means `0.05` when the
+    round count is chosen automatically and `0.1` otherwise.
 - `max_depth: int = 6`
   - Maximum tree depth.
-- `n_estimators: int = 100`
-  - Number of boosting rounds requested.
+- `n_estimators: int | "auto" = "auto"`
+  - Number of boosting rounds. An integer trains exactly that many (subject
+    to early stopping). `"auto"` chooses the count by early stopping; see
+    [Automatic rounds](#automatic-rounds).
 - `row_subsample: float = 1.0`
   - Fraction of rows sampled per round.  Ignored when
     `boosting_mode="goss"` (GOSS uses gradient-based sampling instead).
@@ -127,6 +130,43 @@ cont = GBMRegressor(
 cont.fit(X, y, init_model=base)
 ```
 
+## Automatic Rounds
+
+With the default `n_estimators="auto"` and `training_policy="auto"`, a fit
+chooses its own round count, the way most tuned GBDT models are trained:
+many small steps, stopped by validation.
+
+- Without `eval_set`: a seeded 10% of the training rows is held out
+  (stratified by class for `GBMClassifier`, whole query groups for
+  `GBMRanker`). The model trains on the rest at learning rate `0.05` for up
+  to 2,000 rounds and stops after 50 rounds without a 0.1% relative
+  improvement in validation loss. It is then refit on every row for the
+  chosen count scaled by `1 / (1 - share held out)` (usually `1 / 0.9`),
+  because the refit sees more rows per round.
+- With `eval_set`: that set drives early stopping directly (same learning
+  rate, cap and patience) and there is no refit.
+- `early_stopping_rounds` sets the patience in both cases, and an explicit
+  `learning_rate` replaces `0.05`.
+
+`auto_rounds_` records what happened: the `mode` (`"holdout"`,
+`"eval_set"`, `"explicit"` or `"legacy"`), the learning rate, and for the
+holdout the validation rows, chosen round, refit rounds and the holdout fit's
+seconds. `learning_rate_` is the rate actually used.
+
+A fit uses the old fixed defaults, 100 rounds at learning rate `0.1`
+(`mode="legacy"`), with `training_policy="manual"`, when continuing training
+(`warm_start` or `init_model`; the continuation reuses the earlier fit's
+learning rate), with `boosting_mode="dart"`, `training_mode="morph"`,
+`lr_schedule="warmup_cosine"` or a custom objective, and, when no `eval_set`
+is given, with factor neutralization, `time_index` / time-aware categorical
+encoding, or fewer than 50 rows. Pass `n_estimators=100, learning_rate=0.1`
+to reproduce the old defaults exactly.
+
+On the default-quality suite this lowers AlloyGBM's geometric-mean test loss
+by about 9% versus the old defaults, at roughly 7 to 10 times the fit time on
+those small datasets; see `docs/benchmarks/auto_rounds_v1.md`.
+`MultiLabelGBMRanker` keeps the fixed defaults in both modes.
+
 ## Stopping And Training Policy
 
 - `early_stopping_rounds: int | None = None`
@@ -170,8 +210,11 @@ dictionary, not a constructor parameter or model-artifact field. It can be
 `None` only for an older or mocked native summary, older saved wrapper
 metadata, or an unfitted or reset estimator.
 
-Early stopping is explicit-only. If `early_stopping_rounds` is set, you must
-call `fit(..., eval_set=(X_valid, y_valid))`.
+With an integer `n_estimators`, early stopping is explicit-only: if
+`early_stopping_rounds` is set, you must call
+`fit(..., eval_set=(X_valid, y_valid))`. With `n_estimators="auto"` it sets the
+patience of the automatic holdout instead, and it is ignored when the fit falls
+back to the fixed 100 rounds without an `eval_set`.
 
 ## Leaf And Split Controls
 
@@ -635,7 +678,8 @@ shaping, and depth/iteration leaf shrinkage. See
 
 Important `fit(...)` rules:
 
-- If `early_stopping_rounds` is set, `eval_set` is required.
+- If `early_stopping_rounds` is set, `eval_set` is required, unless
+  `n_estimators="auto"` holds out its own validation rows.
 - If `eval_time_index` is passed, `eval_set` is required.
 - If `categorical_time_aware=True`, training requires `time_index`, and
   validation also requires `eval_time_index` when `eval_set` is used.

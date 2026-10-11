@@ -110,7 +110,8 @@ training or when you enable early stopping:
 
 Rules:
 
-- ``early_stopping_rounds`` requires ``eval_set``
+- ``early_stopping_rounds`` requires ``eval_set``, unless ``n_estimators="auto"``
+  holds out its own validation rows
 - ``eval_time_index`` requires ``eval_set``
 - Early stopping monitors the objective-appropriate metric:
   - RMSE for ``GBMRegressor``

@@ -41,6 +41,22 @@ _MULTI_LABEL_RANKER_MAGIC = b"MLRK"
 _MULTI_LABEL_RANKER_VERSION = 3
 
 
+def _with_fixed_round_defaults(kw: dict[str, Any]) -> dict[str, Any]:
+    """Per-label kwargs with the fixed round defaults (100 rounds at 0.1).
+
+    ``GBMRanker`` defaults to ``n_estimators="auto"`` (a holdout picks the
+    round count), but ``MultiLabelGBMRanker`` keeps the fixed defaults in
+    both modes so its independent and joint paths stay comparable; an
+    explicit ``"auto"`` resolves the same way here.
+    """
+    resolved = dict(kw)
+    if resolved.get("n_estimators", "auto") == "auto":
+        resolved["n_estimators"] = 100
+    if resolved.get("learning_rate", "auto") == "auto":
+        resolved["learning_rate"] = 0.1
+    return resolved
+
+
 def _build_joint_morph_config(kw: dict[str, Any]) -> dict[str, Any] | None:
     """Build the ``morph_config`` dict for the joint PyO3 bridge.
 
@@ -349,7 +365,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         for label_idx in range(n_labels):
             ranker = GBMRanker(
                 ranking_objective=objectives[label_idx],
-                **copy.deepcopy(self._per_label_kwargs),
+                **_with_fixed_round_defaults(copy.deepcopy(self._per_label_kwargs)),
             )
             label_targets = np.asarray(y_arr[:, label_idx], dtype=np.float32)
             label_fit_kwargs = dict(fit_kwargs)
@@ -879,8 +895,8 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             group_arr,
             # Defaults below match GBMRegressor / GBMRanker's public
             # Python defaults (NOT the engine's TrainParams::default()).
-            int(kw.get("n_estimators", 100)),
-            float(kw.get("learning_rate", 0.1)),
+            int(_with_fixed_round_defaults(kw)["n_estimators"]),
+            float(_with_fixed_round_defaults(kw)["learning_rate"]),
             int(kw.get("seed", 0)),
             int(kw.get("max_depth", 6)),
             int(kw.get("min_data_in_leaf", 1)),
@@ -1000,7 +1016,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 raise RuntimeError(
                     "multi_label_mode='joint' produced an empty ensemble: "
                     "no valid split candidate was found in any of "
-                    f"n_estimators={kw.get('n_estimators', 100)} rounds. "
+                    f"n_estimators={_with_fixed_round_defaults(kw)['n_estimators']} rounds. "
                     "Try lowering `min_data_in_leaf` (currently "
                     f"{int(kw.get('min_data_in_leaf', 1))}), increasing "
                     "the training row count, or using "

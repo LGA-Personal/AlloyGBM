@@ -13,12 +13,19 @@ rejected before native training.
 Core parameters
 ---------------
 
-- ``learning_rate: float = 0.1``
-  - additive update step size
+- ``learning_rate: float | "auto" = "auto"``
+  - additive update step size; ``"auto"`` is ``0.05`` when the round count is
+    chosen automatically and ``0.1`` otherwise
 - ``max_depth: int = 6``
   - maximum tree depth
-- ``n_estimators: int = 100``
-  - requested boosting rounds
+- ``n_estimators: int | "auto" = "auto"``
+  - boosting rounds; ``"auto"`` chooses the count by early stopping on
+    ``eval_set`` or, without one, on a seeded 10% holdout (stratified for
+    classifiers, whole groups for rankers) followed by a refit on every row.
+    ``auto_rounds_`` records the choice. ``training_policy="manual"``,
+    continued training, DART, MorphBoost, learning-rate schedules, custom
+    objectives and fits under 50 rows keep the fixed 100 rounds at ``0.1``.
+    See ``docs/benchmarks/auto_rounds_v1.md``.
 - ``row_subsample: float = 1.0``
   - per-round row sampling fraction; ignored when ``boosting_mode="goss"`` (GOSS uses gradient-based sampling instead).
 - ``col_subsample: float = 1.0``
@@ -154,8 +161,9 @@ dictionary, not a constructor parameter or model-artifact field. It can be
 ``None`` only for an older or mocked native summary, older saved wrapper
 metadata, or an unfitted or reset estimator.
 
-Early stopping is explicit-only. If ``early_stopping_rounds`` is set, call
-``fit(..., eval_set=(X_valid, y_valid))``.
+With an integer ``n_estimators``, early stopping is explicit-only: if
+``early_stopping_rounds`` is set, call ``fit(..., eval_set=(X_valid, y_valid))``.
+With ``n_estimators="auto"`` it sets the patience of the automatic holdout.
 
 Leaf and split controls
 -----------------------
@@ -630,7 +638,8 @@ Main methods
 
 Important ``fit(...)`` rules:
 
-- ``early_stopping_rounds`` requires ``eval_set``
+- ``early_stopping_rounds`` requires ``eval_set``, unless ``n_estimators="auto"``
+  holds out its own validation rows
 - ``eval_time_index`` requires ``eval_set``
 - ``categorical_time_aware=True`` requires ``time_index`` during training and
   ``eval_time_index`` for validation when ``eval_set`` is used

@@ -165,9 +165,9 @@ class GBMRegressorContractTests(unittest.TestCase):
         model = GBMRegressor()
         params = model.get_params()
         self.assertEqual(params["dart_max_drop"], 5)
-        self.assertEqual(params["learning_rate"], 0.1)
+        self.assertEqual(params["learning_rate"], "auto")
         self.assertEqual(params["max_depth"], 6)
-        self.assertEqual(params["n_estimators"], 100)
+        self.assertEqual(params["n_estimators"], "auto")
         self.assertEqual(params["row_subsample"], 1.0)
         self.assertEqual(params["col_subsample"], 1.0)
         self.assertIsNone(params["early_stopping_rounds"])
@@ -409,7 +409,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             )
 
     def test_fit_requires_eval_set_when_early_stopping_is_enabled(self) -> None:
-        model = GBMRegressor(early_stopping_rounds=3)
+        model = GBMRegressor(n_estimators=10, early_stopping_rounds=3)
         with self.assertRaisesRegex(ValueError, "early_stopping_rounds"):
             model.fit([[1.0], [2.0]], [1.0, 2.0])
 
