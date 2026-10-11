@@ -3965,3 +3965,105 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
         "fixture cannot distinguish position indexing from row indexing"
     );
 }
+
+/// Sparse histograms (most bins empty, as in deep nodes and low-cardinality
+/// features) exercise the pruned standard scan: empty-bin runs, float residue
+/// left in count-zero bins by histogram subtraction, `-0.0` sums, and nodes
+/// with and without missing rows. The pruned SIMD scan must choose exactly
+/// the split the unpruned scalar scan chooses.
+#[test]
+fn pruned_standard_scan_matches_scalar_on_sparse_histograms() {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let missing_bin_index = 255;
+    let option_sets = [
+        make_options(0.0, 0.0, 0.0, 0.0, missing_bin_index),
+        make_options(0.0, 1.0, 1e-3, 0.0, missing_bin_index),
+        make_options(0.3, 2.0, 0.0, 0.01, missing_bin_index),
+    ];
+    for case in 0..400 {
+        let occupancy = [2_u64, 5, 15, 60][case % 4];
+        let bins = (0..256)
+            .map(|index| {
+                let roll = next() % 100;
+                let (grad_sum, hess_sum, count) = if index == missing_bin_index {
+                    if case % 3 == 0 {
+                        (0.0, 0.0, 0)
+                    } else {
+                        let count = 1 + (next() % 4) as u32;
+                        ((next() % 1000) as f32 / 250.0 - 2.0, count as f32, count)
+                    }
+                } else if roll < occupancy {
+                    let count = 1 + (next() % 6) as u32;
+                    (
+                        (next() % 2000) as f32 / 500.0 - 2.0,
+                        count as f32 * 0.25,
+                        count,
+                    )
+                } else if roll < occupancy + 2 {
+                    // Subtraction residue: no rows, tiny nonzero sums.
+                    (1e-7 * ((next() % 3) as f32 - 1.0), 1e-8, 0)
+                } else if roll < occupancy + 3 {
+                    (-0.0, -0.0, 0)
+                } else {
+                    (0.0, 0.0, 0)
+                };
+                HistogramBin {
+                    grad_sum,
+                    hess_sum,
+                    grad_sq_sum: 0.0,
+                    count,
+                }
+            })
+            .collect();
+        let feature = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        for options in option_sets {
+            standard_simd_and_scalar_candidates(&feature, options);
+        }
+    }
+}
+
+/// A node whose only non-missing rows share one bin can still split missing
+/// from non-missing; bin 0 (left side empty) must stay a candidate even when
+/// it is itself empty.
+#[test]
+fn pruned_standard_scan_keeps_missing_only_threshold() {
+    let mut bins = vec![
+        HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        256
+    ];
+    bins[40] = HistogramBin {
+        grad_sum: 4.0,
+        hess_sum: 4.0,
+        grad_sq_sum: 0.0,
+        count: 4,
+    };
+    bins[255] = HistogramBin {
+        grad_sum: -3.0,
+        hess_sum: 3.0,
+        grad_sq_sum: 0.0,
+        count: 3,
+    };
+    let feature = FeatureHistogram {
+        feature_index: 0,
+        bins,
+    };
+    let options = make_options(0.0, 0.0, 0.0, 0.0, 255);
+    let (_, simd) = standard_simd_and_scalar_candidates(&feature, options);
+    let split = simd.expect("missing-vs-present split");
+    assert_eq!(split.left_stats.row_count + split.right_stats.row_count, 7);
+    assert!(split.left_stats.row_count == 3 || split.right_stats.row_count == 3);
+}
