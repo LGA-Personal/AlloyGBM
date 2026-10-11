@@ -33,7 +33,10 @@ def test_holdout_mode_refits_on_all_rows_with_scaled_rounds():
     assert info["mode"] == "holdout"
     assert info["learning_rate"] == model.learning_rate_ == _auto_rounds.AUTO_LEARNING_RATE
     assert info["validation_rows"] == 60
-    assert info["refit_rounds"] == _auto_rounds.refit_rounds(info["holdout_best_round"], 0.1)
+    assert info["validation_fraction"] == pytest.approx(0.1)
+    assert info["refit_rounds"] == _auto_rounds.refit_rounds(
+        info["holdout_best_round"], info["validation_fraction"]
+    )
     assert model.n_estimators_ == info["refit_rounds"]
     # Parameters are left as the caller set them.
     assert model.n_estimators == "auto" and model.learning_rate == "auto"
@@ -157,6 +160,41 @@ def test_sample_weights_are_split_with_the_rows():
     weights = np.random.default_rng(0).uniform(0.5, 2.0, size=len(y))
     model = GBMRegressor().fit(X, y, sample_weight=weights)
     assert model.auto_rounds_["mode"] == "holdout"
+
+
+def test_refit_scales_by_the_share_actually_held_out():
+    # Every class keeps at least one validation row, so 25 two-row classes
+    # hold out half the data, not 10%.
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(50, 3))
+    labels = np.repeat(np.arange(25), 2)
+    info = GBMClassifier(max_depth=2).fit(X, labels).auto_rounds_
+    assert info["mode"] == "holdout"
+    assert info["validation_rows"] == 25
+    assert info["validation_fraction"] == pytest.approx(0.5)
+    assert info["refit_rounds"] == _auto_rounds.refit_rounds(info["holdout_best_round"], 0.5)
+
+
+def test_holdout_without_weight_on_one_side_keeps_fixed_defaults():
+    X, y = _regression(_auto_rounds.AUTO_MIN_ROWS + 10)
+    weights = np.zeros(len(y))
+    weights[0] = 1.0
+    model = GBMRegressor().fit(X, y, sample_weight=weights)
+    assert model.auto_rounds_["mode"] == "legacy"
+    assert np.isfinite(model.predict(X)).all()
+
+
+def test_save_load_keeps_the_learning_rate_for_continuation(tmp_path):
+    X, y = _regression()
+    model = GBMRegressor(seed=4).fit(X, y)
+    path = tmp_path / "model.alloy"
+    model.save_model(str(path))
+    loaded = GBMRegressor.load_model(str(path))
+    assert loaded.learning_rate_ == pytest.approx(_auto_rounds.AUTO_LEARNING_RATE)
+    assert loaded.auto_rounds_ == model.auto_rounds_
+    resumed = GBMRegressor().fit(X, y, init_model=loaded)
+    assert resumed.auto_rounds_["mode"] == "legacy"
+    assert resumed.learning_rate_ == pytest.approx(_auto_rounds.AUTO_LEARNING_RATE)
 
 
 def test_dataframe_input_is_split_by_position():

@@ -16,7 +16,7 @@
 
 | Situation | Rounds | Learning rate | Refit |
 |---|---|---|---|
-| No `eval_set` | early stopping on a seeded 10% holdout (stratified by class, whole query groups for rankers), cap 2,000, patience 50, 0.1% relative tolerance | 0.05 | yes, on every row, rounds × 1/0.9 |
+| No `eval_set` | early stopping on a seeded 10% holdout (stratified by class, whole query groups for rankers), cap 2,000, patience 50, 0.1% relative tolerance | 0.05 | yes, on every row, rounds × 1/(1 − share held out), usually 1/0.9 |
 | `eval_set` given | early stopping on `eval_set`, cap 2,000, patience 50 | 0.05 | no |
 | Integer `n_estimators` | exactly as requested | 0.1 unless set | no |
 | Manual policy, warm start / `init_model`, DART, MorphBoost, LR schedules, custom objectives; without `eval_set` also neutralization, `time_index`, < 50 rows | 100 (the old default) | 0.1 (continuations reuse the earlier fit's rate) | no |
@@ -146,7 +146,9 @@ the three peers together:
   tolerance stops a long, nearly flat tail from pushing the refit out).
 
 Two smaller choices: the refit scales the holdout's best round by
-`1 / (1 - 0.1)`, the usual correction for training on more rows per round;
+`1 / (1 - f)`, where `f` is the share of rows actually held out (0.1 unless
+stratification or uneven query groups move it), the usual correction for
+training on more rows per round;
 and the relative tolerance is applied to the objective's own validation loss
 (log loss, MSE, ...), so it does not depend on the target's units.
 

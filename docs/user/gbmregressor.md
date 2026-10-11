@@ -141,8 +141,8 @@ many small steps, stopped by validation.
   `GBMRanker`). The model trains on the rest at learning rate `0.05` for up
   to 2,000 rounds and stops after 50 rounds without a 0.1% relative
   improvement in validation loss. It is then refit on every row for the
-  chosen count scaled by `1 / 0.9`, because the refit sees 11% more rows per
-  round.
+  chosen count scaled by `1 / (1 - share held out)` (usually `1 / 0.9`),
+  because the refit sees more rows per round.
 - With `eval_set`: that set drives early stopping directly (same learning
   rate, cap and patience) and there is no refit.
 - `early_stopping_rounds` sets the patience in both cases, and an explicit

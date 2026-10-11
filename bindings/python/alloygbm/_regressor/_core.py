@@ -1589,6 +1589,10 @@ class _GBMEstimatorCore(
         mode = self._auto_rounds_mode(targets, fit_kwargs)
         if mode == _auto_rounds.MODE_HOLDOUT:
             split = self._auto_rounds_split(targets, group)
+            if split is not None and not self._split_has_weight_on_both_sides(
+                sample_weight, split
+            ):
+                split = None
             if split is not None:
                 return self._fit_auto_rounds_holdout(X, targets, fit_kwargs, split)
             mode = _auto_rounds.MODE_LEGACY
@@ -1656,6 +1660,24 @@ class _GBMEstimatorCore(
             group_ids=group_ids,
         )
 
+    def _split_has_weight_on_both_sides(
+        self, sample_weight: object | None, split: tuple[np.ndarray, np.ndarray]
+    ) -> bool:
+        """Whether both holdout partitions keep some positive sample weight.
+
+        Zero-weight rows are valid, so a dataset with few weighted rows can
+        leave one side of the split with no weight at all; the fit then keeps
+        the fixed defaults instead.
+        """
+        if sample_weight is None:
+            return True
+        train_idx, valid_idx = split
+        weights = np.asarray(
+            self._validate_sample_weight(sample_weight, len(train_idx) + len(valid_idx)),
+            dtype=float,
+        )
+        return bool(weights[train_idx].sum() > 0.0 and weights[valid_idx].sum() > 0.0)
+
     def _take_rows(self, values: object, indices: np.ndarray) -> object:
         """Row subset of an array-like, keeping DataFrames as DataFrames."""
         if values is None:
@@ -1716,7 +1738,9 @@ class _GBMEstimatorCore(
         """Pick the round count on a holdout, then refit on every row."""
         train_idx, valid_idx = split
         take = self._take_rows
-        fraction = _auto_rounds.AUTO_VALIDATION_FRACTION
+        # Stratified and grouped splits need not hold out exactly the target
+        # fraction, so scale the refit by the share actually held out.
+        fraction = len(valid_idx) / (len(train_idx) + len(valid_idx))
         learning_rate = self._resolved_learning_rate(_auto_rounds.MODE_HOLDOUT, None)
         patience = self.early_stopping_rounds or _auto_rounds.AUTO_PATIENCE
         y_array = targets

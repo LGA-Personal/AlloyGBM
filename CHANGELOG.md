@@ -10,7 +10,7 @@
   out a seeded 10% of the rows (stratified by class, whole groups for
   rankers), trains at learning rate 0.05 for up to 2,000 rounds with patience
   50 and a 0.1% relative tolerance, then refits on every row for the chosen
-  count × 1/0.9. With `eval_set`, that set drives the early stopping and there
+  count × 1/(1 − share held out), usually 1/0.9. With `eval_set`, that set drives the early stopping and there
   is no refit. `auto_rounds_` and `learning_rate_` record the choice. An
   integer `n_estimators` trains exactly as before (learning rate 0.1 unless
   set); manual policy, continued training, DART, MorphBoost, learning-rate
