@@ -273,3 +273,25 @@ def test_peer_adapters_on_tiny_cells(library):
     result = fm.run([fm.parse_arm(library)], cells, [0], threads=1, tier="smoke", log=lambda _: None)
     errors = [(r["dataset"], r["error"]) for r in result["records"] if r["error"]]
     assert not errors, errors
+
+
+def test_ratio_vs_best_peer_is_paired_over_shared_seeds():
+    meta = {"a|defaults": {"scenario": "a", "regime": "defaults", "axis": "rows", "level": "300",
+                           "task": "regression"}}
+    # Seed 2 is missing for alloy: the ratio must use seeds 0 and 1 only.
+    losses = {"alloy": {("a|defaults", 0): 1.0, ("a|defaults", 1): 2.0},
+              "lightgbm": {("a|defaults", 0): 1.0, ("a|defaults", 1): 2.0, ("a|defaults", 2): 100.0}}
+    row = fm.summarize(_result(losses, meta))["cells"][0]
+    assert row["ratio_vs_best_peer"] == pytest.approx(1.0)
+    assert row["vs_best_peer"] == "tie"
+
+
+def test_dataset_from_frame_cleans_class_labels():
+    pd = pytest.importorskip("pandas")
+    y = pd.Series(pd.Categorical(["a"] * 10 + ["b"] * 10 + ["rare"] + [None] * 3,
+                                 categories=["a", "b", "gone", "rare"]))
+    X = pd.DataFrame({"x": np.arange(len(y), dtype=float)})
+    ds = fm.dataset_from_frame("t", fm.BINARY, X, y, [False], max_rows=1_000)
+    assert len(ds.y) == 20
+    assert set(np.unique(ds.y)) == {0.0, 1.0}
+    assert ds.spec.n_classes == 2

@@ -748,7 +748,9 @@ def _estimator(arm: Arm, task: str, params: dict, seed: int, threads: int):
 
         cls = {REGRESSION: xgb.XGBRegressor, BINARY: xgb.XGBClassifier,
                MULTICLASS: xgb.XGBClassifier, RANKING: xgb.XGBRanker}[task]
-        return cls(random_state=seed, n_jobs=threads, tree_method="hist", **params)
+        # enable_categorical defaults to False before XGBoost 3.4.
+        return cls(random_state=seed, n_jobs=threads, tree_method="hist",
+                   enable_categorical=True, **params)
     import catboost as cb
 
     cls = {REGRESSION: cb.CatBoostRegressor, BINARY: cb.CatBoostClassifier,
@@ -956,7 +958,15 @@ def dataset_from_frame(name: str, task: str, X, y, is_categorical: Sequence[bool
         n_classes = 2
     else:
         target = pd.Categorical(y).codes.astype(float)
-        n_classes = int(target.max()) + 1
+        target[target < 0] = np.nan  # missing labels
+        # Classes too rare to appear on both sides of a stratified split
+        # (often left behind by row subsampling) are dropped, and the rest
+        # re-coded to contiguous 0..K-1.
+        labels, counts = np.unique(target[np.isfinite(target)], return_counts=True)
+        target[~np.isin(target, labels[counts >= 4])] = np.nan
+        kept = np.isfinite(target)
+        target[kept] = np.unique(target[kept], return_inverse=True)[1]
+        n_classes = int(target[kept].max()) + 1 if kept.any() else 2
     finite = np.isfinite(target)
     spec = DataSpec(name=name, task=task, axis="real data", level="openml", tier="full",
                     rows=int(finite.sum()), features=matrix.shape[1],
@@ -1098,18 +1108,21 @@ def summarize(result: dict, primary: str = "alloy") -> dict:
         if means:
             best = min(means.values())
             row["normalized"] = {arm: value / best for arm, value in means.items()}
+        best_peer = None
         if primary in means and any(p in means for p in peers):
             best_peer = min((p for p in peers if p in means), key=lambda p: means[p])
+        best_stats = _paired(cell["losses"][primary], cell["losses"][best_peer]) if best_peer else None
+        if best_stats:
+            # Paired over shared seeds, like every per-peer ratio and outcome.
             row["best_peer"] = best_peer
-            row["ratio_vs_best_peer"] = means[primary] / means[best_peer]
+            row["ratio_vs_best_peer"] = math.exp(best_stats[0])
+            row["vs_best_peer"] = outcome(best_stats[0], best_stats[1])
             row["vs"] = {}
             for peer in peers:
                 if peer in means:
                     stats = _paired(cell["losses"][primary], cell["losses"][peer])
                     if stats:
                         row["vs"][peer] = {"ratio": math.exp(stats[0]), "outcome": outcome(stats[0], stats[1])}
-            stats = _paired(cell["losses"][primary], cell["losses"][best_peer])
-            row["vs_best_peer"] = outcome(stats[0], stats[1]) if stats else None
             fits = row["fit_seconds"]
             peer_fits = [fits[p] for p in peers if p in fits]
             if primary in fits and peer_fits and min(peer_fits) > 0:
