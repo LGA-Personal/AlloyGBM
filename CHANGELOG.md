@@ -67,6 +67,13 @@
 
 ### Fixed
 
+- **Integer-valued features above the bin range no longer fail to fit.** A
+  feature matrix whose values were all non-negative integers was always
+  treated as already-binned data, so any value above the bin storage limit
+  (255, or 65,535 with more than 256 bins), such as prices, counts or IDs,
+  failed with "value at index N exceeds max supported bin". Such matrices
+  now fall back to the usual continuous binning; matrices whose integers fit
+  the bin range keep the pre-binned path unchanged.
 - A feature with `feature_weights` 0 could still be split on when no
   positively weighted feature had positive gain. It is now never a split
   candidate.

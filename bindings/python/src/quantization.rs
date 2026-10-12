@@ -1704,6 +1704,13 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
         )));
     }
 
+    // Build binning metadata (shared by u8 and u16 paths).
+    let wide_bins = needs_wide_bins(max_bins);
+    // Non-negative integers are taken as already-quantized bins, but only
+    // when every value fits the bin storage. Integer-valued raw features
+    // with larger values (counts, prices, IDs) are quantized like any other
+    // continuous feature instead of failing.
+    let max_pre_binned_value = if wide_bins { 65535.0 } else { 255.0 };
     let mut use_pre_binned_path = true;
     for row_index in 0..dense_view.row_count {
         let row = dense_view.row(row_index)?;
@@ -1713,14 +1720,16 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                     "row {row_index} feature {feature_index} must not be infinite"
                 )));
             }
-            if use_pre_binned_path && (value.is_nan() || !is_pre_binned_integer_value(value)) {
+            if use_pre_binned_path
+                && (value.is_nan()
+                    || !is_pre_binned_integer_value(value)
+                    || value.round() > max_pre_binned_value)
+            {
                 use_pre_binned_path = false;
             }
         }
     }
 
-    // Build binning metadata (shared by u8 and u16 paths).
-    let wide_bins = needs_wide_bins(max_bins);
     let (metadata, use_wide) = if use_pre_binned_path {
         (ContinuousBinningMetadataInternal::pre_binned(), wide_bins)
     } else {
