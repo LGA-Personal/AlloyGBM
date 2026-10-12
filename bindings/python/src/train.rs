@@ -1,6 +1,7 @@
 use crate::callbacks::{CustomPythonMetricCallback, CustomPythonObjective};
 use crate::categorical_bridge::{
-    apply_bridge_pre_target_neutralization, apply_categorical_encoding_to_training_matrices_multi,
+    TargetEncodedFeatureBins, apply_bridge_pre_target_neutralization,
+    apply_categorical_encoding_to_training_matrices_multi,
     apply_categorical_encoding_to_validation_matrices_multi, flatten_rows,
     resolve_categorical_spec, resolve_categorical_specs_from_params,
     validate_bridge_pre_target_neutralization_support,
@@ -280,9 +281,6 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
         params.neutralization_config = None;
     }
 
-    let training_targets_for_validation = prepared.dataset.targets.clone();
-    let training_time_index_for_validation = prepared.dataset.time_index.clone();
-
     // Split categorical features into native (low cardinality) and target-encoded (high cardinality).
     let mut native_cat_mappings: std::collections::HashMap<
         usize,
@@ -345,13 +343,16 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     }
 
     let mut categorical_state = None;
+    let mut target_encoded_bins = Vec::new();
     if !target_encoding_specs.is_empty() {
-        let (encoded_prepared, state) = apply_categorical_encoding_to_training_matrices_multi(
-            prepared,
-            &target_encoding_specs,
-        )?;
+        let (encoded_prepared, state, feature_bins) =
+            apply_categorical_encoding_to_training_matrices_multi(
+                prepared,
+                &target_encoding_specs,
+            )?;
         prepared = encoded_prepared;
         categorical_state = Some(state);
+        target_encoded_bins = feature_bins;
     }
 
     let mut validation_prepared = match (
@@ -440,10 +441,8 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                             .collect();
                     prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
                         prepared_validation,
-                        &target_encoding_specs,
+                        &target_encoded_bins,
                         &validation_te_specs,
-                        &training_targets_for_validation,
-                        training_time_index_for_validation.as_deref(),
                     )?;
                 }
             }
@@ -842,6 +841,10 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                 continuous_binning_metadata: prepared.metadata.into(),
                 feature_bundling_diagnostics,
                 native_cat_mappings: native_cat_mappings.clone(),
+                target_encoding_bins: target_encoding_bins_for_python(&target_encoded_bins),
+                target_encoding_unknown_bins: target_encoding_unknown_bins_for_python(
+                    &target_encoded_bins,
+                ),
             });
         }
         "custom" => {
@@ -889,7 +892,34 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
         continuous_binning_metadata: prepared.metadata.into(),
         feature_bundling_diagnostics,
         native_cat_mappings,
+        target_encoding_bins: target_encoding_bins_for_python(&target_encoded_bins),
+        target_encoding_unknown_bins: target_encoding_unknown_bins_for_python(&target_encoded_bins),
     })
+}
+
+fn target_encoding_bins_for_python(
+    feature_bins: &[TargetEncodedFeatureBins],
+) -> std::collections::HashMap<usize, std::collections::HashMap<String, u32>> {
+    feature_bins
+        .iter()
+        .map(|bins| {
+            let mapping = bins
+                .category_bins
+                .iter()
+                .map(|(category, &bin)| (category.clone(), u32::from(bin)))
+                .collect();
+            (bins.feature_index, mapping)
+        })
+        .collect()
+}
+
+fn target_encoding_unknown_bins_for_python(
+    feature_bins: &[TargetEncodedFeatureBins],
+) -> std::collections::HashMap<usize, u32> {
+    feature_bins
+        .iter()
+        .map(|bins| (bins.feature_index, u32::from(bins.unknown_bin)))
+        .collect()
 }
 
 #[pyfunction(signature = (

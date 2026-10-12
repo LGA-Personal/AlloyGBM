@@ -272,4 +272,13 @@ pub(crate) struct NativeTrainingResult {
     #[pyo3(get)]
     pub(crate) native_cat_mappings:
         std::collections::HashMap<usize, std::collections::HashMap<String, u32>>,
+    /// Per-feature category→bin mappings for target-encoded categorical
+    /// features. Prediction feeds the bin index (as a float) in place of the
+    /// category; the binning metadata maps it back to the same bin.
+    #[pyo3(get)]
+    pub(crate) target_encoding_bins:
+        std::collections::HashMap<usize, std::collections::HashMap<String, u32>>,
+    /// Per-feature bin for categories not seen in training.
+    #[pyo3(get)]
+    pub(crate) target_encoding_unknown_bins: std::collections::HashMap<usize, u32>,
 }
