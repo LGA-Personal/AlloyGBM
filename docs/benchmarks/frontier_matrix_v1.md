@@ -142,7 +142,10 @@ above `--openml-max-rows` (default 100,000) are skipped rather than
 subsampled, since subsampling would break the official folds;
 `--openml-train-cap` instead caps training rows inside each fold (the
 Grinsztajn protocol) and leaves test folds whole. `--openml-folds`,
-`--openml-tasks` and `--openml-only` narrow a run. Every result records the
+`--openml-tasks` and `--openml-only` narrow a run. Long runs are safe to
+interrupt: `--output` is rewritten after every cell (marked
+`"complete": false` until the end), and `--resume` keeps the error-free
+records already there and fits only the rest. Every result records the
 library versions, thread count, CPU count, platform and git commit. This
 path needs network access to openml.org and the `openml` package, so CI
 tests it against a stand-in module only.

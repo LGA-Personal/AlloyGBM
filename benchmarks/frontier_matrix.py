@@ -1086,10 +1086,22 @@ def _library_version(library: str) -> str:
 
 def run(arms: list[Arm], cells: list[Cell], seeds: list[int], threads: int, tier: str,
         datasets: dict[str, Dataset] | None = None,
-        log: Callable[[str], None] = print) -> dict:
+        log: Callable[[str], None] = print,
+        previous: Sequence[dict] | None = None,
+        checkpoint: Callable[[dict], None] | None = None) -> dict:
+    """Fit every arm on every cell and seed.
+
+    ``previous`` holds records from an interrupted run of the same selection:
+    any (cell, seed, arm) already recorded there is kept and not refit.
+    ``checkpoint`` receives the partial result (``"complete": False``) after
+    every cell, so a crash loses at most the cell in progress.
+    """
     warnings.filterwarnings("ignore")
     cache: dict[str, Dataset] = dict(datasets or {})
-    records = []
+    records = list(previous or [])
+    done = {(r["dataset"], r["seed"], r["arm"]) for r in records}
+    if records:
+        log(f"  resuming: {len(records)} records already done")
     started = time.perf_counter()
     for index, cell in enumerate(cells, 1):
         ds = cache.get(cell.spec.name)
@@ -1097,8 +1109,12 @@ def run(arms: list[Arm], cells: list[Cell], seeds: list[int], threads: int, tier
             ds = cache[cell.spec.name] = make_dataset(cell.spec)
         # Real-data cells run on their official folds: the seed is the fold.
         cell_seeds = seeds if ds.folds is None else list(range(len(ds.folds)))
+        fitted = False
         for seed in cell_seeds:
             for arm in arms:
+                if (cell.id, seed, arm.name) in done:
+                    continue
+                fitted = True
                 try:
                     result = fit_and_score(arm, cell, ds, seed, threads)
                     error = None
@@ -1111,11 +1127,22 @@ def run(arms: list[Arm], cells: list[Cell], seeds: list[int], threads: int, tier
                     "seed": seed, "arm": arm.name, "library": arm.library,
                     **result, "error": error,
                 })
-        log(f"  [{index}/{len(cells)}] {cell.id} ({time.perf_counter() - started:.0f}s)")
+        log(f"  [{index}/{len(cells)}] {cell.id} ({time.perf_counter() - started:.0f}s)"
+            + ("" if fitted else " (already done)"))
+        if checkpoint is not None and fitted:
+            checkpoint(_result_envelope(arms, cells[:index], seeds, threads, tier, cache,
+                                        records, complete=False))
+    return _result_envelope(arms, cells, seeds, threads, tier, cache, records, complete=True)
+
+
+def _result_envelope(arms: list[Arm], cells: Sequence[Cell], seeds: list[int], threads: int,
+                     tier: str, cache: dict[str, Dataset], records: list[dict],
+                     complete: bool) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "suite": "frontier_matrix",
         "tier": tier,
+        "complete": complete,
         "arms": [asdict(arm) | {"version": _library_version(arm.library)} for arm in arms],
         "seeds": seeds,
         "threads": threads,
@@ -1131,8 +1158,15 @@ def run(arms: list[Arm], cells: list[Cell], seeds: list[int], threads: int, tier
         ],
         "environment": {"python": platform.python_version(), "platform": platform.platform(),
                         "cpu_count": os.cpu_count()},
-        "records": records,
+        "records": [r for r in records if r["dataset"] in {c.id for c in cells}],
     }
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    """Write via a temporary file so a crash never leaves half a file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=1) + "\n")
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------
@@ -1305,6 +1339,9 @@ def render_report(result: dict, primary: str = "alloy", worst: int = 15) -> str:
         f"Arms: {versions}. Seeds: {len(result['seeds'])}{fold_note}. Threads: {result['threads']}. "
         f"Commit: `{(result.get('git_commit') or 'unknown')[:12]}`.",
         "",
+        *(["**Partial result:** the run stopped before every cell finished "
+           "(rerun with `--resume` to complete it).", ""]
+          if result.get("complete") is False else []),
         f"Loss ratios compare `{primary}` with the best peer in each cell (below 1.0 means "
         f"{primary} is better). Win/tie/loss is per cell, paired by seed; a difference inside "
         f"two seed standard errors or under {MIN_MEANINGFUL_GAP:.1%} is a tie.",
@@ -1384,7 +1421,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="cap training rows per fold (test folds stay whole)")
     run_p.add_argument("--openml-tasks", type=int, nargs="+", help="only these OpenML task ids")
     run_p.add_argument("--openml-only", action="store_true", help="skip the synthetic cells")
-    run_p.add_argument("--output", type=Path, required=True)
+    run_p.add_argument("--output", type=Path, required=True,
+                       help="result JSON; rewritten after every cell, so a crash keeps what finished")
+    run_p.add_argument("--resume", action="store_true",
+                       help="keep the error-free records already in --output and fit only the rest")
     run_p.add_argument("--report", type=Path, help="also write the Markdown report here")
     run_p.add_argument("--primary", default="alloy")
 
@@ -1428,9 +1468,14 @@ def main(argv: list[str] | None = None) -> int:
                 extra[ds.spec.name] = ds
         if not cells:
             parser.error("the selection is empty")
+        previous = None
+        if args.resume and args.output.exists():
+            prior = json.loads(args.output.read_text())
+            previous = [r for r in prior.get("records", []) if r.get("error") is None]
         print(f"{len(cells)} cells x {len(seeds)} seeds x {len(arms)} arms")
-        result = run(arms, cells, seeds, args.threads, args.tier, datasets=extra)
-        args.output.write_text(json.dumps(result, indent=1) + "\n")
+        result = run(arms, cells, seeds, args.threads, args.tier, datasets=extra,
+                     previous=previous, checkpoint=lambda partial: _write_json(args.output, partial))
+        _write_json(args.output, result)
         report = render_report(result, args.primary)
         if args.report:
             args.report.write_text(report)

@@ -393,3 +393,45 @@ def test_run_uses_every_official_fold_as_the_seed_axis(monkeypatch):
     assert sorted(r["seed"] for r in result["records"]) == [0, 1, 2]
     assert all(r["error"] is None for r in result["records"]), result["records"]
     assert result["datasets"][0]["folds"] == 3
+
+
+def test_run_checkpoints_and_resumes_without_refitting(monkeypatch):
+    cells = fm.build_cells("smoke", regimes=["defaults"])[:2]
+    arm = fm.parse_arm("alloy=alloygbm:n_estimators=3")
+    calls = []
+
+    def fake_fit(arm_, cell, ds, seed, threads):
+        calls.append((cell.id, seed))
+        if len(calls) == 2:
+            raise KeyboardInterrupt  # the process dies mid-run
+        return {"loss": 1.0, "fit_seconds": 0.1}
+
+    monkeypatch.setattr(fm, "fit_and_score", fake_fit)
+    saved = []
+    with pytest.raises(KeyboardInterrupt):
+        fm.run([arm], cells, [0], 1, "smoke", log=lambda _: None, checkpoint=saved.append)
+    assert len(saved) == 1 and saved[-1]["complete"] is False
+    assert len(saved[-1]["records"]) == 1
+    assert "Partial result" in fm.render_report(saved[-1], "alloy")
+
+    calls.clear()
+    result = fm.run([arm], cells, [0], 1, "smoke", log=lambda _: None,
+                    previous=saved[-1]["records"])
+    assert calls == [(cells[1].id, 0)]  # the finished cell is not refit
+    assert result["complete"] is True and len(result["records"]) == 2
+
+
+def test_cli_resume_keeps_finished_records(tmp_path, monkeypatch):
+    out = tmp_path / "r.json"
+    monkeypatch.setattr(fm, "fit_and_score",
+                        lambda *a: {"loss": 1.0, "fit_seconds": 0.1})
+    args = ["run", "--tier", "smoke", "--regimes", "defaults", "--arms",
+            "alloy=alloygbm:n_estimators=3", "--seeds", "1", "--output", str(out)]
+    assert fm.main(args) == 0
+    first = json.loads(out.read_text())
+    calls = []
+    monkeypatch.setattr(fm, "fit_and_score",
+                        lambda *a: calls.append(a) or {"loss": 1.0, "fit_seconds": 0.1})
+    assert fm.main(args + ["--resume"]) == 0
+    assert calls == []
+    assert len(json.loads(out.read_text())["records"]) == len(first["records"])
