@@ -383,6 +383,15 @@ small cost when input is not bundleable.
 When both `categorical_feature_index` and `categorical_feature_indices` are
 provided, they are merged.
 
+Target-encoded columns are stored as bins ordered by each category's encoded
+value, and the model keeps the category→bin mapping for prediction. At
+`predict()`, DataFrame columns of category, object or string dtype are looked
+up by value; numeric columns (including NumPy input) follow the same
+convention as native categorical splits, where value `k` is the `k`-th
+training category in sorted string order. Categories not seen in training,
+and missing values when training had none, get the bin of the global target
+mean.
+
 ## DRO Leaf Solver
 
 - `leaf_solver: str = "standard"`
