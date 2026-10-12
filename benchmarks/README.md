@@ -20,8 +20,9 @@ cell says where AlloyGBM wins or loses and why.
   `early_stopping`. Knobs a library has no equivalent for are recorded on
   every fit.
 - **Tiers:** `smoke` (8 cells, CI), `quick` (86 cells, every axis and
-  regime), `full` (148 cells, up to 1M rows). `--openml-suite cc18|ctr23|<id>`
-  adds real OpenML datasets where the network allows.
+  regime), `full` (148 cells, up to 1M rows). `--openml-suite cc18 ctr23 grinsztajn|<id>`
+  adds real OpenML tasks, scored on each task's official folds (needs
+  network access to openml.org).
 
 ```bash
 python benchmarks/frontier_matrix.py list --tier quick

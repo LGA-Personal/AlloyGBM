@@ -295,3 +295,101 @@ def test_dataset_from_frame_cleans_class_labels():
     assert len(ds.y) == 20
     assert set(np.unique(ds.y)) == {0.0, 1.0}
     assert ds.spec.n_classes == 2
+
+
+def _fake_openml(monkeypatch, n_rows=40, repeats=1, n_folds=4, regression=False):
+    """A stand-in ``openml`` module: one suite, one task, fixed folds."""
+    import types
+
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({
+        "num": rng.normal(size=n_rows),
+        "cat": pd.Categorical(rng.choice(["u", "v", "w"], size=n_rows)),
+    })
+    if regression:
+        y = pd.Series(X["num"] * 2.0)
+    else:
+        labels = np.where(X["num"] > 0, "yes", "no").astype(object)
+        labels[0] = None  # a missing label: dropped and re-indexed away
+        y = pd.Series(pd.Categorical(labels))
+    order = np.arange(n_rows)
+    fold_of = order % n_folds
+
+    TaskType = types.SimpleNamespace(SUPERVISED_REGRESSION="reg", SUPERVISED_CLASSIFICATION="clf")
+
+    class Task:
+        task_type_id = TaskType.SUPERVISED_REGRESSION if regression else TaskType.SUPERVISED_CLASSIFICATION
+        target_name = "y"
+
+        def get_dataset(self):
+            return types.SimpleNamespace(
+                name="toy", get_data=lambda target, dataset_format: (X, y, [False, True], ["num", "cat"]))
+
+        def get_split_dimensions(self):
+            return repeats, n_folds, 1
+
+        def get_train_test_split_indices(self, repeat, fold, sample):
+            return order[fold_of != fold], order[fold_of == fold]
+
+    fake = types.SimpleNamespace(
+        study=types.SimpleNamespace(get_suite=lambda sid: types.SimpleNamespace(tasks=[7])),
+        tasks=types.SimpleNamespace(get_task=lambda tid, download_splits: Task(), TaskType=TaskType),
+    )
+    monkeypatch.setitem(sys.modules, "openml", fake)
+    return order, fold_of
+
+
+def test_openml_cells_use_official_folds(monkeypatch):
+    order, fold_of = _fake_openml(monkeypatch)
+    pairs = fm.openml_cells(["cc18"], max_rows=1_000, regimes=["defaults"], log=lambda _: None)
+    assert len(pairs) == 1
+    cell, ds = pairs[0]
+    assert cell.source == "openml:cc18:7"
+    assert ds.task == fm.BINARY and ds.categorical == (1,)
+    assert len(ds.folds) == 4
+    # Row 0 (missing label, test fold 0) is gone; the rest shift down by one.
+    tr0, te0 = ds.folds[0]
+    assert te0.tolist() == [i - 1 for i in order[fold_of == 0] if i != 0]
+    assert tr0.tolist() == [i - 1 for i in order[fold_of != 0]]
+    for f, (tr, te) in enumerate(ds.folds):
+        assert not set(tr.tolist()) & set(te.tolist())
+        split = fm.make_split(ds, f, None)
+        assert split.test.tolist() == sorted(te.tolist())
+        assert split.train.tolist() == sorted(tr.tolist())
+    with pytest.raises(IndexError):
+        fm.make_split(ds, 4, None)
+
+
+def test_openml_train_cap_and_validation_keep_test_fold(monkeypatch):
+    _fake_openml(monkeypatch, n_rows=80, regression=True)
+    (_, ds), = fm.openml_cells(["99"], max_rows=1_000, regimes=["defaults"], train_cap=20,
+                               max_folds=2, log=lambda _: None)
+    assert ds.task == fm.REGRESSION and len(ds.folds) == 2
+    split = fm.make_split(ds, 1, 0.25)
+    assert len(split.train) + len(split.valid) == 20
+    assert split.test.tolist() == sorted(ds.folds[1][1].tolist())
+    assert not set(split.train.tolist()) & set(split.test.tolist())
+    assert fm.make_split(ds, 1, 0.25).train.tolist() == split.train.tolist()
+
+
+def test_openml_skips_large_tasks_and_dedupes(monkeypatch):
+    _fake_openml(monkeypatch)
+    skipped = []
+    assert fm.openml_cells(["cc18"], max_rows=10, regimes=["defaults"], log=skipped.append) == []
+    assert skipped and "skip openml task 7" in skipped[0]
+    pairs = fm.openml_cells(["cc18", "ctr23"], max_rows=1_000, regimes=["defaults", "standard"],
+                            log=lambda _: None)
+    assert len(pairs) == 2  # one task, two regimes; the second suite repeats it
+
+
+def test_run_uses_every_official_fold_as_the_seed_axis(monkeypatch):
+    pytest.importorskip("alloygbm")
+    _fake_openml(monkeypatch, n_rows=60, n_folds=3)
+    (cell, ds), = fm.openml_cells(["cc18"], max_rows=1_000, regimes=["defaults"], log=lambda _: None)
+    arm = fm.parse_arm("alloy=alloygbm:n_estimators=5")
+    result = fm.run([arm], [cell], seeds=[0], threads=1, tier="smoke",
+                    datasets={ds.spec.name: ds}, log=lambda _: None)
+    assert sorted(r["seed"] for r in result["records"]) == [0, 1, 2]
+    assert all(r["error"] is None for r in result["records"]), result["records"]
+    assert result["datasets"][0]["folds"] == 3

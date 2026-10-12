@@ -29,9 +29,12 @@ This suite does, the way published GBDT and tabular benchmarks are built:
   differences inside seed noise as ties.
 * **Tiers** keep it practical: ``smoke`` (seconds, CI), ``quick`` (routine,
   every axis at modest size), ``full`` (the complete matrix, up to 1M rows
-  and 1,000 columns, plus extra levels per axis). ``--openml-suite`` adds
-  real datasets from an OpenML benchmark suite (CC18, CTR23, or any suite id)
-  when the machine has network access and the ``openml`` package.
+  and 1,000 columns, plus extra levels per axis).
+* **Real data on official folds**: ``--openml-suite`` adds the tasks of
+  OpenML benchmark suites (``cc18``, ``ctr23``, ``grinsztajn`` or any suite
+  id), each scored on the task's own repeat/fold splits so per-fold numbers
+  are comparable with published results. Needs network access and the
+  ``openml`` package.
 
 Usage::
 
@@ -42,6 +45,8 @@ Usage::
         --output full.json --report full.md
     python benchmarks/frontier_matrix.py run --tier quick --axes rows task \\
         --regimes defaults --arms alloy lightgbm --output part.json
+    python benchmarks/frontier_matrix.py run --openml-only --openml-suite cc18 ctr23 \
+        --regimes defaults --threads 8 --output openml.json --report openml.md
     python benchmarks/frontier_matrix.py report quick.json
     # Paired, gated comparison of two builds (same records contract as
     # default_quality.py: one "dataset" per cell).
@@ -63,7 +68,7 @@ import sys
 import time
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -153,6 +158,12 @@ class Dataset:
     y: np.ndarray
     categorical: tuple[int, ...]
     groups: np.ndarray | None  # contiguous query ids for ranking
+    # Official (train, test) row indices, one pair per OpenML repeat/fold.
+    # When set, the seed axis indexes these folds instead of drawing splits.
+    folds: tuple[tuple[np.ndarray, np.ndarray], ...] | None = None
+    # Cap on training rows per fold (test folds stay whole), as in the
+    # Grinsztajn benchmark. None keeps every training row.
+    train_cap: int | None = None
 
     @property
     def task(self) -> str:
@@ -672,7 +683,27 @@ class Split:
     valid: np.ndarray | None  # carved from train for early-stopping regimes
 
 
+def _official_split(ds: Dataset, fold: int, validation_fraction: float | None) -> Split:
+    from sklearn.model_selection import train_test_split
+
+    if fold >= len(ds.folds):
+        raise IndexError(f"{ds.spec.name} has {len(ds.folds)} folds, asked for fold {fold}")
+    train, test = (np.asarray(a, dtype=np.int64) for a in ds.folds[fold])
+    classify = ds.task in (BINARY, MULTICLASS)
+    if ds.train_cap is not None and len(train) > ds.train_cap:
+        # Deterministic per (dataset, fold); every arm sees the same rows.
+        train, _ = train_test_split(train, train_size=ds.train_cap, random_state=fold,
+                                    stratify=ds.y[train] if classify else None)
+    valid = None
+    if validation_fraction:
+        train, valid = train_test_split(train, test_size=validation_fraction, random_state=fold,
+                                        stratify=ds.y[train] if classify else None)
+    return Split(np.sort(train), np.sort(test), None if valid is None else np.sort(valid))
+
+
 def make_split(ds: Dataset, seed: int, validation_fraction: float | None) -> Split:
+    if ds.folds is not None:
+        return _official_split(ds, seed, validation_fraction)
     rng = np.random.default_rng(seed + 1_000_003 * (ds.spec.data_seed() % 997))
     n = len(ds.y)
     if ds.groups is not None:
@@ -900,46 +931,96 @@ def fit_and_score(arm: Arm, cell: Cell, ds: Dataset, seed: int, threads: int) ->
 # Real datasets (optional)
 # --------------------------------------------------------------------------
 
-OPENML_SUITES = {"cc18": 99, "ctr23": 353}
+# Curated OpenML suites. CC18 and CTR23 are the standard classification and
+# regression suites (Bischl et al. 2021; Fischer et al. 2023). 334-337 are
+# the Grinsztajn et al. (NeurIPS 2022) "tabular-benchmark" suites: numerical
+# and numerical+categorical features, for classification and regression.
+OPENML_SUITES: dict[str, tuple[int, ...]] = {
+    "cc18": (99,),
+    "ctr23": (353,),
+    "grinsztajn": (334, 335, 336, 337),
+}
 
 
-def openml_cells(suite: str, max_rows: int, regimes: Sequence[str]) -> list[tuple[Cell, Dataset]]:
-    """Cells from an OpenML benchmark suite (needs network and ``openml``).
+def _suite_ids(suite: str) -> tuple[int, ...]:
+    key = suite.lower()
+    if key in OPENML_SUITES:
+        return OPENML_SUITES[key]
+    return (int(key),)
 
-    Each task's dataset is used with this harness's own seeded splits (so the
-    seed axis means the same thing as on synthetic cells). Rows beyond
-    ``max_rows`` are subsampled once, deterministically; string-typed and
-    category-typed columns become integer-coded categoricals.
+
+def openml_cells(suites: Sequence[str], max_rows: int, regimes: Sequence[str],
+                 max_folds: int | None = None, train_cap: int | None = None,
+                 tasks: Sequence[int] | None = None,
+                 log: Callable[[str], None] = print) -> list[tuple[Cell, Dataset]]:
+    """Cells from OpenML benchmark suites, on each task's official splits.
+
+    Every repeat/fold pair the task defines becomes one entry of the seed
+    axis (``fold = repeat * n_folds + fold_index``), so per-fold scores line
+    up with results other people publish on the same task. Tasks with more
+    than ``max_rows`` rows are skipped rather than subsampled, which would
+    break the official folds; ``train_cap`` instead caps training rows
+    inside each fold and leaves the test folds whole. Categorical columns
+    come from the dataset's ``categorical_indicator``.
     """
     try:
         import openml
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("--openml-suite needs the 'openml' package (pip install openml)") from exc
-    suite_id = OPENML_SUITES.get(suite.lower(), suite)
-    benchmark = openml.study.get_suite(int(suite_id))
     out = []
-    for task_id in benchmark.tasks:
-        task = openml.tasks.get_task(task_id, download_splits=False)
-        dataset = task.get_dataset()
-        X, y, is_cat, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
-        if task.task_type_id == openml.tasks.TaskType.SUPERVISED_REGRESSION:
-            kind = REGRESSION
-        elif task.task_type_id == openml.tasks.TaskType.SUPERVISED_CLASSIFICATION:
-            kind = BINARY if y.nunique() == 2 else MULTICLASS
-        else:
-            continue
-        ds = dataset_from_frame(f"openml_{task_id}_{dataset.name}", kind, X, y, is_cat, max_rows)
-        for name in regimes:
-            out.append((Cell(ds.spec, REGIMES_BY_NAME[name], source=f"openml:{suite}"), ds))
+    seen: set[int] = set()
+    for suite in suites:
+        for suite_id in _suite_ids(suite):
+            benchmark = openml.study.get_suite(suite_id)
+            for task_id in benchmark.tasks:
+                if task_id in seen or (tasks and task_id not in set(tasks)):
+                    continue
+                seen.add(task_id)
+                task = openml.tasks.get_task(task_id, download_splits=True)
+                if task.task_type_id == openml.tasks.TaskType.SUPERVISED_REGRESSION:
+                    kind = REGRESSION
+                elif task.task_type_id == openml.tasks.TaskType.SUPERVISED_CLASSIFICATION:
+                    kind = None  # binary or multiclass, decided after cleaning
+                else:
+                    continue
+                dataset = task.get_dataset()
+                X, y, is_cat, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+                if len(X) > max_rows:
+                    log(f"  skip openml task {task_id} ({dataset.name}): {len(X):,} rows > {max_rows:,}")
+                    continue
+                repeats, n_folds, _samples = task.get_split_dimensions()
+                folds = []
+                for r in range(repeats):
+                    for f in range(n_folds):
+                        tr, te = task.get_train_test_split_indices(repeat=r, fold=f, sample=0)
+                        folds.append((np.asarray(tr), np.asarray(te)))
+                if max_folds is not None:
+                    folds = folds[:max_folds]
+                if kind is None:
+                    kind = BINARY if y.nunique(dropna=True) == 2 else MULTICLASS
+                ds = dataset_from_frame(f"openml_{task_id}_{dataset.name}", kind, X, y, is_cat,
+                                        folds=folds, train_cap=train_cap)
+                if kind != REGRESSION and ds.spec.n_classes == 2:
+                    ds.spec = replace(ds.spec, task=BINARY)
+                for name in regimes:
+                    out.append((Cell(ds.spec, REGIMES_BY_NAME[name], source=f"openml:{suite}:{task_id}"), ds))
     return out
 
 
 def dataset_from_frame(name: str, task: str, X, y, is_categorical: Sequence[bool],
-                       max_rows: int) -> Dataset:
+                       max_rows: int | None = None,
+                       folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
+                       train_cap: int | None = None) -> Dataset:
+    """Turn a pandas frame into a Dataset.
+
+    With ``folds`` (row positions into ``X``), rows dropped while cleaning
+    labels are removed from every fold and the rest re-indexed. Without
+    folds, ``max_rows`` subsamples once, deterministically.
+    """
     import pandas as pd
 
-    rng = np.random.default_rng(int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little"))
-    if len(X) > max_rows:
+    if folds is None and max_rows is not None and len(X) > max_rows:
+        rng = np.random.default_rng(int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little"))
         keep = np.sort(rng.choice(len(X), size=max_rows, replace=False))
         X, y = X.iloc[keep], y.iloc[keep]
     columns, categorical = [], []
@@ -968,10 +1049,18 @@ def dataset_from_frame(name: str, task: str, X, y, is_categorical: Sequence[bool
         target[kept] = np.unique(target[kept], return_inverse=True)[1]
         n_classes = int(target[kept].max()) + 1 if kept.any() else 2
     finite = np.isfinite(target)
+    official = None
+    if folds is not None:
+        new_index = np.cumsum(finite) - 1
+        official = tuple(
+            (new_index[tr[finite[tr]]], new_index[te[finite[te]]])
+            for tr, te in ((np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)) for a, b in folds)
+        )
     spec = DataSpec(name=name, task=task, axis="real data", level="openml", tier="full",
                     rows=int(finite.sum()), features=matrix.shape[1],
                     n_classes=max(n_classes, 2), cat_low=0, cat_high=0)
-    return Dataset(spec, matrix[finite], target[finite], tuple(categorical), None)
+    return Dataset(spec, matrix[finite], target[finite], tuple(categorical), None,
+                   folds=official, train_cap=train_cap)
 
 
 # --------------------------------------------------------------------------
@@ -1006,7 +1095,9 @@ def run(arms: list[Arm], cells: list[Cell], seeds: list[int], threads: int, tier
         ds = cache.get(cell.spec.name)
         if ds is None:
             ds = cache[cell.spec.name] = make_dataset(cell.spec)
-        for seed in seeds:
+        # Real-data cells run on their official folds: the seed is the fold.
+        cell_seeds = seeds if ds.folds is None else list(range(len(ds.folds)))
+        for seed in cell_seeds:
             for arm in arms:
                 try:
                     result = fit_and_score(arm, cell, ds, seed, threads)
@@ -1034,7 +1125,8 @@ def run(arms: list[Arm], cells: list[Cell], seeds: list[int], threads: int, tier
             {"name": c.id, "scenario": c.spec.name, "regime": c.regime.name, "axis": c.axis,
              "level": c.level, "task": c.spec.task, "source": c.source,
              "rows": int(cache[c.spec.name].X.shape[0]), "features": int(cache[c.spec.name].X.shape[1]),
-             "categorical": len(cache[c.spec.name].categorical)}
+             "categorical": len(cache[c.spec.name].categorical),
+             "folds": None if cache[c.spec.name].folds is None else len(cache[c.spec.name].folds)}
             for c in cells
         ],
         "environment": {"python": platform.python_version(), "platform": platform.platform(),
@@ -1204,10 +1296,13 @@ def render_report(result: dict, primary: str = "alloy", worst: int = 15) -> str:
               + " | Fit time vs fastest peer | Errors |")
     sep = "|---|---:|---:|---:|" + "---:|" * len(peers) + "---:|---:|"
     versions = ", ".join(f"{a['name']} {a.get('version', '?')}" for a in result["arms"])
+    official = [d for d in result["datasets"] if d.get("folds")]
+    fold_note = (f" (OpenML cells: official folds, {len({d['scenario'] for d in official})} tasks)"
+                 if official else "")
     lines = [
         f"# Frontier matrix ({result.get('tier')} tier)",
         "",
-        f"Arms: {versions}. Seeds: {len(result['seeds'])}. Threads: {result['threads']}. "
+        f"Arms: {versions}. Seeds: {len(result['seeds'])}{fold_note}. Threads: {result['threads']}. "
         f"Commit: `{(result.get('git_commit') or 'unknown')[:12]}`.",
         "",
         f"Loss ratios compare `{primary}` with the best peer in each cell (below 1.0 means "
@@ -1278,8 +1373,17 @@ def main(argv: list[str] | None = None) -> int:
                        help="builtin arm names or name=library[:key=value,...]")
     run_p.add_argument("--seeds", type=int, help="default: 1 smoke, 3 quick, 5 full")
     run_p.add_argument("--threads", type=int, default=1)
-    run_p.add_argument("--openml-suite", help="add real datasets from an OpenML suite (cc18, ctr23 or a suite id)")
-    run_p.add_argument("--openml-max-rows", type=int, default=50_000)
+    run_p.add_argument("--openml-suite", nargs="+",
+                       help="add tasks from OpenML suites (cc18, ctr23, grinsztajn or suite ids), "
+                            "scored on each task's official folds")
+    run_p.add_argument("--openml-max-rows", type=int, default=100_000,
+                       help="skip OpenML tasks with more rows than this")
+    run_p.add_argument("--openml-folds", type=int,
+                       help="use only the first N official folds of each task (default: all)")
+    run_p.add_argument("--openml-train-cap", type=int,
+                       help="cap training rows per fold (test folds stay whole)")
+    run_p.add_argument("--openml-tasks", type=int, nargs="+", help="only these OpenML task ids")
+    run_p.add_argument("--openml-only", action="store_true", help="skip the synthetic cells")
     run_p.add_argument("--output", type=Path, required=True)
     run_p.add_argument("--report", type=Path, help="also write the Markdown report here")
     run_p.add_argument("--primary", default="alloy")
@@ -1312,11 +1416,14 @@ def main(argv: list[str] | None = None) -> int:
         _pin_threads(args.threads)
         arms = [parse_arm(spec) for spec in args.arms]
         seeds = list(range(args.seeds if args.seeds is not None else DEFAULT_SEEDS[args.tier]))
-        cells = build_cells(args.tier, args.axes, args.regimes, args.cells)
+        cells = [] if args.openml_only else build_cells(args.tier, args.axes, args.regimes, args.cells)
         extra: dict[str, Dataset] = {}
+        if args.openml_only and not args.openml_suite:
+            parser.error("--openml-only needs --openml-suite")
         if args.openml_suite:
             for cell, ds in openml_cells(args.openml_suite, args.openml_max_rows,
-                                         args.regimes or DATA_REGIMES):
+                                         args.regimes or DATA_REGIMES, max_folds=args.openml_folds,
+                                         train_cap=args.openml_train_cap, tasks=args.openml_tasks):
                 cells.append(cell)
                 extra[ds.spec.name] = ds
         if not cells:

@@ -128,9 +128,29 @@ as one "dataset", to gate a candidate build against a baseline.
 **Tiers.** `smoke` (8 cells, 1 seed; CI runs it Alloy-only), `quick` (86
 cells, 3 seeds; every axis and regime at modest size), `full` (148 cells, 5
 seeds; 1M rows, 1,000 columns, extra levels and the full regime panel).
-`--axes`, `--regimes` and `--cells` select slices; `--openml-suite cc18`,
-`ctr23` or any OpenML suite id adds real datasets (needs network access and
-the `openml` package; not exercised in CI).
+`--axes`, `--regimes` and `--cells` select slices.
+
+**Real data on official folds.** `--openml-suite` adds every task of one or
+more OpenML suites: `cc18` (suite 99, 72 classification tasks), `ctr23`
+(suite 353, 35 regression tasks), `grinsztajn` (suites 334 to 337, the
+NeurIPS 2022 tabular benchmark) or any suite id. Each task is scored on its
+own repeat/fold splits from `task.get_train_test_split_indices`, so the seed
+axis becomes the fold index and per-fold numbers line up with results
+published on the same task. Categorical columns come from the dataset's
+`categorical_indicator`; missing values are passed through as NaN. Tasks
+above `--openml-max-rows` (default 100,000) are skipped rather than
+subsampled, since subsampling would break the official folds;
+`--openml-train-cap` instead caps training rows inside each fold (the
+Grinsztajn protocol) and leaves test folds whole. `--openml-folds`,
+`--openml-tasks` and `--openml-only` narrow a run. Every result records the
+library versions, thread count, CPU count, platform and git commit. This
+path needs network access to openml.org and the `openml` package, so CI
+tests it against a stand-in module only.
+
+```bash
+python benchmarks/frontier_matrix.py run --openml-only --openml-suite cc18 ctr23 \
+    --regimes defaults --threads 8 --output openml.json --report openml.md
+```
 
 ## First results (quick tier)
 
