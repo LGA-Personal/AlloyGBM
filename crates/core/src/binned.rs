@@ -383,6 +383,13 @@ impl BinnedMatrix {
         }
     }
 
+    /// Set `max_bin`, clearing what was derived from the old value. Use this
+    /// rather than assigning the field once a matrix may have been used.
+    pub fn set_max_bin(&mut self, max_bin: u16) {
+        self.max_bin = max_bin;
+        self.compact_layout = CompactLayoutCache::default();
+    }
+
     /// The compact histogram layout for this matrix, or `None` when histograms
     /// should keep the uniform layout: bundled features (their bins are
     /// decoded per row), no column-major copy, no feature narrower than the

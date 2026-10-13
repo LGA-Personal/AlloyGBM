@@ -943,28 +943,67 @@ fn compact_and_uniform_layouts_choose_identical_splits() {
     // `max_bin` 254 (what the Python bridge builds) puts it past the end,
     // which is only valid without missing rows.
     for (max_bin, with_missing) in [(MISSING_BIN_U8, true), (MISSING_BIN_U8 - 1, false)] {
-        compact_and_uniform_layouts_choose_identical_splits_case(max_bin, with_missing);
+        let bins = compact_case_bins(with_missing, MISSING_BIN_U8.into(), None);
+        let matrix = BinnedMatrix::new(
+            COMPACT_CASE_ROWS,
+            4,
+            u16::from(max_bin),
+            bins.into_iter().map(|bin| bin as u8).collect(),
+        )
+        .expect("matrix");
+        compact_and_uniform_layouts_choose_identical_splits_case(
+            &matrix,
+            usize::from(max_bin) + 1,
+            usize::from(MISSING_BIN_U8),
+        );
     }
 }
 
-fn compact_and_uniform_layouts_choose_identical_splits_case(max_bin: u8, with_missing: bool) {
-    let rows = 400;
-    let feature_count = 4;
-    let mut bins = Vec::with_capacity(rows * feature_count);
-    for row in 0..rows {
-        // Binary with missing values, ternary, a 40-bin feature and a
-        // single-valued feature.
+#[test]
+fn compact_and_uniform_u16_layouts_choose_identical_splits() {
+    // A fifth, 1,000-bin feature needs u16 storage. As with u8 `max_bin` 255,
+    // the missing bin is the uniform histogram's last slot.
+    let max_bin = 1_000_u16;
+    let missing_bin = max_bin;
+    let bins = compact_case_bins(true, missing_bin, Some(1_000));
+    let matrix = BinnedMatrix::new_u16(COMPACT_CASE_ROWS, 5, max_bin, missing_bin, bins)
+        .expect("u16 matrix");
+    compact_and_uniform_layouts_choose_identical_splits_case(
+        &matrix,
+        usize::from(max_bin) + 1,
+        usize::from(missing_bin),
+    );
+}
+
+const COMPACT_CASE_ROWS: usize = 400;
+
+/// Row-major bins: binary with missing values, ternary, a 40-bin feature, a
+/// single-valued feature and, optionally, a feature with `wide` bins.
+fn compact_case_bins(with_missing: bool, missing_bin: u16, wide: Option<usize>) -> Vec<u16> {
+    let mut bins = Vec::new();
+    for row in 0..COMPACT_CASE_ROWS {
         bins.push(if with_missing && row % 11 == 0 {
-            MISSING_BIN_U8
+            missing_bin
         } else {
-            (row % 2) as u8
+            (row % 2) as u16
         });
-        bins.push((row % 3) as u8);
-        bins.push(((row * 7) % 40) as u8);
+        bins.push((row % 3) as u16);
+        bins.push(((row * 7) % 40) as u16);
         bins.push(0);
+        if let Some(wide) = wide {
+            bins.push(((row * 13) % wide) as u16);
+        }
     }
-    let matrix = BinnedMatrix::new(rows, feature_count, u16::from(max_bin), bins).expect("matrix");
-    let uniform_bins = usize::from(max_bin) + 1;
+    bins
+}
+
+fn compact_and_uniform_layouts_choose_identical_splits_case(
+    matrix: &BinnedMatrix,
+    uniform_bins: usize,
+    missing_bin: usize,
+) {
+    let rows = matrix.row_count;
+    let feature_count = matrix.feature_count;
     let gradients = (0..rows)
         .map(|row| {
             let signal = if row % 2 == 0 { 1.0 } else { -0.5 } + ((row * 7) % 40) as f32 * 0.01;
@@ -976,7 +1015,7 @@ fn compact_and_uniform_layouts_choose_identical_splits_case(max_bin: u8, with_mi
     let tiles = [FeatureTile::new(0, feature_count as u32).expect("tile")];
     for include_grad_sq in [false, true] {
         let compact = CpuBackend::build_histograms_internal(
-            &matrix,
+            matrix,
             &gradients,
             &node,
             &tiles,
@@ -985,8 +1024,26 @@ fn compact_and_uniform_layouts_choose_identical_splits_case(max_bin: u8, with_mi
         )
         .expect("histograms");
         assert!(compact.is_compact());
-        let uniform = uniform_copy(&compact, uniform_bins, usize::from(MISSING_BIN_U8));
-        assert_same_histogram_contents(&compact, &uniform, usize::from(MISSING_BIN_U8));
+        // Tiles built separately, serially or in parallel, append to the
+        // same bundle as one tile.
+        let split_tiles = [
+            FeatureTile::new(0, 2).expect("tile"),
+            FeatureTile::new(2, feature_count as u32).expect("tile"),
+        ];
+        for parallel in [false, true] {
+            let appended = CpuBackend::build_histograms_internal(
+                matrix,
+                &gradients,
+                &node,
+                &split_tiles,
+                parallel,
+                include_grad_sq,
+            )
+            .expect("tiled histograms");
+            assert_eq!(appended, compact);
+        }
+        let uniform = uniform_copy(&compact, uniform_bins, missing_bin);
+        assert_same_histogram_contents(&compact, &uniform, missing_bin);
         let dro_configs: &[Option<alloygbm_core::DroConfig>] = if include_grad_sq {
             &[
                 None,
@@ -1004,7 +1061,7 @@ fn compact_and_uniform_layouts_choose_identical_splits_case(max_bin: u8, with_mi
         {
             let options = SplitSelectionOptions {
                 min_rows_per_leaf,
-                missing_bin_index: usize::from(MISSING_BIN_U8),
+                missing_bin_index: missing_bin,
                 dro_config,
                 ..SplitSelectionOptions::default()
             };
@@ -1028,6 +1085,30 @@ fn compact_and_uniform_layouts_choose_identical_splits_case(max_bin: u8, with_mi
                     .best_split_with_options(&uniform, options, &[], &categorical)
                     .expect("split"),
             );
+            if dro_config.is_none() {
+                let cfg = MorphConfig {
+                    morph_warmup_iters: 0,
+                    ..MorphConfig::default()
+                };
+                let morph = MorphContext {
+                    iteration: 10,
+                    total_iterations: 100,
+                    grad_mean: 0.0,
+                    grad_std: 1.0,
+                    config: cfg,
+                    precomputed: MorphPrecomputed::for_iteration(10, 100, &cfg),
+                };
+                for categorical in [&[][..], &categorical[..]] {
+                    assert_eq!(
+                        CpuBackend
+                            .best_split_morph(&compact, options, &[], categorical, &morph)
+                            .expect("morph split"),
+                        CpuBackend
+                            .best_split_morph(&uniform, options, &[], categorical, &morph)
+                            .expect("morph split"),
+                    );
+                }
+            }
         }
     }
 }

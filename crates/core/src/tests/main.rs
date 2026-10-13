@@ -2172,3 +2172,25 @@ fn filtering_a_compact_bundle_recomputes_its_widest_feature() {
     assert_eq!(bundle.filtered(|_| false).bin_count(), 0);
     assert_eq!(bundle.filtered(|_| true).bin_count(), 4);
 }
+
+#[test]
+fn set_max_bin_recomputes_the_compact_layout() {
+    // Bins 0 and 1 in a 4-bin matrix: compact, with the uniform scan limit
+    // following `max_bin`.
+    let mut matrix = BinnedMatrix::new(4, 1, 3, vec![0_u8, 1, 0, 1]).expect("matrix");
+    assert_eq!(
+        matrix
+            .compact_histogram_layout()
+            .expect("compact")
+            .edge_limit,
+        4
+    );
+    matrix.set_max_bin(7);
+    assert_eq!(
+        matrix
+            .compact_histogram_layout()
+            .expect("compact")
+            .edge_limit,
+        8
+    );
+}
