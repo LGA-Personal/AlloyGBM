@@ -959,47 +959,57 @@ pub(crate) fn refine_binary_newton_leaf_values(
             acc[2 * slot + 1] += (weight * (p * (1.0 - p)).max(1e-7)) as f64;
         }
     };
-    let add = |mut a: Vec<f64>, b: Vec<f64>| {
-        a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
-        a
+    // Chunk totals are folded in chunk order, so the sums (and the fitted
+    // model) do not depend on the thread count.
+    let fold_in_order = |chunks: Vec<Vec<f64>>| {
+        chunks
+            .into_iter()
+            .fold(vec![0.0_f64; 2 * leaf_count], |mut a, b| {
+                a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                a
+            })
     };
     const CHUNK: usize = 4096;
     // The first step also routes each row to its leaf.
     let mut row_leaf = vec![0_u32; row_count];
-    let mut sums = row_leaf
-        .par_chunks_mut(CHUNK)
-        .enumerate()
-        .map(|(chunk_index, chunk)| {
-            let mut acc = vec![0.0_f64; 2 * leaf_count];
-            for (offset, slot_out) in chunk.iter_mut().enumerate() {
-                let row = chunk_index * CHUNK + offset;
-                let slot = route(row);
-                *slot_out = slot;
-                accumulate(&mut acc, row, slot as usize, &values);
-            }
-            acc
-        })
-        .reduce(|| vec![0.0_f64; 2 * leaf_count], add);
+    let mut sums = fold_in_order(
+        row_leaf
+            .par_chunks_mut(CHUNK)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let mut acc = vec![0.0_f64; 2 * leaf_count];
+                for (offset, slot_out) in chunk.iter_mut().enumerate() {
+                    let row = chunk_index * CHUNK + offset;
+                    let slot = route(row);
+                    *slot_out = slot;
+                    accumulate(&mut acc, row, slot as usize, &values);
+                }
+                acc
+            })
+            .collect(),
+    );
     let l2 = l2_lambda as f64;
     for iteration in 0..extra_iterations {
         if iteration > 0 {
             let current = &values;
-            sums = row_leaf
-                .par_chunks(CHUNK)
-                .enumerate()
-                .map(|(chunk_index, chunk)| {
-                    let mut acc = vec![0.0_f64; 2 * leaf_count];
-                    for (offset, &slot) in chunk.iter().enumerate() {
-                        accumulate(
-                            &mut acc,
-                            chunk_index * CHUNK + offset,
-                            slot as usize,
-                            current,
-                        );
-                    }
-                    acc
-                })
-                .reduce(|| vec![0.0_f64; 2 * leaf_count], add);
+            sums = fold_in_order(
+                row_leaf
+                    .par_chunks(CHUNK)
+                    .enumerate()
+                    .map(|(chunk_index, chunk)| {
+                        let mut acc = vec![0.0_f64; 2 * leaf_count];
+                        for (offset, &slot) in chunk.iter().enumerate() {
+                            accumulate(
+                                &mut acc,
+                                chunk_index * CHUNK + offset,
+                                slot as usize,
+                                current,
+                            );
+                        }
+                        acc
+                    })
+                    .collect(),
+            );
         }
         let mut largest_step = 0.0_f64;
         for (slot, value) in values.iter_mut().enumerate() {

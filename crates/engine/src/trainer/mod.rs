@@ -2325,8 +2325,10 @@ impl Trainer {
             _ => None,
         };
         // Multi-step Newton leaves need plain scalar leaves whose only scale
-        // is the learning rate (no L1 soft-threshold, DRO, MorphBoost or PL)
-        // and no monotone projection after the leaves are set.
+        // is the learning rate (no L1 soft-threshold, DRO, MorphBoost or PL),
+        // no monotone projection after the leaves are set, and the raw
+        // log-loss gradients (no per-round factor projection). The resolved
+        // L1 from the experiment environment is checked per round below.
         let binary_leaf_newton_steps = if objective.objective_family()
             == ObjectiveFamily::BinaryClassification
             && self.params.morph_config.is_none()
@@ -2334,6 +2336,7 @@ impl Trainer {
             && self.params.leaf_solver == alloygbm_core::LeafSolverKind::Standard
             && self.params.lambda_l1 == 0.0
             && self.params.monotone_constraints.iter().all(|&c| c == 0)
+            && gradient_neutralization_config(&self.params).is_none()
         {
             crate::env::experiment_binary_leaf_newton_steps()
                 .unwrap_or(controls.auto_leaf_newton_steps)
@@ -2998,7 +3001,7 @@ impl Trainer {
                 })?;
             }
 
-            if binary_leaf_newton_steps > 0 {
+            if binary_leaf_newton_steps > 0 && round_split_options.l1_alpha == 0.0 {
                 // After the replay `candidate_predictions` holds this round's
                 // tree on every row, so the refinement can shift rows by
                 // their leaf's change instead of replaying the tree again.

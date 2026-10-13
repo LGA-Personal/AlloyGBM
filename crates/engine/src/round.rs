@@ -1196,6 +1196,56 @@ mod tests {
     }
 
     #[test]
+    fn binary_newton_refinement_does_not_depend_on_thread_count() -> EngineResult<()> {
+        // Enough rows for many parallel chunks, with gradients of mixed
+        // magnitude so a different summation order would change the bits.
+        let rows = 50_000;
+        let bins: Vec<u8> = (0..rows).map(|row| (row % 3) as u8).collect();
+        let binned = BinnedMatrix::new(rows, 1, 3, bins).expect("valid binned matrix");
+        let targets: Vec<f32> = (0..rows)
+            .map(|row| ((row * 7919) % 5 < 2) as u8 as f32)
+            .collect();
+        let predictions: Vec<f32> = (0..rows)
+            .map(|row| ((row * 104_729) % 1000) as f32 / 97.0 - 5.0)
+            .collect();
+        let refine = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("thread pool builds")
+                .install(|| {
+                    let mut stumps = vec![TrainedStump::new_unweighted(
+                        scalar_split(0, true, false, None),
+                        LeafValue::Scalar(0.01),
+                        LeafValue::Scalar(-0.01),
+                    )];
+                    let mut candidate = predictions.clone();
+                    apply_tree_to_binned_predictions(&mut candidate, &binned, &stumps, None)?;
+                    crate::leaf_refinement::refine_binary_newton_leaf_values(
+                        &mut stumps,
+                        &binned,
+                        &predictions,
+                        &mut candidate,
+                        &targets,
+                        None,
+                        3.0,
+                        0.1,
+                        2,
+                        100.0,
+                    )?;
+                    Ok::<_, EngineError>((stumps, candidate))
+                })
+        };
+        let (one_stumps, one_scores) = refine(1)?;
+        for threads in [2, 3, 8] {
+            let (stumps, scores) = refine(threads)?;
+            assert_eq!(stumps, one_stumps, "{threads} threads");
+            assert_eq!(scores, one_scores, "{threads} threads");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn binary_newton_refinement_with_zero_steps_is_a_no_op() -> EngineResult<()> {
         let binned = BinnedMatrix::new(2, 1, 2, vec![0, 2]).expect("valid binned matrix");
         let original = vec![TrainedStump::new_unweighted(
