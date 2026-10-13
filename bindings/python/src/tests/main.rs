@@ -903,10 +903,12 @@ fn train_bridge_quantization_is_deterministic_for_continuous_rows() {
 }
 
 #[test]
-fn train_bridge_pre_binned_path_rejects_u16_overflow() {
-    let rows = vec![vec![70000.0, 0.0], vec![1.0, 0.0]];
-    let targets = vec![0.0, 1.0];
-    let result = train_regression_artifact_impl(
+fn train_bridge_large_integer_features_use_continuous_binning() {
+    // Integer-valued raw features beyond the bin range (prices, counts) must
+    // not be mistaken for pre-binned data and rejected.
+    let rows = vec![vec![70000.0, 0.0], vec![1.0, 0.0], vec![35000.0, 1.0]];
+    let targets = vec![0.0, 1.0, 0.5];
+    let artifact = train_regression_artifact_impl(
         &rows,
         &targets,
         fixture_params(),
@@ -915,12 +917,9 @@ fn train_bridge_pre_binned_path_rejects_u16_overflow() {
         None,
         TrainingPolicyMode::Manual,
         false,
-    );
-    assert!(matches!(
-        result,
-        Err(alloygbm_engine::EngineError::ContractViolation(message))
-        if message.contains("exceeds max supported bin")
-    ));
+    )
+    .expect("integer features above the bin range train via continuous binning");
+    assert!(!artifact.is_empty());
 }
 
 #[test]

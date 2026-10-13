@@ -668,14 +668,18 @@ class _QuantizationMixin:
         return quantized
 
     @staticmethod
-    def _check_pre_binned_integers(flat_values: Sequence[float]) -> bool:
-        """Check if flat values are pre-binned non-negative integers. Uses numpy fast path."""
+    def _check_pre_binned_integers(
+        flat_values: Sequence[float], max_bins: int = 256
+    ) -> bool:
+        """Check if flat values are pre-binned data bins: non-negative integers
+        no larger than the top data bin for ``max_bins``. Uses numpy fast path."""
+        max_data_bin = _max_data_bin_for_max_bins(max_bins)
         try:
             import numpy as np
             arr = np.asarray(flat_values, dtype=np.float32)
             if np.any(np.isnan(arr)):
                 return False
-            if np.any(arr < 0.0):
+            if np.any(arr < 0.0) or np.any(arr > max_data_bin + 0.5):
                 return False
             rounded = np.where(arr >= 0.0, np.floor(arr + 0.5), np.ceil(arr - 0.5))
             return bool(np.all(np.abs(arr - rounded) <= _PRE_BINNED_INTEGER_TOLERANCE))
@@ -684,7 +688,7 @@ class _QuantizationMixin:
         for value in flat_values:
             if math.isnan(value):
                 return False
-            if value < 0.0:
+            if value < 0.0 or value > max_data_bin + 0.5:
                 return False
             rounded = GBMRegressor._round_half_away_from_zero(value)
             if abs(value - float(rounded)) > _PRE_BINNED_INTEGER_TOLERANCE:
@@ -698,12 +702,15 @@ class _QuantizationMixin:
         return int(math.ceil(value - 0.5))
 
     @staticmethod
-    def _rows_are_pre_binned(rows: Sequence[Sequence[float]]) -> bool:
+    def _rows_are_pre_binned(
+        rows: Sequence[Sequence[float]], max_bins: int = 256
+    ) -> bool:
+        max_data_bin = _max_data_bin_for_max_bins(max_bins)
         for row in rows:
             for value in row:
                 if math.isnan(value):
                     return False
-                if value < 0.0:
+                if value < 0.0 or value > max_data_bin + 0.5:
                     return False
                 rounded = float(GBMRegressor._round_half_away_from_zero(value))
                 if abs(value - rounded) > _PRE_BINNED_INTEGER_TOLERANCE:

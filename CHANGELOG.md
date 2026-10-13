@@ -67,6 +67,17 @@
 
 ### Fixed
 
+- **Integer-valued features above the bin range no longer fail to fit or
+  lose splits.** A feature matrix whose values were all non-negative integers
+  was always treated as already-binned data. Values above 65,535, such as
+  prices, counts or IDs, failed with "value at index N exceeds max supported
+  bin"; values from 255 up to 65,535 trained silently wrong, because 255 fell
+  in the missing-value bin and larger values were never split on (this also
+  hit 8-bit pixel data). Integers are now taken as bins only when every
+  value is at most `continuous_binning_max_bins - 2`, the top data bin;
+  anything larger gets the usual continuous binning. The default 256 bins
+  also now use the compact 8-bit bin storage, as intended (the threshold
+  was off by one).
 - **Target-encoded categoricals now predict correctly.** A categorical column
   trained with target encoding (the default, `max_cat_threshold=0`, or any
   column above the threshold) was fed to `predict()` as its raw category

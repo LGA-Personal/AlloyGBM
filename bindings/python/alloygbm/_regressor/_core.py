@@ -2956,7 +2956,9 @@ class _GBMEstimatorCore(
         rows = training_rows
         if active_dense_training_payload is None:
             assert rows is not None
-            self._uses_continuous_binning = not self._rows_are_pre_binned(rows)
+            self._uses_continuous_binning = not self._rows_are_pre_binned(
+                rows, self.continuous_binning_max_bins
+            )
             if self._uses_continuous_binning:
                 if self.continuous_binning_strategy == "linear":
                     mins, maxs = self._derive_continuous_feature_bounds(rows)
@@ -3030,7 +3032,9 @@ class _GBMEstimatorCore(
                 native_training_rows = rows
         else:
             flat_values, row_count, dense_feature_count = active_dense_training_payload
-            if self._check_pre_binned_integers(flat_values):
+            if self._check_pre_binned_integers(
+                flat_values, self.continuous_binning_max_bins
+            ):
                 self._uses_continuous_binning = False
                 self._continuous_feature_mins = None
                 self._continuous_feature_maxs = None
