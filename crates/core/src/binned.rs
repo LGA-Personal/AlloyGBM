@@ -103,6 +103,14 @@ impl<T> Eq for LazyCache<T> {}
 
 pub(crate) type CompactLayoutCache = LazyCache<Option<CompactHistogramLayout>>;
 
+/// Per-feature dominant bins and the rows outside them; see
+/// [`BinnedMatrix::dominant_bins`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SparseColumns {
+    dominant: Vec<Option<u16>>,
+    other_rows: Vec<Vec<u32>>,
+}
+
 /// A feature's bin holding at least this share of rows is its dominant bin;
 /// see [`BinnedMatrix::dominant_bins`].
 pub const DOMINANT_BIN_MIN_SHARE: f64 = 0.8;
@@ -126,9 +134,9 @@ pub struct BinnedMatrix {
     /// Lazily computed compact histogram layout; see
     /// [`BinnedMatrix::compact_histogram_layout`]. Cleared by every mutation.
     pub(crate) compact_layout: CompactLayoutCache,
-    /// Lazily computed per-feature dominant bins; see
-    /// [`BinnedMatrix::dominant_bins`]. Cleared by every mutation.
-    pub(crate) dominant_bins: LazyCache<Vec<Option<u16>>>,
+    /// Lazily computed per-feature dominant bins and the rows outside them;
+    /// see [`BinnedMatrix::dominant_bins`]. Cleared by every mutation.
+    pub(crate) sparse_columns: LazyCache<SparseColumns>,
 }
 
 /// Per-feature histogram sizes for the compact histogram layout.
@@ -180,7 +188,7 @@ impl BinnedMatrix {
             bins_adaptive,
             bins_col_adaptive: BinStorage::U8(bins_col),
             compact_layout: CompactLayoutCache::default(),
-            dominant_bins: LazyCache::default(),
+            sparse_columns: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -204,7 +212,7 @@ impl BinnedMatrix {
             bins_adaptive: BinStorage::U8(Vec::new()),
             bins_col_adaptive: BinStorage::U8(bins_col),
             compact_layout: CompactLayoutCache::default(),
-            dominant_bins: LazyCache::default(),
+            sparse_columns: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -253,7 +261,7 @@ impl BinnedMatrix {
             bins_adaptive,
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
             compact_layout: CompactLayoutCache::default(),
-            dominant_bins: LazyCache::default(),
+            sparse_columns: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -278,7 +286,7 @@ impl BinnedMatrix {
             bins_adaptive: BinStorage::U16(Vec::new()),
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
             compact_layout: CompactLayoutCache::default(),
-            dominant_bins: LazyCache::default(),
+            sparse_columns: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -398,7 +406,7 @@ impl BinnedMatrix {
         }
         self.bins_col_adaptive.set(col_idx, value);
         self.compact_layout = CompactLayoutCache::default();
-        self.dominant_bins = LazyCache::default();
+        self.sparse_columns = LazyCache::default();
         if value != self.nan_bin_index {
             self.storage_max_bin = self.storage_max_bin.max(value);
         }
@@ -482,46 +490,67 @@ impl BinnedMatrix {
     ///
     /// Computed once (one pass over the column-major bins) and cached.
     pub fn dominant_bins(&self) -> &[Option<u16>] {
-        self.dominant_bins
-            .0
-            .get_or_init(|| self.compute_dominant_bins())
+        &self.sparse_columns().dominant
     }
 
-    fn compute_dominant_bins(&self) -> Vec<Option<u16>> {
+    /// The rows, ascending, whose bin is not `feature`'s dominant bin. Empty
+    /// for a feature without one.
+    pub fn non_dominant_rows(&self, feature: usize) -> &[u32] {
+        self.sparse_columns()
+            .other_rows
+            .get(feature)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn sparse_columns(&self) -> &SparseColumns {
+        self.sparse_columns
+            .0
+            .get_or_init(|| self.compute_sparse_columns())
+    }
+
+    fn compute_sparse_columns(&self) -> SparseColumns {
         if self.feature_bundle_map.is_some() || !self.has_col_major() || self.row_count == 0 {
-            return Vec::new();
+            return SparseColumns::default();
         }
-        let min_rows = (self.row_count as f64 * DOMINANT_BIN_MIN_SHARE).ceil() as usize;
+        let min_rows = ((self.row_count as f64 * DOMINANT_BIN_MIN_SHARE).ceil() as usize).max(1);
         let mut counts = Vec::new();
-        (0..self.feature_count)
-            .map(|feature| {
-                let start = feature * self.row_count;
-                let end = start + self.row_count;
-                counts.clear();
-                match &self.bins_col_adaptive {
-                    BinStorage::U8(bins) => {
-                        counts.resize(256, 0_usize);
-                        for &bin in &bins[start..end] {
-                            counts[usize::from(bin)] += 1;
-                        }
-                    }
-                    BinStorage::U16(bins) => {
-                        for &bin in &bins[start..end] {
-                            let bin = usize::from(bin);
-                            if bin >= counts.len() {
-                                counts.resize(bin + 1, 0);
-                            }
-                            counts[bin] += 1;
-                        }
+        let mut columns = SparseColumns::default();
+        for feature in 0..self.feature_count {
+            let start = feature * self.row_count;
+            let end = start + self.row_count;
+            counts.clear();
+            match &self.bins_col_adaptive {
+                BinStorage::U8(bins) => {
+                    counts.resize(256, 0_usize);
+                    for &bin in &bins[start..end] {
+                        counts[usize::from(bin)] += 1;
                     }
                 }
-                counts
-                    .iter()
-                    .enumerate()
-                    .find(|&(_, &count)| count >= min_rows.max(1))
-                    .map(|(bin, _)| bin as u16)
-            })
-            .collect()
+                BinStorage::U16(bins) => {
+                    for &bin in &bins[start..end] {
+                        let bin = usize::from(bin);
+                        if bin >= counts.len() {
+                            counts.resize(bin + 1, 0);
+                        }
+                        counts[bin] += 1;
+                    }
+                }
+            }
+            let dominant = counts
+                .iter()
+                .position(|&count| count >= min_rows)
+                .map(|bin| bin as u16);
+            let other_rows = match dominant {
+                Some(dominant) => (0..self.row_count)
+                    .filter(|&row| self.bins_col_adaptive.get(start + row) != dominant)
+                    .map(|row| row as u32)
+                    .collect(),
+                None => Vec::new(),
+            };
+            columns.dominant.push(dominant);
+            columns.other_rows.push(other_rows);
+        }
+        columns
     }
 
     pub fn effective_feature_count(&self) -> usize {
@@ -620,7 +649,7 @@ impl BinnedMatrix {
             },
             bins_col_adaptive,
             compact_layout: CompactLayoutCache::default(),
-            dominant_bins: LazyCache::default(),
+            sparse_columns: LazyCache::default(),
         };
         validate_binned_matrix(&bundled)?;
         Ok(bundled)
