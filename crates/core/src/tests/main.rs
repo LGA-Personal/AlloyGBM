@@ -2195,3 +2195,60 @@ fn set_max_bin_recomputes_the_compact_layout() {
         8
     );
 }
+
+#[test]
+fn append_parts_matches_append() {
+    let first = HistogramBundle::from_soa(
+        0,
+        vec![0, 1],
+        2,
+        vec![1.0, 2.0, 3.0, 4.0],
+        vec![1.0, 1.0, 1.0, 1.0],
+        None,
+        vec![1, 1, 1, 1],
+    )
+    .expect("first");
+    let second = HistogramBundle::from_soa(
+        0,
+        vec![2],
+        2,
+        vec![5.0, 6.0],
+        vec![2.0, 2.0],
+        None,
+        vec![2, 3],
+    )
+    .expect("second");
+    let mut appended = first.clone();
+    appended.append(second).expect("append");
+    let mut from_parts = first;
+    from_parts.reserve_bins(2);
+    from_parts
+        .append_parts(
+            [2],
+            &[0, 2],
+            2,
+            None,
+            &[5.0, 6.0],
+            &[2.0, 2.0],
+            None,
+            &[2, 3],
+        )
+        .expect("append parts");
+    assert_eq!(from_parts, appended);
+    assert!(
+        from_parts
+            .clone()
+            .append_parts(
+                [3, 4],
+                &[0, 2],
+                2,
+                None,
+                &[0.0, 0.0],
+                &[0.0, 0.0],
+                None,
+                &[0, 0]
+            )
+            .is_err(),
+        "two features need three offsets"
+    );
+}

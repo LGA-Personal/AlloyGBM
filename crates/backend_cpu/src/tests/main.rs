@@ -4383,3 +4383,90 @@ fn pruned_standard_scan_keeps_missing_only_threshold() {
     assert_eq!(split.left_stats.row_count + split.right_stats.row_count, 7);
     assert!(split.left_stats.row_count == 3 || split.right_stats.row_count == 3);
 }
+
+/// Histograms of features with a dominant bin, built by skipping that bin
+/// (and, for small row lists, by walking the feature's other rows), against
+/// direct per-row sums: counts and every other bin match exactly, and the
+/// dominant bin matches up to the rounding of its subtraction.
+#[test]
+fn dominant_bin_histograms_match_direct_sums() {
+    let rows = 2_000;
+    let feature_count = 3;
+    let mut bins = Vec::with_capacity(rows * feature_count);
+    for row in 0..rows {
+        // Sparse: 95% bin 0. Dense: no dominant bin. Mostly missing.
+        bins.push(if row % 20 == 3 {
+            1 + (row % 4) as u8
+        } else {
+            0
+        });
+        bins.push((row % 17) as u8);
+        bins.push(if row % 10 == 7 {
+            (row % 5) as u8
+        } else {
+            MISSING_BIN_U8
+        });
+    }
+    let matrix = BinnedMatrix::new(rows, feature_count, u16::from(MISSING_BIN_U8), bins.clone())
+        .expect("matrix");
+    assert_eq!(
+        matrix.dominant_bins(),
+        &[Some(0), None, Some(u16::from(MISSING_BIN_U8))]
+    );
+    assert_eq!(matrix.non_dominant_rows(0).len(), rows / 20);
+    assert!(
+        matrix
+            .non_dominant_rows(0)
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    );
+    assert!(matrix.non_dominant_rows(1).is_empty());
+
+    let gradients = (0..rows)
+        .map(|row| GradientPair::new((row as f32 * 0.37).sin(), 0.5 + (row % 7) as f32 * 0.1))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("gradients");
+    // Large row lists walk the sparse features' other rows (100 and 200 of
+    // them); the last, ~100-row list is too small for that and skips the
+    // dominant bin while reading every row.
+    for node_rows in [
+        (0..rows as u32).collect::<Vec<_>>(),
+        (0..rows as u32).step_by(3).collect(),
+        (0..rows as u32).filter(|row| row % 97 < 5).collect(),
+    ] {
+        let node = NodeSlice::new(0, node_rows.clone()).expect("node");
+        let histograms = CpuBackend
+            .build_histograms(
+                &matrix,
+                &gradients,
+                &node,
+                &[FeatureTile::new(0, feature_count as u32).expect("tile")],
+            )
+            .expect("histograms");
+        for (feature, view) in histograms.features().enumerate() {
+            let slots = view.len();
+            let mut grad = vec![0.0_f32; slots];
+            let mut hess = vec![0.0_f32; slots];
+            let mut count = vec![0_u32; slots];
+            for &row in &node_rows {
+                let bin = usize::from(bins[row as usize * feature_count + feature]);
+                let slot = bin.min(slots - 1);
+                grad[slot] += gradients[row as usize].grad;
+                hess[slot] += gradients[row as usize].hess;
+                count[slot] += 1;
+            }
+            let dominant =
+                matrix.dominant_bins()[feature].map(|bin| usize::from(bin).min(slots - 1));
+            assert_eq!(view.counts(), count.as_slice(), "feature {feature} counts");
+            for slot in 0..slots {
+                if Some(slot) == dominant {
+                    assert!((view.grad_sums()[slot] - grad[slot]).abs() <= 1e-3);
+                    assert!((view.hess_sums()[slot] - hess[slot]).abs() <= 1e-3);
+                } else {
+                    assert_eq!(view.grad_sums()[slot].to_bits(), grad[slot].to_bits());
+                    assert_eq!(view.hess_sums()[slot].to_bits(), hess[slot].to_bits());
+                }
+            }
+        }
+    }
+}
