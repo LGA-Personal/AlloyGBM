@@ -118,6 +118,9 @@ impl SplitRowLookup {
 /// row loop. For a u8 column the direction of every possible bin is
 /// precomputed, so a row costs one table load instead of the missing /
 /// categorical / threshold branches; other layouts use [`SplitRowLookup`].
+// One value lives on the stack per split; boxing the table would add a
+// pointer chase to every row.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy)]
 enum SplitDirection<'a> {
     U8Table {
