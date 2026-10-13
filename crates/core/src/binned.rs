@@ -79,20 +79,33 @@ pub enum BinnedLayout {
     Dual,
 }
 
-/// Lazily computed [`CompactHistogramLayout`], derived from the bins alone.
+/// A value derived lazily from the bins alone, such as the
+/// [`CompactHistogramLayout`].
 ///
 /// It is a cache, not part of the matrix's value: two matrices with the same
-/// bins compare equal whether or not either has computed its layout yet.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CompactLayoutCache(OnceLock<Option<CompactHistogramLayout>>);
+/// bins compare equal whether or not either has computed it yet.
+#[derive(Debug, Clone)]
+pub(crate) struct LazyCache<T>(OnceLock<T>);
 
-impl PartialEq for CompactLayoutCache {
+impl<T> Default for LazyCache<T> {
+    fn default() -> Self {
+        Self(OnceLock::new())
+    }
+}
+
+impl<T> PartialEq for LazyCache<T> {
     fn eq(&self, _other: &Self) -> bool {
         true
     }
 }
 
-impl Eq for CompactLayoutCache {}
+impl<T> Eq for LazyCache<T> {}
+
+pub(crate) type CompactLayoutCache = LazyCache<Option<CompactHistogramLayout>>;
+
+/// A feature's bin holding at least this share of rows is its dominant bin;
+/// see [`BinnedMatrix::dominant_bins`].
+pub const DOMINANT_BIN_MIN_SHARE: f64 = 0.8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinnedMatrix {
@@ -113,6 +126,9 @@ pub struct BinnedMatrix {
     /// Lazily computed compact histogram layout; see
     /// [`BinnedMatrix::compact_histogram_layout`]. Cleared by every mutation.
     pub(crate) compact_layout: CompactLayoutCache,
+    /// Lazily computed per-feature dominant bins; see
+    /// [`BinnedMatrix::dominant_bins`]. Cleared by every mutation.
+    pub(crate) dominant_bins: LazyCache<Vec<Option<u16>>>,
 }
 
 /// Per-feature histogram sizes for the compact histogram layout.
@@ -164,6 +180,7 @@ impl BinnedMatrix {
             bins_adaptive,
             bins_col_adaptive: BinStorage::U8(bins_col),
             compact_layout: CompactLayoutCache::default(),
+            dominant_bins: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -187,6 +204,7 @@ impl BinnedMatrix {
             bins_adaptive: BinStorage::U8(Vec::new()),
             bins_col_adaptive: BinStorage::U8(bins_col),
             compact_layout: CompactLayoutCache::default(),
+            dominant_bins: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -235,6 +253,7 @@ impl BinnedMatrix {
             bins_adaptive,
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
             compact_layout: CompactLayoutCache::default(),
+            dominant_bins: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -259,6 +278,7 @@ impl BinnedMatrix {
             bins_adaptive: BinStorage::U16(Vec::new()),
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
             compact_layout: CompactLayoutCache::default(),
+            dominant_bins: LazyCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -378,6 +398,7 @@ impl BinnedMatrix {
         }
         self.bins_col_adaptive.set(col_idx, value);
         self.compact_layout = CompactLayoutCache::default();
+        self.dominant_bins = LazyCache::default();
         if value != self.nan_bin_index {
             self.storage_max_bin = self.storage_max_bin.max(value);
         }
@@ -450,6 +471,57 @@ impl BinnedMatrix {
             data_bins,
             edge_limit,
         })
+    }
+
+    /// Per feature, the bin that at least [`DOMINANT_BIN_MIN_SHARE`] of rows
+    /// fall in (most often the bin of zero in sparse data), or `None`. Empty
+    /// when the matrix has bundled features or no column-major copy.
+    ///
+    /// Histogram kernels skip a dominant bin's rows and fill the bin in from
+    /// the node totals instead.
+    ///
+    /// Computed once (one pass over the column-major bins) and cached.
+    pub fn dominant_bins(&self) -> &[Option<u16>] {
+        self.dominant_bins
+            .0
+            .get_or_init(|| self.compute_dominant_bins())
+    }
+
+    fn compute_dominant_bins(&self) -> Vec<Option<u16>> {
+        if self.feature_bundle_map.is_some() || !self.has_col_major() || self.row_count == 0 {
+            return Vec::new();
+        }
+        let min_rows = (self.row_count as f64 * DOMINANT_BIN_MIN_SHARE).ceil() as usize;
+        let mut counts = Vec::new();
+        (0..self.feature_count)
+            .map(|feature| {
+                let start = feature * self.row_count;
+                let end = start + self.row_count;
+                counts.clear();
+                match &self.bins_col_adaptive {
+                    BinStorage::U8(bins) => {
+                        counts.resize(256, 0_usize);
+                        for &bin in &bins[start..end] {
+                            counts[usize::from(bin)] += 1;
+                        }
+                    }
+                    BinStorage::U16(bins) => {
+                        for &bin in &bins[start..end] {
+                            let bin = usize::from(bin);
+                            if bin >= counts.len() {
+                                counts.resize(bin + 1, 0);
+                            }
+                            counts[bin] += 1;
+                        }
+                    }
+                }
+                counts
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &count)| count >= min_rows.max(1))
+                    .map(|(bin, _)| bin as u16)
+            })
+            .collect()
     }
 
     pub fn effective_feature_count(&self) -> usize {
@@ -548,6 +620,7 @@ impl BinnedMatrix {
             },
             bins_col_adaptive,
             compact_layout: CompactLayoutCache::default(),
+            dominant_bins: LazyCache::default(),
         };
         validate_binned_matrix(&bundled)?;
         Ok(bundled)

@@ -233,6 +233,63 @@ impl CpuBackend {
         }
     }
 
+    /// [`Self::accumulate_column`] for a feature with a dominant bin: rows in
+    /// `skip_slot` are left out, so that slot stays empty here and is filled
+    /// in from the node totals afterwards.
+    #[inline(always)]
+    fn accumulate_column_skipping<T: Copy + Into<usize>, const INCLUDE_GRAD_SQ: bool>(
+        column: &[T],
+        node_gradients: &[GradientPair],
+        row_indices: &[u32],
+        scratch: &mut [BinAccumulator],
+        slot_cap: usize,
+        skip_slot: usize,
+    ) {
+        for (&row_index, &gradient) in row_indices.iter().zip(node_gradients) {
+            let bin_index: usize = column[row_index as usize].into();
+            let slot = bin_index.min(slot_cap);
+            if slot != skip_slot {
+                Self::accumulate_slot::<INCLUDE_GRAD_SQ>(&mut scratch[slot], gradient);
+            }
+        }
+    }
+
+    /// Fill a skipped dominant slot with the node totals less every other
+    /// slot of the feature. Its count is exact; its sums carry rounding from
+    /// the subtraction, and an empty slot is set to exactly zero.
+    fn fill_dominant_slot<const INCLUDE_GRAD_SQ: bool>(
+        scratch: &mut [BinAccumulator],
+        skip_slot: usize,
+        node_totals: &BinAccumulator,
+    ) {
+        let mut others = BinAccumulator::default();
+        for (slot, value) in scratch.iter().enumerate() {
+            if slot != skip_slot {
+                others.grad += value.grad;
+                others.hess += value.hess;
+                if INCLUDE_GRAD_SQ {
+                    others.grad_sq += value.grad_sq;
+                }
+                others.count += value.count;
+            }
+        }
+        let count = node_totals.count - others.count;
+        scratch[skip_slot] = if count == 0 {
+            BinAccumulator::default()
+        } else {
+            BinAccumulator {
+                grad: node_totals.grad - others.grad,
+                hess: (node_totals.hess - others.hess).max(0.0),
+                grad_sq: if INCLUDE_GRAD_SQ {
+                    (node_totals.grad_sq - others.grad_sq).max(0.0)
+                } else {
+                    0.0
+                },
+                count,
+            }
+        };
+    }
+
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
     /// [`gather_node_gradients`]. Reading by position keeps this loop's
     /// gradient access sequential; only the bin lookup still gathers.
@@ -242,8 +299,10 @@ impl CpuBackend {
         node: &NodeSlice,
         start_feature: usize,
         end_feature: usize,
+        node_totals: Option<&BinAccumulator>,
         arena: &mut HistogramArena,
     ) {
+        let dominant_bins = binned_matrix.dominant_bins();
         let row_count = binned_matrix.row_count;
         let use_col_major = binned_matrix.has_col_major();
         for feature_index in start_feature..end_feature {
@@ -271,17 +330,53 @@ impl CpuBackend {
                 // slot; data bins are below the cap and keep their index.
                 let col_base = feature_index * row_count;
                 arena.scratch[..feature_bins].fill(BinAccumulator::default());
+                let skip_slot = node_totals.and_then(|totals| {
+                    let dominant = dominant_bins.get(feature_index).copied().flatten()?;
+                    Some((usize::from(dominant).min(slot_cap), totals))
+                });
                 // Dispatch on the storage width once per column rather than
                 // once per row.
-                match binned_matrix.col_bins(feature_index) {
-                    Some(BinColumn::U8(column)) => Self::accumulate_column::<u8, INCLUDE_GRAD_SQ>(
-                        column,
-                        node_gradients,
-                        &node.row_indices,
-                        &mut arena.scratch,
-                        slot_cap,
-                    ),
-                    Some(BinColumn::U16(column)) => {
+                match (binned_matrix.col_bins(feature_index), skip_slot) {
+                    (Some(BinColumn::U8(column)), Some((skip_slot, totals))) => {
+                        Self::accumulate_column_skipping::<u8, INCLUDE_GRAD_SQ>(
+                            column,
+                            node_gradients,
+                            &node.row_indices,
+                            &mut arena.scratch,
+                            slot_cap,
+                            skip_slot,
+                        );
+                        Self::fill_dominant_slot::<INCLUDE_GRAD_SQ>(
+                            &mut arena.scratch[..feature_bins],
+                            skip_slot,
+                            totals,
+                        );
+                    }
+                    (Some(BinColumn::U16(column)), Some((skip_slot, totals))) => {
+                        Self::accumulate_column_skipping::<u16, INCLUDE_GRAD_SQ>(
+                            column,
+                            node_gradients,
+                            &node.row_indices,
+                            &mut arena.scratch,
+                            slot_cap,
+                            skip_slot,
+                        );
+                        Self::fill_dominant_slot::<INCLUDE_GRAD_SQ>(
+                            &mut arena.scratch[..feature_bins],
+                            skip_slot,
+                            totals,
+                        );
+                    }
+                    (Some(BinColumn::U8(column)), None) => {
+                        Self::accumulate_column::<u8, INCLUDE_GRAD_SQ>(
+                            column,
+                            node_gradients,
+                            &node.row_indices,
+                            &mut arena.scratch,
+                            slot_cap,
+                        )
+                    }
+                    (Some(BinColumn::U16(column)), None) => {
                         Self::accumulate_column::<u16, INCLUDE_GRAD_SQ>(
                             column,
                             node_gradients,
@@ -290,7 +385,7 @@ impl CpuBackend {
                             slot_cap,
                         )
                     }
-                    None => {
+                    (None, _) => {
                         for (position, &row_index) in node.row_indices.iter().enumerate() {
                             let bin_index =
                                 binned_matrix.col_bin(col_base + row_index as usize) as usize;
@@ -402,6 +497,7 @@ impl CpuBackend {
         tile: &FeatureTile,
         bin_count: usize,
         include_grad_sq: bool,
+        node_totals: Option<&BinAccumulator>,
     ) -> EngineResult<HistogramBundle> {
         if binned_matrix.feature_bundle_map().is_some() {
             return Self::build_feature_histograms_for_bundled_tile(
@@ -451,6 +547,7 @@ impl CpuBackend {
                     node,
                     start_feature,
                     end_feature,
+                    node_totals,
                     &mut arena,
                 ),
                 (true, true) => Self::build_tile_histograms_per_feature::<true>(
@@ -459,6 +556,7 @@ impl CpuBackend {
                     node,
                     start_feature,
                     end_feature,
+                    node_totals,
                     &mut arena,
                 ),
                 (false, false) => Self::build_tile_histograms_row_first_unrolled::<false>(
@@ -602,6 +700,20 @@ impl CpuBackend {
         // once instead of once per feature.
         let node_gradients = Self::gather_node_gradients(gradients, &node.row_indices);
         let node_gradients = node_gradients.as_slice();
+        // Node totals let the kernel skip each sparse feature's dominant bin
+        // and fill it in afterwards; only computed when some feature has one.
+        let node_totals = binned_matrix
+            .dominant_bins()
+            .iter()
+            .any(Option::is_some)
+            .then(|| {
+                let mut totals = BinAccumulator::default();
+                for &gradient in node_gradients {
+                    Self::accumulate_slot::<true>(&mut totals, gradient);
+                }
+                totals
+            });
+        let node_totals = node_totals.as_ref();
         let mut per_tile_histograms = if parallel_tiles {
             feature_tiles
                 .par_iter()
@@ -613,6 +725,7 @@ impl CpuBackend {
                         tile,
                         bin_count,
                         include_grad_sq,
+                        node_totals,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -627,6 +740,7 @@ impl CpuBackend {
                         tile,
                         bin_count,
                         include_grad_sq,
+                        node_totals,
                     )
                 })
                 .collect::<Vec<_>>()

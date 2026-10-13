@@ -245,6 +245,7 @@ fn binned_matrix_rejects_bin_above_max() {
         bins_adaptive: BinStorage::U8(vec![3, 8]),
         bins_col_adaptive: BinStorage::U8(vec![3, 8]),
         compact_layout: Default::default(),
+        dominant_bins: Default::default(),
     };
     assert!(matches!(
         validate_binned_matrix(&matrix),

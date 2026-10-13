@@ -759,9 +759,10 @@ fn bundled_histogram_kernel_matches_unbundled_feature_histograms() {
     let node = NodeSlice::new(7, (0..6).collect()).expect("node");
     let tile = FeatureTile::new(0, 4).expect("tile");
 
-    let expected =
-        CpuBackend::build_feature_histograms_for_tile(&matrix, &gradients, &node, &tile, 2, true)
-            .expect("unbundled histograms");
+    let expected = CpuBackend::build_feature_histograms_for_tile(
+        &matrix, &gradients, &node, &tile, 2, true, None,
+    )
+    .expect("unbundled histograms");
     let actual = CpuBackend::build_feature_histograms_for_bundled_tile(
         &bundled, &gradients, &node, &tile, 2, true,
     )
@@ -814,7 +815,7 @@ fn bundled_histograms_preserve_logical_missing_bins_on_unbundled_features() {
     let tile = FeatureTile::new(0, 3).expect("tile");
 
     let expected = CpuBackend::build_feature_histograms_for_tile(
-        &matrix, &gradients, &node, &tile, 256, false,
+        &matrix, &gradients, &node, &tile, 256, false, None,
     )
     .expect("unbundled histograms");
     let actual = CpuBackend::build_feature_histograms_for_bundled_tile(
@@ -1199,6 +1200,7 @@ fn histogram_tile_strategies_are_equivalent() {
         &node,
         0,
         2,
+        None,
         &mut per_feature_arena,
     );
     let per_feature = per_feature_arena
@@ -1349,6 +1351,7 @@ fn unrolled_row_first_histograms_match_per_feature() {
         &node,
         0,
         matrix.feature_count,
+        None,
         &mut per_feature_arena,
     );
     let per_feature = per_feature_arena
@@ -4237,6 +4240,7 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
         &node,
         0,
         feature_count,
+        None,
         &mut gathered_arena,
     );
     let gathered = gathered_arena.to_bundle(0, 0).expect("gathered bundle");
@@ -4268,6 +4272,7 @@ fn histogram_kernels_index_gathered_gradients_by_position() {
         &node,
         0,
         feature_count,
+        None,
         &mut mismatched_arena,
     );
     let mismatched = mismatched_arena.to_bundle(0, 0).expect("mismatched bundle");
