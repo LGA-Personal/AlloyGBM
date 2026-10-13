@@ -55,8 +55,10 @@ fn validate_continuous_binning_max_bins(max_bins: usize) -> Result<(), EngineErr
 }
 
 /// Whether the given max_bins requires u16 bin storage.
+/// u8 storage holds data bins `0..=254` plus the missing bin 255, i.e. up to
+/// 256 total bins; anything larger needs u16 storage.
 fn needs_wide_bins(max_bins: usize) -> bool {
-    max_bins > (crate::MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1)
+    max_bins > (crate::MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 2)
 }
 
 fn env_toggle_enabled(env_name: &str) -> bool {
@@ -917,17 +919,13 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
                 Vec::new()
             };
             let mut max_bin_seen = 0_u16;
-            for (index, &value) in values.iter().enumerate() {
+            for &value in values {
                 let bin = if value.is_nan() {
                     nan_bin
                 } else {
-                    let rounded = value.round();
-                    if rounded > 65535.0 {
-                        return Err(EngineError::ContractViolation(format!(
-                            "validation value at index {index} exceeds max supported bin 65535"
-                        )));
-                    }
-                    rounded as u16
+                    // Values past the top data bin go where predict sends
+                    // them: above every threshold, never into the missing bin.
+                    value.round().min(f32::from(max_data_bin)) as u16
                 };
                 max_bin_seen = max_bin_seen.max(bin);
                 bins_u16.push(bin);
@@ -961,6 +959,7 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
                 metadata: training_metadata.clone(),
             });
         } else {
+            let max_data_bin = (max_bins - 2) as u8;
             let mut bins = Vec::with_capacity(values.len());
             let mut dense_values_out = if need_dense_values {
                 Vec::with_capacity(values.len())
@@ -968,17 +967,11 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
                 Vec::new()
             };
             let mut max_bin_seen = 0_u16;
-            for (index, &value) in values.iter().enumerate() {
+            for &value in values {
                 let bin = if value.is_nan() {
                     MISSING_BIN_U8
                 } else {
-                    let rounded = value.round();
-                    if rounded > 255.0 {
-                        return Err(EngineError::ContractViolation(format!(
-                            "validation value at index {index} exceeds max supported bin 255"
-                        )));
-                    }
-                    rounded as u8
+                    value.round().min(f32::from(max_data_bin)) as u8
                 };
                 max_bin_seen = max_bin_seen.max(u16::from(bin));
                 bins.push(bin);
@@ -1707,10 +1700,11 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
     // Build binning metadata (shared by u8 and u16 paths).
     let wide_bins = needs_wide_bins(max_bins);
     // Non-negative integers are taken as already-quantized bins, but only
-    // when every value fits the bin storage. Integer-valued raw features
-    // with larger values (counts, prices, IDs) are quantized like any other
-    // continuous feature instead of failing.
-    let max_pre_binned_value = if wide_bins { 65535.0 } else { 255.0 };
+    // when every value is a data bin: at most `max_bins - 2`, so it neither
+    // lands on the missing bin (`max_bins - 1`) nor past the split scan.
+    // Integer-valued raw features with larger values (counts, prices, IDs)
+    // are quantized like any other continuous feature instead.
+    let max_pre_binned_value = max_bins.saturating_sub(2) as f32;
     let mut use_pre_binned_path = true;
     for row_index in 0..dense_view.row_count {
         let row = dense_view.row(row_index)?;

@@ -142,7 +142,9 @@ class ExactFeatureBundlingTests(unittest.TestCase):
         )
         self.assertEqual(bundled.artifact_bytes, baseline.artifact_bytes)
 
-    def test_exhausted_u16_storage_forces_fallback(self) -> None:
+    def test_integer_column_past_the_bin_range_matches_unbundled(self) -> None:
+        # 65535 is past the top data bin, so the matrix is quantized rather
+        # than taken as pre-binned and u16 storage is never exhausted.
         X = np.zeros((8, 3), dtype=np.float32)
         X[0, 0] = 1.0
         X[1, 1] = 1.0
@@ -159,7 +161,7 @@ class ExactFeatureBundlingTests(unittest.TestCase):
         baseline = GBMRegressor(**parameters).fit(X, y)
         bundled = GBMRegressor(**parameters, feature_bundling="exact").fit(X, y)
 
-        self.assertFalse(bundled.feature_bundling_diagnostics_["active"])
+        self.assertTrue(baseline._uses_continuous_binning)
         self.assertEqual(bundled.artifact_bytes, baseline.artifact_bytes)
         np.testing.assert_array_equal(bundled.predict(X), baseline.predict(X))
 
