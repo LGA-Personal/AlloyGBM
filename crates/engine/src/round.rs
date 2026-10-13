@@ -242,21 +242,55 @@ pub(crate) fn terminal_local_node_for_row<'a>(
     local_id
 }
 
+/// One round's stumps laid out for replay: each node holds its stump and the
+/// array indices of its two children, so walking a row down the tree chases
+/// array indices instead of hashing a local node id at every level.
+struct ReplayTree<'a> {
+    nodes: Vec<ReplayNode<'a>>,
+    root: u32,
+}
+
+struct ReplayNode<'a> {
+    stump: &'a TrainedStump,
+    /// `[left, right]` child indices into `nodes`, `NO_REPLAY_NODE` for a leaf.
+    children: [u32; 2],
+}
+
+const NO_REPLAY_NODE: u32 = u32::MAX;
+
 fn build_stump_lookup(
     stumps: &[TrainedStump],
     feature_count: usize,
-) -> EngineResult<HashMap<u32, &TrainedStump>> {
+) -> EngineResult<ReplayTree<'_>> {
     validate_stump_contracts(stumps, feature_count)?;
-    let mut stump_by_local: HashMap<u32, &TrainedStump> = HashMap::with_capacity(stumps.len());
-    for stump in stumps {
+    let mut index_by_local: HashMap<u32, u32> = HashMap::with_capacity(stumps.len());
+    for (index, stump) in stumps.iter().enumerate() {
         let (_, local_id) = decode_tree_node_id(stump.split.node_id);
-        if stump_by_local.insert(local_id, stump).is_some() {
+        if index_by_local.insert(local_id, index as u32).is_some() {
             return Err(EngineError::ContractViolation(format!(
                 "duplicate local node id {local_id} in replay round"
             )));
         }
     }
-    Ok(stump_by_local)
+    let child = |local_id: u32, offset: u32| {
+        local_id
+            .checked_mul(2)
+            .and_then(|id| id.checked_add(offset))
+            .and_then(|id| index_by_local.get(&id).copied())
+            .unwrap_or(NO_REPLAY_NODE)
+    };
+    let nodes = stumps
+        .iter()
+        .map(|stump| {
+            let (_, local_id) = decode_tree_node_id(stump.split.node_id);
+            ReplayNode {
+                stump,
+                children: [child(local_id, 1), child(local_id, 2)],
+            }
+        })
+        .collect();
+    let root = index_by_local.get(&0).copied().unwrap_or(NO_REPLAY_NODE);
+    Ok(ReplayTree { nodes, root })
 }
 
 fn validate_stump_contracts(stumps: &[TrainedStump], feature_count: usize) -> EngineResult<()> {
@@ -344,16 +378,15 @@ fn validate_restricted_replay_inputs(
 fn replay_round_row(
     row_index: usize,
     binned_matrix: &BinnedMatrix,
-    stump_by_local: &HashMap<u32, &TrainedStump>,
+    tree: &ReplayTree<'_>,
     missing_bin: u16,
     raw_features: Option<(&[f32], usize)>,
     mut apply_stump: impl FnMut(&TrainedStump, f32),
 ) {
-    let mut local_id = 0_u32;
-    loop {
-        let Some(stump) = stump_by_local.get(&local_id) else {
-            break;
-        };
+    let mut node_index = tree.root;
+    while node_index != NO_REPLAY_NODE {
+        let node = &tree.nodes[node_index as usize];
+        let stump = node.stump;
         let feature_index = stump.split.feature_index as usize;
         let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
         let went_left = binned_split_went_left(stump, bin, missing_bin);
@@ -363,11 +396,7 @@ fn replay_round_row(
             evaluate_leaf_for_row(&stump.right_leaf_value, row_index, raw_features)
         };
         apply_stump(stump, leaf_value);
-        local_id = if went_left {
-            local_id * 2 + 1
-        } else {
-            local_id * 2 + 2
-        };
+        node_index = node.children[usize::from(!went_left)];
     }
 }
 
