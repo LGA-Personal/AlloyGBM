@@ -758,30 +758,22 @@ mod tests {
                     b.grad_sum += g;
                     b.hess_sum += h;
                     b.count += 1;
+                    // Slope regressors in slots 0..d, the intercept column in slot d.
+                    let mut x = [0.0_f32; MAX_PL_REGRESSORS];
                     for (j, &feat_j_raw) in regressor_features.iter().enumerate().take(d) {
                         let feat_j = feat_j_raw as usize;
-                        let x_j = if feat_j < feature_count && row_idx < row_count {
-                            feature_scaler.scaled_value(
+                        if feat_j < feature_count && row_idx < row_count {
+                            x[j] = feature_scaler.scaled_value(
                                 feat_j_raw,
                                 raw_feature_values[row_idx * feature_count + feat_j],
-                            )
-                        } else {
-                            0.0
-                        };
-                        b.xtg[j] += g * x_j;
-                        for (k, &feat_k_raw) in
-                            regressor_features.iter().enumerate().skip(j).take(d - j)
-                        {
-                            let feat_k = feat_k_raw as usize;
-                            let x_k = if feat_k < feature_count {
-                                feature_scaler.scaled_value(
-                                    feat_k_raw,
-                                    raw_feature_values[row_idx * feature_count + feat_k],
-                                )
-                            } else {
-                                0.0
-                            };
-                            b.xt_hx[pl_matrix_index(j, k)] += h * x_j * x_k;
+                            );
+                        }
+                    }
+                    x[d] = 1.0;
+                    for j in 0..=d {
+                        b.xtg[j] += g * x[j];
+                        for k in j..=d {
+                            b.xt_hx[pl_matrix_index(j, k)] += h * x[j] * x[k];
                         }
                     }
                 }
@@ -899,14 +891,15 @@ mod tests {
                     rb.hess_sum
                 );
                 assert_eq!(sb.count, rb.count);
-                for j in 0..d {
+                // 0..=d: the intercept column in slot d is checked too.
+                for j in 0..=d {
                     assert!(
                         (sb.xtg[j] - rb.xtg[j]).abs() < 1e-3,
                         "xtg[{j}]: simd={} scalar={}",
                         sb.xtg[j],
                         rb.xtg[j]
                     );
-                    for k in j..d {
+                    for k in j..=d {
                         let idx = j * MAX_PL_REGRESSORS + k;
                         assert!(
                             (sb.xt_hx[idx] - rb.xt_hx[idx]).abs() < 1e-3,

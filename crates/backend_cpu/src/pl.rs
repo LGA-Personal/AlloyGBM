@@ -114,7 +114,7 @@ fn with_slope_prior(
 ) -> [f32; MAX_PL_MATRIX_ENTRIES] {
     let mut out = *xt_hx;
     let prior = pl_slope_prior();
-    if prior > 0.0 && d < MAX_PL_REGRESSORS {
+    if prior > 0.0 && d <= MAX_PL_SLOPE_REGRESSORS {
         let hess = f64::from(xt_hx[pl_matrix_index(d, d)]).max(0.0);
         let add = (prior * hess) as f32;
         for j in 0..d {
@@ -361,38 +361,64 @@ fn backward_solve_pl(
 /// Uses a compact Cholesky factorisation on the `d×d` regularised Hessian
 /// matrix. Returns `0.0` when the system is invalid, ill-conditioned, or
 /// cannot produce a finite result.
-pub fn compute_pl_gain_one_side(
+#[cfg(test)]
+fn compute_pl_gain_one_side(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
     d: usize,
     l2_lambda: f32,
 ) -> f32 {
+    try_pl_gain_one_side(xtg, xt_hx, d, l2_lambda).unwrap_or(0.0)
+}
+
+fn try_pl_gain_one_side(
+    xtg: &[f32; MAX_PL_REGRESSORS],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> Option<f32> {
     if d == 0 {
-        return 0.0;
+        return Some(0.0);
     }
 
-    let l = match factor_regularized_pl_hessian(xt_hx, d, l2_lambda) {
-        Some(l) => l,
-        None => return 0.0,
-    };
-    let y = match forward_solve_pl(&l, xtg, d) {
-        Some(y) => y,
-        None => return 0.0,
-    };
+    let l = factor_regularized_pl_hessian(xt_hx, d, l2_lambda)?;
+    let y = forward_solve_pl(&l, xtg, d)?;
 
     let sq = y[..d].iter().fold(0.0_f64, |acc, &yi| acc + yi * yi);
     if !sq.is_finite() {
-        return 0.0;
+        return None;
     }
     let gain = 0.5_f64 * sq;
     if !gain.is_finite() {
-        return 0.0;
+        return None;
     }
     let gain_f32 = gain as f32;
     if !gain_f32.is_finite() {
-        return 0.0;
+        return None;
     }
-    gain_f32
+    Some(gain_f32)
+}
+
+/// Gain of one side of a split for a `d`-slope leaf (intercept in slot `d`),
+/// scored on the same system `solve_pl_leaf` solves. When that system cannot
+/// be solved the leaf falls back to the scalar Newton intercept, so the gain
+/// falls back to the scalar gain `0.5 · G² / (H + λ)` to match it.
+fn pl_side_gain(
+    xtg: &[f32; MAX_PL_REGRESSORS],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> f32 {
+    try_pl_gain_one_side(xtg, &with_slope_prior(xt_hx, d), d + 1, l2_lambda).unwrap_or_else(|| {
+        let g = f64::from(xtg[d]);
+        let h = f64::from(xt_hx[pl_matrix_index(d, d)]) + f64::from(l2_lambda);
+        let gain = 0.5 * g * g / h;
+        if h > 0.0 && gain.is_finite() {
+            gain as f32
+        } else {
+            0.0
+        }
+    })
 }
 
 /// Find the best numeric split for a single feature using the PL gain criterion.
@@ -463,8 +489,7 @@ pub(crate) fn best_split_linear_for_bins(
     };
 
     // Parent gain (subtracted from every candidate to get net gain).
-    let parent_gain =
-        compute_pl_gain_one_side(&p_xtg, &with_slope_prior(&p_xt_hx, d), d + 1, ctx.l2_lambda);
+    let parent_gain = pl_side_gain(&p_xtg, &p_xt_hx, d, ctx.l2_lambda);
 
     // ── Non-missing totals (for right-side via subtraction) ──────────────────
     let scan_limit = bins.len().min(missing_bin_idx);
@@ -569,17 +594,9 @@ pub(crate) fn best_split_linear_for_bins(
                 continue;
             }
 
-            let gain = compute_pl_gain_one_side(
-                &eff_lxtg,
-                &with_slope_prior(&eff_lxthx, d),
-                d + 1,
-                ctx.l2_lambda,
-            ) + compute_pl_gain_one_side(
-                &eff_rxtg,
-                &with_slope_prior(&eff_rxthx, d),
-                d + 1,
-                ctx.l2_lambda,
-            ) - parent_gain;
+            let gain = pl_side_gain(&eff_lxtg, &eff_lxthx, d, ctx.l2_lambda)
+                + pl_side_gain(&eff_rxtg, &eff_rxthx, d, ctx.l2_lambda)
+                - parent_gain;
 
             if gain > best_gain {
                 best_gain = gain;
@@ -777,13 +794,14 @@ fn linear_leaf_l2_penalty(leaf: &LinearLeaf, learning_rate: f32, l2_lambda: f32)
         .then_some(0.5 * f64::from(l2_lambda) * squared_norm)
 }
 
-/// Measure the second-order reduction delivered by the actual independently
-/// solved PL intercept and slope updates, relative to an unsplit PL leaf.
+/// Measure the second-order reduction delivered by the actual solved PL
+/// intercept and slope updates, relative to an unsplit PL leaf.
 ///
-/// The historical matrix gain omits intercept/slope cross terms. That makes it
-/// a useful threshold scanner, but it can overstate a candidate whose solved
-/// updates reinforce each other. This final guard evaluates the model that will
-/// actually be committed without retaining any additional histogram storage.
+/// The matrix gain used by the threshold scan solves intercept and slopes
+/// jointly, but it scores histogram statistics rather than the committed
+/// leaves (learning rate, output ceilings, fallbacks). This final guard
+/// evaluates the model that will actually be committed without retaining any
+/// additional histogram storage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn realized_pl_split_gain(
     binned_matrix: &BinnedMatrix,
@@ -1320,6 +1338,21 @@ mod tests {
             (gain - expected).abs() < 1e-5,
             "gain={gain} expected={expected}"
         );
+    }
+
+    #[test]
+    fn side_gain_falls_back_to_scalar_gain_when_the_joint_system_fails() {
+        // One slope whose diagonal is a million times the intercept's: the
+        // joint system is rejected, so the leaf (and its gain) is scalar.
+        let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        xtg[0] = 1.0;
+        xtg[1] = -2.0;
+        xt_hx[pl_matrix_index(0, 0)] = 1.0e12;
+        xt_hx[pl_matrix_index(1, 1)] = 4.0;
+        assert!(try_pl_gain_one_side(&xtg, &with_slope_prior(&xt_hx, 1), 2, 0.0).is_none());
+        let gain = pl_side_gain(&xtg, &xt_hx, 1, 1.0);
+        assert!((gain - 0.5 * 4.0 / 5.0).abs() < 1e-6, "gain = {gain}");
     }
 
     #[test]
