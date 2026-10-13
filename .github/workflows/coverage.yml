@@ -39,7 +39,7 @@ jobs:
             --lcov --output-path lcov-rust.info
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: lcov-rust.info
           flags: rust
@@ -100,7 +100,7 @@ jobs:
             --cov-report=term-missing
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: coverage-python.xml
           flags: python
