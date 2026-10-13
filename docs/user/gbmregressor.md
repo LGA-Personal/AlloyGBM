@@ -183,10 +183,14 @@ tight parameter ablation and want fewer adaptive adjustments.
 What `auto` does depends on the objective, never on the units of the target
 (rescaling `y` by 1000 gives the same trees, scaled):
 
-- Binary classification: `min_child_hessian = 1.0` (the XGBoost
-  `min_child_weight` default), tapered linearly below 64 rows so tiny
-  datasets can still split. Without it, a leaf that holds only one class is
-  unbounded and probability calibration suffers.
+- Binary classification: leaf `lambda_l2 = 3.0` (CatBoost's default) with a
+  small `min_child_hessian = 0.1` (tapered linearly below 64 rows), row
+  subsample 0.8 at every size, and two extra Newton steps on each leaf after
+  a tree is built (CatBoost's `leaf_estimation_iterations`). The L2 keeps a
+  leaf that holds only one class bounded without capping how confident the
+  model can get. The extra Newton steps are skipped with `lambda_l1`, DRO
+  leaves, MorphBoost, PL leaves and monotone constraints. See
+  `docs/benchmarks/binary_small_data_v1.md`.
 - Multiclass classification: leaf `lambda_l2 = 1.0`.
 - Regression: no extra leaf regularization, except `lambda_l2 = 2.0` on
   small, wide data (under 1,024 rows, at least 8 features, fewer than 64 rows

@@ -142,8 +142,10 @@ controlled ablation work.
 
 What ``auto`` does depends on the objective, never on the units of the target:
 
-- binary classification: ``min_child_hessian = 1.0``, tapered linearly below
-  64 rows;
+- binary classification: leaf ``lambda_l2 = 3.0`` with ``min_child_hessian =
+  0.1`` (tapered linearly below 64 rows), row subsample 0.8 at every size, and
+  two extra Newton steps on each leaf after a tree is built (skipped with
+  ``lambda_l1``, DRO leaves, MorphBoost, PL leaves and monotone constraints);
 - multiclass classification: leaf ``lambda_l2 = 1.0``;
 - regression: ``lambda_l2 = 2.0`` only on small, wide data (under 1,024 rows,
   at least 8 features, fewer than 64 rows per feature);

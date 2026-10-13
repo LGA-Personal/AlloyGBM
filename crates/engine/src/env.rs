@@ -21,6 +21,17 @@ pub(crate) const FORCE_MANUAL_POLICY_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_FORCE_
 pub(crate) const ENABLE_LEAF_REFINEMENT_ENV_VAR: &str =
     "ALLOYGBM_EXPERIMENT_ENABLE_LEAF_REFINEMENT";
 
+pub(crate) const BINARY_LEAF_NEWTON_STEPS_ENV_VAR: &str =
+    "ALLOYGBM_EXPERIMENT_BINARY_LEAF_NEWTON_STEPS";
+
+/// Extra Newton steps per binary leaf, overriding the auto policy's choice
+/// (`0` turns them off). `None` when the variable is unset or invalid.
+pub(crate) fn experiment_binary_leaf_newton_steps() -> Option<usize> {
+    std::env::var(BINARY_LEAF_NEWTON_STEPS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
 pub(crate) fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
     Ok(SplitSelectionOptions {
         l2_lambda: parse_nonnegative_env_f32(SPLIT_L2_ENV_VAR)?,

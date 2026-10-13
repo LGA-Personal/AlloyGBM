@@ -14,8 +14,9 @@ use monotone::{
     validate_monotone_forest,
 };
 pub(crate) use policy::{
-    AUTO_SPLIT_L2_NOISY_SMALL_WIDE, auto_leaf_regularization, is_small_wide,
-    resolve_training_policy, split_selection_options_with_controls,
+    AUTO_LEAF_NEWTON_STEPS_BINARY, AUTO_ROW_SUBSAMPLE_BINARY, AUTO_SPLIT_L2_NOISY_SMALL_WIDE,
+    auto_leaf_regularization, is_small_wide, resolve_training_policy,
+    split_selection_options_with_controls,
 };
 #[cfg(test)]
 pub(crate) use policy::{
@@ -2212,6 +2213,12 @@ impl Trainer {
         let row_count = dataset.row_count();
         (controls.auto_lambda_l2, controls.auto_min_child_hessian) =
             auto_leaf_regularization(family, row_count);
+        if family == ObjectiveFamily::BinaryClassification {
+            controls.auto_leaf_newton_steps = AUTO_LEAF_NEWTON_STEPS_BINARY;
+            if self.params.row_subsample == 1.0 {
+                controls.row_subsample = AUTO_ROW_SUBSAMPLE_BINARY;
+            }
+        }
         let feature_count = binned_matrix.feature_count;
         if row_count < 1_024 {
             // Small, wide data: cap very long requests and, for regression,
@@ -2268,7 +2275,10 @@ impl Trainer {
         controls.min_loss_improvement = 0.0;
         controls.max_consecutive_weak_improvements = 0;
 
-        if self.params.row_subsample == 1.0 && row_count >= 2_048 {
+        if self.params.row_subsample == 1.0
+            && row_count >= 2_048
+            && family != ObjectiveFamily::BinaryClassification
+        {
             controls.row_subsample = if row_count >= 16_384 { 0.8 } else { 0.9 };
         }
         if self.params.col_subsample == 1.0 && feature_count >= 32 {
@@ -2313,6 +2323,25 @@ impl Trainer {
                 skip_drop,
             } => Some((drop_rate, max_drop, normalize_type, sample_type, skip_drop)),
             _ => None,
+        };
+        // Multi-step Newton leaves need plain scalar leaves whose only scale
+        // is the learning rate (no L1 soft-threshold, DRO, MorphBoost or PL),
+        // no monotone projection after the leaves are set, and the raw
+        // log-loss gradients (no per-round factor projection). The resolved
+        // L1 from the experiment environment is checked per round below.
+        let binary_leaf_newton_steps = if objective.objective_family()
+            == ObjectiveFamily::BinaryClassification
+            && self.params.morph_config.is_none()
+            && self.params.leaf_model == LeafModelKind::Constant
+            && self.params.leaf_solver == alloygbm_core::LeafSolverKind::Standard
+            && self.params.lambda_l1 == 0.0
+            && self.params.monotone_constraints.iter().all(|&c| c == 0)
+            && gradient_neutralization_config(&self.params).is_none()
+        {
+            crate::env::experiment_binary_leaf_newton_steps()
+                .unwrap_or(controls.auto_leaf_newton_steps)
+        } else {
+            0
         };
         let requires_full_replay =
             requires_full_prediction_replay(dart_params.is_some(), objective.quantile_alpha());
@@ -2968,6 +2997,26 @@ impl Trainer {
                         raw_features_opt,
                         &excluded_row_indices,
                         1.0,
+                    )
+                })?;
+            }
+
+            if binary_leaf_newton_steps > 0 && round_split_options.l1_alpha == 0.0 {
+                // After the replay `candidate_predictions` holds this round's
+                // tree on every row, so the refinement can shift rows by
+                // their leaf's change instead of replaying the tree again.
+                profile.time(ProfileStage::PredictionUpdate, || {
+                    refine_binary_newton_leaf_values(
+                        &mut candidate_round_stumps,
+                        binned_matrix,
+                        &predictions,
+                        &mut candidate_predictions,
+                        &active_dataset.targets,
+                        active_dataset.sample_weights.as_deref(),
+                        round_split_options.l2_lambda,
+                        self.params.learning_rate,
+                        binary_leaf_newton_steps,
+                        controls.max_abs_leaf_value,
                     )
                 })?;
             }

@@ -4410,7 +4410,7 @@ fn auto_leaf_regularization_is_objective_aware() {
             .expect("auto controls should resolve");
         (controls.auto_lambda_l2, controls.auto_min_child_hessian)
     };
-    assert_eq!(auto(ObjectiveFamily::BinaryClassification), (0.0, 1.0));
+    assert_eq!(auto(ObjectiveFamily::BinaryClassification), (3.0, 0.1));
     assert_eq!(auto(ObjectiveFamily::MulticlassClassification), (1.0, 0.0));
     assert_eq!(auto(ObjectiveFamily::Regression), (0.0, 0.0));
     assert_eq!(auto(ObjectiveFamily::Ranking), (0.0, 0.0));
@@ -4448,9 +4448,14 @@ fn objective_family_lets_generic_fit_paths_use_the_classifier_policy() {
 
 #[test]
 fn auto_binary_hessian_floor_tapers_on_tiny_datasets() {
-    // Six binary rows carry at most 1.5 total Hessian; a full 1.0 floor per
-    // child would forbid every split and train a constant model.
-    for (rows, expected) in [(6, 6.0 / 64.0), (32, 0.5), (64, 1.0), (500, 1.0)] {
+    // Six binary rows carry at most 1.5 total Hessian; the floor shrinks with
+    // the row count so toy datasets keep some legal splits.
+    for (rows, expected) in [
+        (6, 0.1 * (6.0 / 64.0)),
+        (32, 0.1 * 0.5),
+        (64, 0.1),
+        (500, 0.1),
+    ] {
         let (dataset, matrix) = policy_fixture(rows, 2, 1.0);
         let controls = trainer()
             .iteration_controls_for_objective_family(

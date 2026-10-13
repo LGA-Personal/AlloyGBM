@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 
 use alloygbm_core::{BinnedMatrix, LeafValue};
+use rayon::prelude::*;
 
 use crate::JointObjective;
 use crate::MorphState;
@@ -842,5 +843,223 @@ fn populate_child_absolute_outputs_joint(
         stumps_by_local,
         absolute_outputs,
     )?;
+    Ok(())
+}
+
+/// Extra Newton steps on each leaf of a just-built binary log-loss tree.
+///
+/// The tree builder sets each leaf to one Newton step from the current
+/// predictions, `-G / (H + l2)`. For log loss that step falls short of the
+/// leaf's L2-regularized optimum, most of all in nearly pure leaves, where
+/// the Hessian shrinks as the step grows. This repeats the step
+/// `extra_iterations` more times on all of the leaf's rows (CatBoost's
+/// `leaf_estimation_iterations`), then scales the result by `learning_rate`.
+/// Leaves must be scalar with no scale but the learning rate.
+///
+/// `predictions` are the scores before this tree. On return the stumps hold
+/// the refined leaves and `candidate_predictions`, which held `predictions`
+/// plus the builder's tree, holds `predictions` plus the refined tree.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refine_binary_newton_leaf_values(
+    stumps: &mut [TrainedStump],
+    binned_matrix: &BinnedMatrix,
+    predictions: &[f32],
+    candidate_predictions: &mut [f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+    l2_lambda: f32,
+    learning_rate: f32,
+    extra_iterations: usize,
+    max_abs_leaf_value: f32,
+) -> EngineResult<()> {
+    if stumps.is_empty() || extra_iterations == 0 || learning_rate <= 0.0 {
+        return Ok(());
+    }
+    let row_count = binned_matrix.row_count;
+    if predictions.len() != row_count
+        || candidate_predictions.len() != row_count
+        || targets.len() != row_count
+        || sample_weights.is_some_and(|w| w.len() != row_count)
+    {
+        return Err(EngineError::ContractViolation(
+            "binary leaf refinement inputs must match the binned row count".to_string(),
+        ));
+    }
+    let mut stumps_by_local = HashMap::new();
+    for stump in stumps.iter() {
+        let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        stumps_by_local.insert(local_node_id, stump);
+    }
+    // Node outputs as the builder left them (path sums of scaled deltas).
+    let mut absolute_outputs = HashMap::new();
+    absolute_outputs.insert(0_u32, 0.0_f32);
+    populate_child_absolute_outputs(0, &stumps_by_local, &mut absolute_outputs)?;
+
+    // Dense leaf index per row. Level-wise trees have small local ids, so
+    // route through flat tables; very deep leaf-wise trees use the maps.
+    let mut leaf_ids: Vec<u32> = absolute_outputs
+        .keys()
+        .copied()
+        .filter(|id| !stumps_by_local.contains_key(id))
+        .collect();
+    leaf_ids.sort_unstable();
+    let leaf_slot: HashMap<u32, usize> = leaf_ids
+        .iter()
+        .enumerate()
+        .map(|(slot, &id)| (id, slot))
+        .collect();
+    let missing_bin = binned_matrix.missing_bin();
+    const FLAT_ROUTING_MAX_ID: u32 = 1 << 14;
+    let max_id = leaf_ids.last().copied().unwrap_or(0);
+    let flat = (max_id < FLAT_ROUTING_MAX_ID).then(|| {
+        let mut flat_stumps: Vec<Option<&TrainedStump>> = vec![None; max_id as usize + 1];
+        for (&id, &stump) in &stumps_by_local {
+            flat_stumps[id as usize] = Some(stump);
+        }
+        let mut flat_slot = vec![0_u32; max_id as usize + 1];
+        for (slot, &id) in leaf_ids.iter().enumerate() {
+            flat_slot[id as usize] = slot as u32;
+        }
+        (flat_stumps, flat_slot)
+    });
+    let route = |row: usize| -> u32 {
+        match &flat {
+            Some((flat_stumps, flat_slot)) => {
+                let leaf = crate::round::terminal_local_node_for_row(
+                    row,
+                    binned_matrix,
+                    |id| flat_stumps.get(id as usize).copied().flatten(),
+                    missing_bin,
+                );
+                flat_slot[leaf as usize]
+            }
+            None => {
+                let leaf = crate::round::terminal_local_node_for_row(
+                    row,
+                    binned_matrix,
+                    |id| stumps_by_local.get(&id).copied(),
+                    missing_bin,
+                );
+                leaf_slot[&leaf] as u32
+            }
+        }
+    };
+
+    let leaf_count = leaf_ids.len();
+    let mut values: Vec<f32> = leaf_ids
+        .iter()
+        .map(|id| absolute_outputs[id] / learning_rate)
+        .collect();
+    // Per-leaf (grad, hess) sums of one chunk of rows at the current values.
+    let accumulate = |acc: &mut [f64], row: usize, slot: usize, values: &[f32]| {
+        let weight = sample_weights.map_or(1.0, |w| w[row]);
+        if weight > 0.0 {
+            let p = crate::objectives::sigmoid(predictions[row] + values[slot]);
+            acc[2 * slot] += (weight * (p - targets[row])) as f64;
+            acc[2 * slot + 1] += (weight * (p * (1.0 - p)).max(1e-7)) as f64;
+        }
+    };
+    // Chunk totals are folded in chunk order, so the sums (and the fitted
+    // model) do not depend on the thread count.
+    let fold_in_order = |chunks: Vec<Vec<f64>>| {
+        chunks
+            .into_iter()
+            .fold(vec![0.0_f64; 2 * leaf_count], |mut a, b| {
+                a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                a
+            })
+    };
+    const CHUNK: usize = 4096;
+    // The first step also routes each row to its leaf.
+    let mut row_leaf = vec![0_u32; row_count];
+    let mut sums = fold_in_order(
+        row_leaf
+            .par_chunks_mut(CHUNK)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let mut acc = vec![0.0_f64; 2 * leaf_count];
+                for (offset, slot_out) in chunk.iter_mut().enumerate() {
+                    let row = chunk_index * CHUNK + offset;
+                    let slot = route(row);
+                    *slot_out = slot;
+                    accumulate(&mut acc, row, slot as usize, &values);
+                }
+                acc
+            })
+            .collect(),
+    );
+    let l2 = l2_lambda as f64;
+    // The builder clamps the learning-rate-scaled leaf, so bound the
+    // unscaled value by the same limit divided by the learning rate.
+    let max_abs_value = max_abs_leaf_value / learning_rate;
+    for iteration in 0..extra_iterations {
+        if iteration > 0 {
+            let current = &values;
+            sums = fold_in_order(
+                row_leaf
+                    .par_chunks(CHUNK)
+                    .enumerate()
+                    .map(|(chunk_index, chunk)| {
+                        let mut acc = vec![0.0_f64; 2 * leaf_count];
+                        for (offset, &slot) in chunk.iter().enumerate() {
+                            accumulate(
+                                &mut acc,
+                                chunk_index * CHUNK + offset,
+                                slot as usize,
+                                current,
+                            );
+                        }
+                        acc
+                    })
+                    .collect(),
+            );
+        }
+        let mut largest_step = 0.0_f64;
+        for (slot, value) in values.iter_mut().enumerate() {
+            let (grad, hess) = (sums[2 * slot], sums[2 * slot + 1]);
+            if hess + l2 <= 0.0 {
+                continue;
+            }
+            let step = -(grad + l2 * *value as f64) / (hess + l2);
+            if step.is_finite() {
+                *value = ((*value as f64 + step) as f32).clamp(-max_abs_value, max_abs_value);
+                largest_step = largest_step.max(step.abs());
+            }
+        }
+        if largest_step < 1e-6 {
+            break;
+        }
+    }
+
+    // Move each row by its leaf's change, then rewrite the stumps' deltas so
+    // path sums equal the refined leaves. Internal nodes keep their old
+    // outputs; path sums telescope, so only leaf outputs reach predictions.
+    let leaf_shift: Vec<f32> = leaf_ids
+        .iter()
+        .zip(&values)
+        .map(|(id, value)| value * learning_rate - absolute_outputs[id])
+        .collect();
+    candidate_predictions
+        .par_iter_mut()
+        .zip(row_leaf.par_iter())
+        .for_each(|(prediction, &slot)| *prediction += leaf_shift[slot as usize]);
+    for stump in stumps.iter_mut() {
+        let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        let parent = absolute_outputs.get(&local_node_id).copied().unwrap_or(0.0);
+        for (child, leaf) in [
+            (
+                left_child_node_id(local_node_id)?,
+                &mut stump.left_leaf_value,
+            ),
+            (
+                right_child_node_id(local_node_id)?,
+                &mut stump.right_leaf_value,
+            ),
+        ] {
+            if let Some(&slot) = leaf_slot.get(&child) {
+                *leaf = LeafValue::Scalar(values[slot] * learning_rate - parent);
+            }
+        }
+    }
     Ok(())
 }

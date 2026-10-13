@@ -23,6 +23,16 @@
 
 ### Changed
 
+- **Better binary classification on small data.** Under
+  `training_policy="auto"`, binary classifiers now use leaf `lambda_l2 = 3.0`
+  with a minimum child Hessian of 0.1 (was 1.0 and no L2), row subsample 0.8
+  at every size, and two extra Newton steps on each leaf after a tree is
+  built. The old Hessian floor capped how confident the model could get. On
+  a 51-cell small-data binary dev suite (PMLB, no OpenML-CC18 overlap) test
+  log loss falls 12.6% (geomean; 26 wins, 2 losses) and moves from 1.13x to
+  0.99x CatBoost's; on 26 larger dev tasks it is unchanged. Fits run more
+  rounds before early stopping and each round costs about 15% more. See
+  `docs/benchmarks/binary_small_data_v1.md`.
 - **`n_estimators` and `learning_rate` default to `"auto"`: the round count
   is chosen by early stopping.** On `GBMRegressor`, `GBMClassifier` and
   `GBMRanker` under `training_policy="auto"`, a fit without `eval_set` holds
