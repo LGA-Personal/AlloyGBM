@@ -1,4 +1,18 @@
+use std::cell::RefCell;
+
+use rayon::prelude::*;
+
 use crate::error::{EngineError, EngineResult};
+
+/// Row count from which per-row loss terms are computed on several threads.
+const PARALLEL_LOSS_MIN_ROWS: usize = 8_192;
+const PARALLEL_LOSS_CHUNK_ROWS: usize = 4_096;
+
+thread_local! {
+    /// Reused per-row loss terms, so the parallel path allocates once per
+    /// thread rather than once per round.
+    static LOSS_TERMS: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+}
 
 pub(crate) fn squared_error_loss(
     predictions: &[f32],
@@ -102,14 +116,43 @@ pub(crate) fn binary_crossentropy_loss(
     if n == 0 {
         return Ok(0.0);
     }
-    let mut total = 0.0_f32;
-    for index in 0..n {
+    let row_term = |index: usize| {
         let pred = predictions[index];
         let y = targets[index];
         let weight = sample_weights.map_or(1.0, |w| w[index]);
         let loss = pred.max(0.0) - pred * y + (1.0 + (-pred.abs()).exp()).ln();
-        total += loss * weight;
-    }
+        loss * weight
+    };
+    let total = if n >= PARALLEL_LOSS_MIN_ROWS && rayon::current_num_threads() > 1 {
+        // The exp/ln per row dominates, so the row terms are computed in
+        // parallel and then summed in index order: the same additions in the
+        // same order as the serial loop, so the loss is bit-identical.
+        LOSS_TERMS.with(|cell| {
+            let mut terms = cell.borrow_mut();
+            terms.clear();
+            terms.resize(n, 0.0);
+            terms
+                .par_chunks_mut(PARALLEL_LOSS_CHUNK_ROWS)
+                .enumerate()
+                .for_each(|(chunk_index, chunk)| {
+                    let start = chunk_index * PARALLEL_LOSS_CHUNK_ROWS;
+                    for (offset, term) in chunk.iter_mut().enumerate() {
+                        *term = row_term(start + offset);
+                    }
+                });
+            let mut total = 0.0_f32;
+            for &term in terms.iter() {
+                total += term;
+            }
+            total
+        })
+    } else {
+        let mut total = 0.0_f32;
+        for index in 0..n {
+            total += row_term(index);
+        }
+        total
+    };
     // Return mean log-loss (not sum) for scale-independent loss values.
     Ok(total / n as f32)
 }
