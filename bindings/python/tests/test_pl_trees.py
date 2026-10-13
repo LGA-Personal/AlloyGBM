@@ -476,3 +476,33 @@ class TestLinearLeafConditioningGuards:
         assert np.all(np.isfinite(predictions))
         train_rmse = float(np.sqrt(np.mean((predictions - y.astype(np.float64)) ** 2)))
         assert train_rmse < float(np.std(y.astype(np.float64)))
+
+
+@pytest.mark.parametrize("max_cat_threshold", [0, 8])
+def test_linear_leaf_validation_curve_matches_predict_with_categoricals(max_cat_threshold):
+    """With categorical features the validation curve must score raw values.
+
+    Regression: the validation matrix kept bin indices where linear leaves
+    read raw feature values, so the recorded curve (and with it early
+    stopping and the auto-rounds holdout) diverged from ``predict``.
+    """
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(3)
+    n = 600
+    X = rng.uniform(0.0, 10.0, size=(n, 3))
+    cat = rng.integers(0, 3, size=n)
+    y = 2.0 * X[:, 0] - X[:, 1] + 3.0 * cat + 0.1 * rng.standard_normal(n)
+    frame = pd.DataFrame(X, columns=["a", "b", "c"])
+    frame["d"] = pd.Categorical(cat, categories=[0, 1, 2])
+    X_tr, y_tr, X_va, y_va = frame.iloc[:500], y[:500], frame.iloc[500:], y[500:]
+    model = GBMRegressor(
+        leaf_model="linear",
+        n_estimators=30,
+        learning_rate=0.1,
+        max_cat_threshold=max_cat_threshold,
+        seed=0,
+    )
+    model.fit(X_tr, y_tr, eval_set=(X_va, y_va))
+    recorded = model.evals_result_["validation"]["rmse"][-1]
+    actual = float(np.sqrt(np.mean((np.asarray(model.predict(X_va)) - y_va) ** 2)))
+    assert recorded == pytest.approx(actual, rel=1e-4)
