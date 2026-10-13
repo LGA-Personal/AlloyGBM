@@ -114,6 +114,34 @@ Under `training_policy="auto"`, binary log loss only:
 
 Manual policy and multiclass are unchanged.
 
+## Held-out check: OpenML-CC18 binary tasks
+
+Run once, after the configuration above was fixed. Setup: the 35 CC18 binary tasks, their first 3 official folds, Alloy at its defaults with 10 threads on the pilot's Apple M4. `main` (`b6f7262`) and this branch (`bd2b8db`) ran one after the other on an idle machine. Peer numbers come from the PR #150 pilot, which used the same machine and the same folds. Raw records: `data/binary_small_data_v1/cc18_main.json.gz` and `cc18_pr155.json.gz`.
+
+| | `main` | this branch |
+|---|---:|---:|
+| Log loss vs best peer (geomean) | 1.088 | **0.987** |
+| Log loss vs CatBoost (shifted geomean) | 1.026 | **0.951** |
+| Tasks better / worse than CatBoost (0.5%) | 10 / 23 | 16 / 16 |
+| 1 − AUC vs `main` (geomean) | 1.000 | 0.880 |
+| Mean trees | 300 | 447 |
+| Fit time vs fastest peer (geomean) | 2.00x | 3.81x |
+
+Compared with `main`, log loss is 0.906x (geomean). It improves on 29 tasks and gets worse on 6:
+
+| Task | Change |
+|---|---:|
+| climate-model | +11.8% |
+| sick | +7.1% |
+| churn | +5.1% |
+| electricity | +4.7% |
+| madelon | +3.7% |
+| bank-marketing | +0.2% |
+
+The largest gains are on tic-tac-toe (−57%), banknote (−56%), kr-vs-kp (−40%), wdbc (−25%), breast-w (−18%) and wilt (−18%).
+
+Fit time is 1.90x `main` (geomean), mostly from the extra rounds. The worst case is banknote, which went from 0.08 s to 0.64 s. Even so, fits still take 0.30x CatBoost's time.
+
 ## Cost
 
 More rounds before the holdout stops (small suite 245 → 522 on average,
