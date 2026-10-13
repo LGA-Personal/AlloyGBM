@@ -83,6 +83,16 @@
 
 ### Fixed
 
+- **Quantile leaf refinement now counts NaN and categorical rows in the
+  right leaf.** The pass that resets quantile leaves to the empirical
+  quantile of their residuals sent every row left when its bin was at or
+  below the split threshold. That ignored the split's learned missing
+  direction and native categorical bitsets, so leaves were refined on rows
+  the predictor sends elsewhere. It now uses the same routing rule as
+  prediction. Affects `objective="quantile"` on regressors and rankers,
+  including joint `MultiLabelGBMRanker`, when features have missing values
+  or `max_cat_threshold > 0`.
+
 - **Integer-valued features above the bin range no longer fail to fit or
   lose splits.** A feature matrix whose values were all non-negative integers
   was always treated as already-binned data. Values above 65,535, such as

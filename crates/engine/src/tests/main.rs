@@ -10469,6 +10469,88 @@ fn test_refine_quantile_leaf_values() {
     assert_eq!(stumps[0].right_leaf_value.as_scalar(), 20.0);
 }
 
+fn quantile_refinement_stump(
+    default_left: bool,
+    is_categorical: bool,
+    categorical_bitset: Option<Vec<u8>>,
+) -> TrainedStump {
+    let stats = NodeStats {
+        grad_sum: 0.0,
+        hess_sum: 2.0,
+        grad_sq_sum: 0.0,
+        row_count: 2,
+    };
+    TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(0, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            default_left,
+            is_categorical,
+            categorical_bitset,
+            left_stats: stats.clone(),
+            right_stats: stats,
+        },
+        left_leaf_value: LeafValue::Scalar(0.0),
+        right_leaf_value: LeafValue::Scalar(0.0),
+        tree_weight: 1.0,
+        multi_output_leaf_values: None,
+    }
+}
+
+#[test]
+fn test_refine_quantile_leaf_values_routes_missing_and_categorical_rows_like_the_predictor() {
+    let targets = [1.0, 3.0, 5.0, 20.0];
+    let predictions = [0.0_f32; 4];
+    let refine = |stump: TrainedStump, matrix: &BinnedMatrix| {
+        let mut stumps = vec![stump];
+        refine_quantile_leaf_values(
+            &mut stumps,
+            matrix,
+            &predictions,
+            &targets,
+            None,
+            0.5,
+            1.0,
+            100.0,
+            None,
+            None,
+        )
+        .expect("refinement should succeed");
+        // Refinement must agree with how prediction routes every row.
+        let mut replayed = predictions.to_vec();
+        apply_tree_to_binned_predictions(&mut replayed, matrix, &stumps, None)
+            .expect("replay should succeed");
+        (stumps.remove(0), replayed)
+    };
+
+    // Row 2 is missing and the split sends missing rows left, so the left
+    // leaf holds {1, 3, 5} (median 3) and the right leaf {20}.
+    let with_missing =
+        BinnedMatrix::new(4, 1, 3, vec![0, 1, MISSING_BIN_U8, 2]).expect("valid binned matrix");
+    let (stump, replayed) = refine(quantile_refinement_stump(true, false, None), &with_missing);
+    assert_eq!(stump.left_leaf_value.as_scalar(), 3.0);
+    assert_eq!(stump.right_leaf_value.as_scalar(), 20.0);
+    assert_eq!(replayed, vec![3.0, 3.0, 3.0, 20.0]);
+
+    // Categorical split: categories 0 and 2 go left ({1, 5}, lower median 1),
+    // categories 1 and 3 right ({3, 20}, lower median 3). A threshold
+    // comparison at bin 1 would route rows 0 and 1 left instead.
+    let categories = BinnedMatrix::new(4, 1, 4, vec![0, 1, 2, 3]).expect("valid binned matrix");
+    let (stump, replayed) = refine(
+        quantile_refinement_stump(false, true, Some(vec![0b0000_0101])),
+        &categories,
+    );
+    let (left, right) = (
+        stump.left_leaf_value.as_scalar(),
+        stump.right_leaf_value.as_scalar(),
+    );
+    assert_eq!(replayed, vec![left, right, left, right]);
+    assert!((1.0..=5.0).contains(&left), "{left}");
+    assert!((3.0..=20.0).contains(&right), "{right}");
+}
+
 #[test]
 fn test_quantile_regression_training_smoke() {
     let dataset = sample_dataset();
