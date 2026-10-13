@@ -534,6 +534,7 @@ class _GBMEstimatorCore(
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
         self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
+        self._target_encoding_bins_: dict[int, dict] | None = None
 
     def __init__(
         self,
@@ -682,6 +683,7 @@ class _GBMEstimatorCore(
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
         self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
+        self._target_encoding_bins_: dict[int, dict] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -2720,6 +2722,7 @@ class _GBMEstimatorCore(
             }
         else:
             self._native_cat_mappings_ = None
+        self._target_encoding_bins_ = self._target_encoding_bins_from_native(native_result)
         summary = native_result.summary
         self.best_iteration_ = summary.best_validation_round
         self.best_score_ = (
@@ -2777,6 +2780,7 @@ class _GBMEstimatorCore(
             }
         else:
             self._native_cat_mappings_ = None
+        self._target_encoding_bins_ = self._target_encoding_bins_from_native(native_result)
         summary = native_result.summary
         self.best_iteration_ = summary.best_validation_round
         self.best_score_ = (
