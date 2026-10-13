@@ -18,6 +18,10 @@ Benchmark documentation in `docs/` should stay focused on:
 Current benchmark entry points:
 
 - cross-library runner guide: `benchmarks/README.md`
+- frontier matrix (every data axis and hyperparameter regime against
+  LightGBM, XGBoost and CatBoost, in smoke/quick/full tiers):
+  `benchmarks/frontier_matrix.py` with design and results at
+  [frontier_matrix_v1.md](frontier_matrix_v1.md)
 - default-vs-default multi-seed quality suite and gate:
   `benchmarks/default_quality.py` with report at
   [default_quality_v1.md](default_quality_v1.md); greedy quantile borders at

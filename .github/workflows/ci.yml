@@ -168,6 +168,24 @@ jobs:
       - name: Run pytest suite
         run: python -m pytest bindings/python/tests/ -q
 
+      - name: Frontier matrix contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_frontier_matrix.py -q
+
+      - name: Frontier matrix AlloyGBM smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          python benchmarks/frontier_matrix.py run --tier smoke --arms alloy --threads 1 \
+            --output "$RUNNER_TEMP/frontier-smoke.json"
+          python - "$RUNNER_TEMP/frontier-smoke.json" <<'PY'
+          import json, sys
+          result = json.load(open(sys.argv[1]))
+          errors = [(r["dataset"], r["error"]) for r in result["records"] if r["error"]]
+          if errors or len(result["records"]) != 8:
+              raise SystemExit(f"frontier smoke failed: {len(result['records'])} records, errors {errors}")
+          print(f"validated {len(result['records'])} frontier smoke records")
+          PY
+
       - name: Review benchmark contract tests
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python -m pytest benchmarks/tests/test_review_guardrails.py -q
