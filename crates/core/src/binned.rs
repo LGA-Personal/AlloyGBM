@@ -386,9 +386,13 @@ impl BinnedMatrix {
         }
         let missing = usize::from(self.nan_bin_index);
         let uniform_bins = usize::from(self.max_bin) + 1;
-        if missing >= uniform_bins {
-            return None;
-        }
+        // The uniform scan stops at the missing bin or the histogram's end,
+        // whichever comes first. When the missing bin lies past the uniform
+        // histogram (the usual case: `max_bin` 254 with missing bin 255), no
+        // row can be missing, so the compact missing slot stays empty and its
+        // zero statistics match the uniform layout's "not covered" missing
+        // stats.
+        let edge_limit = missing.min(uniform_bins);
         let mut data_bins = Vec::with_capacity(self.feature_count);
         for feature in 0..self.feature_count {
             let start = feature * self.row_count;
@@ -406,7 +410,7 @@ impl BinnedMatrix {
                     .max(),
             };
             let used = max_data_bin.map_or(0, |bin| bin + 1);
-            if used > missing {
+            if used > edge_limit {
                 return None;
             }
             data_bins.push(used as u16);
@@ -421,7 +425,7 @@ impl BinnedMatrix {
         }
         Some(CompactHistogramLayout {
             data_bins,
-            edge_limit: missing,
+            edge_limit,
         })
     }
 
