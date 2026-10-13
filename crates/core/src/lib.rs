@@ -68,7 +68,8 @@ pub use histogram::{
 pub use leaf::{LeafValue, LinearLeaf, PartitionResult, SplitCandidate};
 pub use linear_histogram::{
     LinearFeatureHistogram, LinearFeatureScaler, LinearHistogramBin, LinearHistogramBundle,
-    MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, pl_matrix_index, subtract_linear_histogram_bundle,
+    MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, MAX_PL_SLOPE_REGRESSORS, pl_matrix_index,
+    subtract_linear_histogram_bundle,
 };
 pub use neutralization::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
 pub use training_mode::{

@@ -9,7 +9,7 @@
 use alloygbm_categorical::fit_transform_target_encoder;
 use alloygbm_core::{
     BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FeatureTile, GradientPair, HistogramBundle,
-    LeafModelKind, LeafValue, LinearFeatureScaler, LinearLeaf, MAX_PL_REGRESSORS, NodeSlice,
+    LeafModelKind, LeafValue, LinearFeatureScaler, LinearLeaf, MAX_PL_SLOPE_REGRESSORS, NodeSlice,
     PartitionResult, SplitCandidate, TrainParams, TrainingDataset, leaf_effective_gradient,
 };
 use rayon::prelude::*;
@@ -284,11 +284,11 @@ fn linear_regressor_path_features(
     feature_count: usize,
 ) -> Vec<u32> {
     let split_feature_iter = (!split_is_categorical).then_some(split_feature).into_iter();
-    let mut selected = Vec::with_capacity(MAX_PL_REGRESSORS);
+    let mut selected = Vec::with_capacity(MAX_PL_SLOPE_REGRESSORS);
     for feature in path_features.iter().copied().chain(split_feature_iter) {
         if (feature as usize) < feature_count
             && !selected.contains(&feature)
-            && selected.len() < MAX_PL_REGRESSORS
+            && selected.len() < MAX_PL_SLOPE_REGRESSORS
         {
             selected.push(feature);
         }
@@ -2052,9 +2052,10 @@ mod linear_leaf_path_tests {
 
     #[test]
     fn linear_regressor_features_cap_at_max_pl_regressors() {
+        // One of the eight statistic slots is the intercept column.
         let path = vec![9, 8, 7, 6, 5, 4, 3, 2];
         let selected = linear_regressor_path_features(&path, 1, false, 20);
-        assert_eq!(selected, vec![9, 8, 7, 6, 5, 4, 3, 2]);
+        assert_eq!(selected, vec![9, 8, 7, 6, 5, 4, 3]);
     }
 
     #[test]

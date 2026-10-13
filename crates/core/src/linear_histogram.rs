@@ -3,6 +3,13 @@
 /// so that bin layouts are fixed-size and cache-friendly.
 pub const MAX_PL_REGRESSORS: usize = 8;
 
+/// Maximum number of *feature* regressors per PL leaf. The last of the
+/// [`MAX_PL_REGRESSORS`] statistic slots is the leaf's intercept column (a
+/// constant 1 for every row), so the intercept and slopes are solved jointly
+/// from one ridge system instead of the intercept taking a separate Newton
+/// step that the slopes then partly repeat.
+pub const MAX_PL_SLOPE_REGRESSORS: usize = MAX_PL_REGRESSORS - 1;
+
 /// Number of `XᵀHX` matrix entries stored per histogram bin: a padded 8×8 = 64
 /// stride-8 layout (changed from a 36-entry compacted upper-triangle in v0.5.0
 /// so that all matrix operations map cleanly to `wide::f32x8` lanes with no
