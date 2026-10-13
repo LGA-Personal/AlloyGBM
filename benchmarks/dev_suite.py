@@ -81,6 +81,15 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "brazilianhouses": ("brazilianhouses",),
 }
 
+# Same underlying data as a test task without sharing name, id or shape,
+# found by reading the kept list (2026-10-13), plus one dev-internal duplicate.
+SUSPECTED_OVERLAP: dict[str, str] = {
+    "ada": "built from the census Adult data (CC18 adult)",
+    "gina": "built from MNIST digits (CC18 mnist_784)",
+    "madeline": "artificial AutoML-challenge set generated like madelon (CC18 madelon)",
+    "sylvine": "derived from forest covertype, which the dev suite already has",
+}
+
 # Datasets kept out regardless of overlap: too large to be a quick dev
 # signal even after subsampling, or images/text that CC18 already excludes.
 SKIP_NAMES = {"mnist784", "fashionmnist", "cifar10", "devnagariscript"}
@@ -156,6 +165,8 @@ def freeze(path: Path = MANIFEST, log: Callable[[str], None] = print) -> dict:
             e = e | {"suite": label}
             name = normalize(e["name"])
             reason = overlap_reason(e, test)
+            if reason is None and name in SUSPECTED_OVERLAP:
+                reason = f"suspected overlap: {SUSPECTED_OVERLAP[name]}"
             if reason is None and name in SKIP_NAMES:
                 reason = "image data, skipped as in the CC18 pilot"
             if reason is None and e["features"] > MAX_FEATURES:
@@ -219,6 +230,9 @@ def export(cache: Path, max_rows: int = DEFAULT_MAX_ROWS, path: Path = MANIFEST,
             task = openml.tasks.get_task(e["task_id"], download_data=False)
             dataset = openml.datasets.get_dataset(task.dataset_id, download_data=True)
             X, y, is_cat, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+            if str(getattr(dataset, "format", "")).lower() == "sparse_arff":
+                # Sparse ARFF leaves implicit zeros as missing.
+                X = X.astype(float).fillna(0.0)
             labels = None if e["kind"] == "regression" else pd.Categorical(y).codes
             keep = _subsample(len(X), max_rows, labels, seed=e["task_id"])
             X, y = X.iloc[keep], y.iloc[keep]
