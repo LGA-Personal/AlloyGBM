@@ -1,5 +1,6 @@
 use alloygbm_core::GradientPair;
 
+use super::fill_rowwise_gradients;
 use crate::error::{EngineError, EngineResult};
 use crate::squared_error_loss;
 use crate::traits::ObjectiveOps;
@@ -121,18 +122,14 @@ impl ObjectiveOps for SquaredErrorObjective {
                 targets.len()
             )));
         }
-        buffer.clear();
-        if buffer.capacity() < predictions.len() {
-            buffer.reserve(predictions.len() - buffer.capacity());
-        }
-        for index in 0..predictions.len() {
+        fill_rowwise_gradients(buffer, predictions.len(), |index| {
             let weight = sample_weights.map_or(1.0, |weights| weights[index]);
             let residual = predictions[index] - targets[index];
-            buffer.push(GradientPair {
+            GradientPair {
                 grad: residual * weight,
                 hess: weight,
-            });
-        }
+            }
+        });
         Ok(())
     }
 

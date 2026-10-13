@@ -1,5 +1,6 @@
 use alloygbm_core::GradientPair;
 
+use super::fill_rowwise_gradients;
 use crate::binary_crossentropy_loss;
 use crate::error::{EngineError, EngineResult};
 use crate::traits::ObjectiveOps;
@@ -140,17 +141,13 @@ impl ObjectiveOps for BinaryCrossEntropyObjective {
                 targets.len()
             )));
         }
-        buffer.clear();
-        if buffer.capacity() < predictions.len() {
-            buffer.reserve(predictions.len() - buffer.capacity());
-        }
-        for index in 0..predictions.len() {
+        fill_rowwise_gradients(buffer, predictions.len(), |index| {
             let weight = sample_weights.map_or(1.0, |weights| weights[index]);
             let p = sigmoid(predictions[index]);
             let grad = (p - targets[index]) * weight;
             let hess = (p * (1.0 - p)).max(1e-7) * weight;
-            buffer.push(GradientPair { grad, hess });
-        }
+            GradientPair { grad, hess }
+        });
         Ok(())
     }
 

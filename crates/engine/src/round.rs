@@ -122,7 +122,7 @@ pub(crate) fn apply_weighted_round_to_predictions_and_accumulator(
 /// Under this many rows the rayon fork/join costs more than the replay saves.
 /// Both paths produce bit-identical predictions, so this threshold -- and the
 /// thread count it is compared against -- only affect speed, never results.
-const REPLAY_PARALLEL_MIN_ROWS: usize = 32_768;
+const REPLAY_PARALLEL_MIN_ROWS: usize = 4_096;
 
 pub(crate) fn apply_weighted_round_to_rows(
     predictions: &mut [f32],
