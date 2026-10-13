@@ -499,14 +499,44 @@ impl CpuBackend {
         include_grad_sq: bool,
         node_totals: Option<&BinAccumulator>,
     ) -> EngineResult<HistogramBundle> {
+        Self::build_tile_then(
+            binned_matrix,
+            node_gradients,
+            node,
+            tile,
+            bin_count,
+            include_grad_sq,
+            node_totals,
+            |arena, start_feature| {
+                arena
+                    .to_bundle(node.node_id, start_feature)
+                    .map_err(EngineError::from)
+            },
+        )
+    }
+
+    /// Build one tile's histograms in this thread's arena, then hand the
+    /// arena and the tile's first feature to `finish`.
+    #[allow(clippy::too_many_arguments)]
+    fn build_tile_then<R>(
+        binned_matrix: &BinnedMatrix,
+        node_gradients: &[GradientPair],
+        node: &NodeSlice,
+        tile: &FeatureTile,
+        bin_count: usize,
+        include_grad_sq: bool,
+        node_totals: Option<&BinAccumulator>,
+        finish: impl FnOnce(&HistogramArena, usize) -> EngineResult<R>,
+    ) -> EngineResult<R> {
         if binned_matrix.feature_bundle_map().is_some() {
-            return Self::build_feature_histograms_for_bundled_tile(
+            return Self::build_bundled_tile_then(
                 binned_matrix,
                 node_gradients,
                 node,
                 tile,
                 bin_count,
                 include_grad_sq,
+                finish,
             );
         }
         let feature_count = binned_matrix.feature_count;
@@ -576,14 +606,13 @@ impl CpuBackend {
                     &mut arena,
                 ),
             }
-            arena
-                .to_bundle(node.node_id, start_feature)
-                .map_err(EngineError::from)
+            finish(&arena, start_feature)
         })
     }
 
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
     /// [`gather_node_gradients`].
+    #[cfg(test)]
     pub(crate) fn build_feature_histograms_for_bundled_tile(
         binned_matrix: &BinnedMatrix,
         node_gradients: &[GradientPair],
@@ -592,6 +621,30 @@ impl CpuBackend {
         bin_count: usize,
         include_grad_sq: bool,
     ) -> EngineResult<HistogramBundle> {
+        Self::build_bundled_tile_then(
+            binned_matrix,
+            node_gradients,
+            node,
+            tile,
+            bin_count,
+            include_grad_sq,
+            |arena, start_feature| {
+                arena
+                    .to_bundle(node.node_id, start_feature)
+                    .map_err(EngineError::from)
+            },
+        )
+    }
+
+    fn build_bundled_tile_then<R>(
+        binned_matrix: &BinnedMatrix,
+        node_gradients: &[GradientPair],
+        node: &NodeSlice,
+        tile: &FeatureTile,
+        bin_count: usize,
+        include_grad_sq: bool,
+        finish: impl FnOnce(&HistogramArena, usize) -> EngineResult<R>,
+    ) -> EngineResult<R> {
         let map = binned_matrix.feature_bundle_map().ok_or_else(|| {
             EngineError::ContractViolation(
                 "bundled histogram kernel requires a feature bundle map".to_string(),
@@ -643,9 +696,7 @@ impl CpuBackend {
                     }
                 }
             }
-            arena
-                .to_bundle(node.node_id, start_feature)
-                .map_err(EngineError::from)
+            finish(&arena, start_feature)
         })
     }
 
@@ -714,8 +765,21 @@ impl CpuBackend {
                 totals
             });
         let node_totals = node_totals.as_ref();
-        let mut per_tile_histograms = if parallel_tiles {
-            feature_tiles
+        // Every tile lands in one bundle sized for the whole node up front,
+        // so appending tiles never reallocates or copies earlier tiles.
+        let total_bins = match binned_matrix.compact_histogram_layout() {
+            Some(layout) if binned_matrix.feature_bundle_map().is_none() => feature_tiles
+                .iter()
+                .flat_map(|tile| tile.start_feature as usize..tile.end_feature as usize)
+                .map(|feature| usize::from(layout.data_bins[feature]) + 1)
+                .sum(),
+            _ => feature_tiles
+                .iter()
+                .map(|tile| (tile.end_feature - tile.start_feature) as usize * bin_count)
+                .sum::<usize>(),
+        };
+        if parallel_tiles {
+            let mut per_tile_histograms = feature_tiles
                 .par_iter()
                 .map(|tile| {
                     Self::build_feature_histograms_for_tile(
@@ -728,33 +792,45 @@ impl CpuBackend {
                         node_totals,
                     )
                 })
-                .collect::<Vec<_>>()
-        } else {
-            feature_tiles
-                .iter()
-                .map(|tile| {
-                    Self::build_feature_histograms_for_tile(
-                        binned_matrix,
-                        node_gradients,
-                        node,
-                        tile,
-                        bin_count,
-                        include_grad_sq,
-                        node_totals,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut histograms = per_tile_histograms
-            .drain(..1)
-            .next()
-            .expect("feature tiles are non-empty")?;
-        for tile_histograms in per_tile_histograms {
-            histograms
-                .append(tile_histograms?)
-                .map_err(EngineError::from)?;
+                .collect::<Vec<_>>();
+            let mut histograms = per_tile_histograms
+                .drain(..1)
+                .next()
+                .expect("feature tiles are non-empty")?;
+            histograms.reserve_bins(total_bins.saturating_sub(histograms.total_bin_count()));
+            for tile_histograms in per_tile_histograms {
+                histograms
+                    .append(tile_histograms?)
+                    .map_err(EngineError::from)?;
+            }
+            return Ok(histograms);
         }
-        Ok(histograms)
+        // Serially, each tile's arena is copied straight into the bundle.
+        let mut histograms: Option<HistogramBundle> = None;
+        for tile in feature_tiles {
+            Self::build_tile_then(
+                binned_matrix,
+                node_gradients,
+                node,
+                tile,
+                bin_count,
+                include_grad_sq,
+                node_totals,
+                |arena, start_feature| {
+                    match &mut histograms {
+                        Some(bundle) => arena.append_onto(bundle, start_feature)?,
+                        None => {
+                            let mut bundle = arena.to_bundle(node.node_id, start_feature)?;
+                            bundle
+                                .reserve_bins(total_bins.saturating_sub(bundle.total_bin_count()));
+                            histograms = Some(bundle);
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(histograms.expect("feature tiles are non-empty"))
     }
 
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
