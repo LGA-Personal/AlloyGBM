@@ -78,7 +78,7 @@ pub(crate) fn best_split_dro_numeric_simd(
     let hess_sums = feature_histogram.hess_sums();
     let grad_sq_sums = feature_histogram.grad_sq_sums()?;
     let counts = feature_histogram.counts();
-    let missing_bin_index = options.missing_bin_index;
+    let missing_bin_index = feature_histogram.missing_index(options.missing_bin_index);
     let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
         if missing_bin_index < feature_histogram.len() {
             (
@@ -123,6 +123,7 @@ pub(crate) fn best_split_dro_numeric_simd(
     if scan_limit == 0 {
         return None;
     }
+    let edge_limit = feature_histogram.edge_scan_limit(scan_limit);
 
     let radius_v = f64x4::splat(f64::from(dro_config.radius));
     let l1_threshold = options.l1_alpha.max(0.0);
@@ -282,7 +283,7 @@ pub(crate) fn best_split_dro_numeric_simd(
                                 < options.min_rows_per_leaf
                                 || (effective_right_count_values[lane] as usize)
                                     < options.min_rows_per_leaf
-                                || (threshold_bin + 1 >= scan_limit
+                                || (threshold_bin + 1 >= edge_limit
                                     && non_missing_count == cumulative_count[threshold_bin])
                             {
                                 *gain = f32::NEG_INFINITY;

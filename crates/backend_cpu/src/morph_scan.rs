@@ -23,7 +23,7 @@ pub(crate) fn best_split_morph_numeric_simd(
     let hess_sums = feature_histogram.hess_sums();
     let grad_sq_sums = feature_histogram.grad_sq_sums();
     let counts = feature_histogram.counts();
-    let missing_bin_index = options.missing_bin_index;
+    let missing_bin_index = feature_histogram.missing_index(options.missing_bin_index);
     let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
         if missing_bin_index < feature_histogram.len() {
             (
@@ -54,6 +54,7 @@ pub(crate) fn best_split_morph_numeric_simd(
     if scan_limit == 0 {
         return None;
     }
+    let edge_limit = feature_histogram.edge_scan_limit(scan_limit);
 
     let non_missing_grad = total_grad - missing_grad;
     let non_missing_hess = total_hess - missing_hess;
@@ -229,7 +230,7 @@ pub(crate) fn best_split_morph_numeric_simd(
                 let missing_right_gains = evaluate_direction(false);
                 for lane in 0..chunk_len {
                     let threshold = chunk_start + lane;
-                    if threshold + 1 >= scan_limit
+                    if threshold + 1 >= edge_limit
                         && non_missing_count == cumulative_count[threshold]
                     {
                         continue;
