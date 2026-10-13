@@ -4,6 +4,12 @@
 
 ### Performance
 
+- **Wide, low-cardinality data fits about twice as fast, with bit-identical
+  models.** Each feature's histogram is now sized to the bins it actually
+  uses instead of the full `max_bin` width, so a 0/1 column no longer pays
+  for 255 empty slots at every node. A 3,000 × 1,000 mostly-binary matrix
+  fits in 0.46× the time (1 thread); dense continuous data is unchanged. See
+  `docs/benchmarks/fit_speed_v2.md`.
 - **Faster fits with bit-identical models.** The split search skips
   thresholds whose left statistics did not change (empty bins) and the
   second missing-value pass when a node has no missing rows; the histogram

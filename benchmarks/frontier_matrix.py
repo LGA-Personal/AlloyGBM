@@ -1421,6 +1421,12 @@ def main(argv: list[str] | None = None) -> int:
                        help="cap training rows per fold (test folds stay whole)")
     run_p.add_argument("--openml-tasks", type=int, nargs="+", help="only these OpenML task ids")
     run_p.add_argument("--openml-only", action="store_true", help="skip the synthetic cells")
+    run_p.add_argument("--dev-suite", type=Path, metavar="CACHE",
+                       help="add the dev/calibration suite from a dev_suite.py export cache "
+                            "(disjoint from CC18/CTR23); implies skipping the synthetic cells")
+    run_p.add_argument("--dev-tasks", type=int, nargs="+", help="only these dev-suite task ids")
+    run_p.add_argument("--dev-train-cap", type=int,
+                       help="cap dev-suite training rows per split (screening runs)")
     run_p.add_argument("--output", type=Path, required=True,
                        help="result JSON; rewritten after every cell, so a crash keeps what finished")
     run_p.add_argument("--resume", action="store_true",
@@ -1456,8 +1462,21 @@ def main(argv: list[str] | None = None) -> int:
         _pin_threads(args.threads)
         arms = [parse_arm(spec) for spec in args.arms]
         seeds = list(range(args.seeds if args.seeds is not None else DEFAULT_SEEDS[args.tier]))
-        cells = [] if args.openml_only else build_cells(args.tier, args.axes, args.regimes, args.cells)
+        skip_synthetic = args.openml_only or args.dev_suite is not None
+        cells = [] if skip_synthetic else build_cells(args.tier, args.axes, args.regimes, args.cells)
         extra: dict[str, Dataset] = {}
+        if args.dev_suite is not None:
+            import dev_suite
+
+            # One split per seed: the full tier runs more seeds than the default.
+            splits = max(dev_suite.SPLITS, max(seeds, default=0) + 1)
+            for ds in dev_suite.load(args.dev_suite, splits=splits, tasks=args.dev_tasks,
+                                      train_cap=args.dev_train_cap):
+                if args.cells and not any(c in ds.spec.name for c in args.cells):
+                    continue
+                extra[ds.spec.name] = ds
+                for name in args.regimes or DATA_REGIMES:
+                    cells.append(Cell(ds.spec, REGIMES_BY_NAME[name], source="dev"))
         if args.openml_only and not args.openml_suite:
             parser.error("--openml-only needs --openml-suite")
         if args.openml_suite:

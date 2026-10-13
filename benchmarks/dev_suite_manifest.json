@@ -1,0 +1,2429 @@
+{
+ "description": "AlloyGBM dev/calibration suite; disjoint from OpenML CC18 and CTR23",
+ "test_suites": {
+  "cc18": 99,
+  "ctr23": 353
+ },
+ "dev_suites": {
+  "grinsztajn-num-clf": 337,
+  "grinsztajn-num-reg": 336,
+  "grinsztajn-cat-clf": 334,
+  "grinsztajn-cat-reg": 335,
+  "amlb-clf": 271,
+  "amlb-reg": 269
+ },
+ "aliases": {
+  "houses": [
+   "californiahousing"
+  ],
+  "california": [
+   "californiahousing"
+  ],
+  "housesales": [
+   "kingscounty"
+  ],
+  "wine": [
+   "whitewine",
+   "redwine"
+  ],
+  "winequality": [
+   "whitewine",
+   "redwine"
+  ],
+  "superconduct": [
+   "superconductivity"
+  ],
+  "cpuact": [
+   "cpuactivity"
+  ],
+  "miamihousing2016": [
+   "miamihousing"
+  ],
+  "australian": [
+   "creditapproval"
+  ],
+  "satellite": [
+   "satimage"
+  ],
+  "bankmarketing": [
+   "bankmarketing"
+  ],
+  "brazilianhouses": [
+   "brazilianhouses"
+  ]
+ },
+ "max_features": 2000,
+ "tasks": [
+  {
+   "task_id": 189354,
+   "dataset_id": 1169,
+   "name": "airlines",
+   "kind": "classification",
+   "rows": 539383,
+   "features": 7,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361282,
+   "dataset_id": 45035,
+   "name": "albert",
+   "kind": "classification",
+   "rows": 58252,
+   "features": 31,
+   "classes": 2,
+   "suite": "grinsztajn-cat-clf"
+  },
+  {
+   "task_id": 359979,
+   "dataset_id": 4135,
+   "name": "Amazon_employee_access",
+   "kind": "classification",
+   "rows": 32769,
+   "features": 9,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 168868,
+   "dataset_id": 41138,
+   "name": "APSFailure",
+   "kind": "classification",
+   "rows": 76000,
+   "features": 170,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 359973,
+   "dataset_id": 41142,
+   "name": "christine",
+   "kind": "classification",
+   "rows": 5418,
+   "features": 1636,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 359992,
+   "dataset_id": 42733,
+   "name": "Click_prediction_small",
+   "kind": "classification",
+   "rows": 39948,
+   "features": 11,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361286,
+   "dataset_id": 45039,
+   "name": "compas-two-years",
+   "kind": "classification",
+   "rows": 4966,
+   "features": 11,
+   "classes": 2,
+   "suite": "grinsztajn-cat-clf"
+  },
+  {
+   "task_id": 361061,
+   "dataset_id": 44121,
+   "name": "covertype",
+   "kind": "classification",
+   "rows": 566602,
+   "features": 10,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 361055,
+   "dataset_id": 44089,
+   "name": "credit",
+   "kind": "classification",
+   "rows": 16714,
+   "features": 10,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 361275,
+   "dataset_id": 45020,
+   "name": "default-of-credit-card-clients",
+   "kind": "classification",
+   "rows": 13272,
+   "features": 20,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 361273,
+   "dataset_id": 45022,
+   "name": "Diabetes130US",
+   "kind": "classification",
+   "rows": 71090,
+   "features": 7,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 168909,
+   "dataset_id": 41163,
+   "name": "dilbert",
+   "kind": "classification",
+   "rows": 10000,
+   "features": 2000,
+   "classes": 5,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361070,
+   "dataset_id": 44130,
+   "name": "eye_movements",
+   "kind": "classification",
+   "rows": 7608,
+   "features": 20,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 168910,
+   "dataset_id": 41164,
+   "name": "fabert",
+   "kind": "classification",
+   "rows": 8237,
+   "features": 800,
+   "classes": 7,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 359984,
+   "dataset_id": 41169,
+   "name": "helena",
+   "kind": "classification",
+   "rows": 65196,
+   "features": 27,
+   "classes": 100,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361278,
+   "dataset_id": 45026,
+   "name": "heloc",
+   "kind": "classification",
+   "rows": 10000,
+   "features": 22,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 361069,
+   "dataset_id": 44129,
+   "name": "Higgs",
+   "kind": "classification",
+   "rows": 940160,
+   "features": 24,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 361063,
+   "dataset_id": 44123,
+   "name": "house_16H",
+   "kind": "classification",
+   "rows": 13488,
+   "features": 16,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 361274,
+   "dataset_id": 45021,
+   "name": "jannis",
+   "kind": "classification",
+   "rows": 57580,
+   "features": 54,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 168911,
+   "dataset_id": 41143,
+   "name": "jasmine",
+   "kind": "classification",
+   "rows": 2984,
+   "features": 144,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 3945,
+   "dataset_id": 1111,
+   "name": "KDDCup09_appetency",
+   "kind": "classification",
+   "rows": 50000,
+   "features": 230,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 360112,
+   "dataset_id": 42746,
+   "name": "KDDCup99",
+   "kind": "classification",
+   "rows": 4898431,
+   "features": 41,
+   "classes": 23,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 359991,
+   "dataset_id": 41162,
+   "name": "kick",
+   "kind": "classification",
+   "rows": 72983,
+   "features": 32,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361065,
+   "dataset_id": 44125,
+   "name": "MagicTelescope",
+   "kind": "classification",
+   "rows": 13376,
+   "features": 10,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 359953,
+   "dataset_id": 1515,
+   "name": "micro-mass",
+   "kind": "classification",
+   "rows": 571,
+   "features": 1300,
+   "classes": 20,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361068,
+   "dataset_id": 44128,
+   "name": "MiniBooNE",
+   "kind": "classification",
+   "rows": 72998,
+   "features": 50,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 359993,
+   "dataset_id": 42734,
+   "name": "okcupid-stem",
+   "kind": "classification",
+   "rows": 50789,
+   "features": 19,
+   "classes": 3,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 190410,
+   "dataset_id": 41145,
+   "name": "philippine",
+   "kind": "classification",
+   "rows": 5832,
+   "features": 308,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361062,
+   "dataset_id": 44122,
+   "name": "pol",
+   "kind": "classification",
+   "rows": 10082,
+   "features": 26,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf"
+  },
+  {
+   "task_id": 360113,
+   "dataset_id": 42742,
+   "name": "porto-seguro",
+   "kind": "classification",
+   "rows": 595212,
+   "features": 57,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361285,
+   "dataset_id": 45038,
+   "name": "road-safety",
+   "kind": "classification",
+   "rows": 111762,
+   "features": 32,
+   "classes": 2,
+   "suite": "grinsztajn-cat-clf"
+  },
+  {
+   "task_id": 359994,
+   "dataset_id": 42732,
+   "name": "sf-police-incidents",
+   "kind": "classification",
+   "rows": 2215023,
+   "features": 8,
+   "classes": 2,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 359987,
+   "dataset_id": 40685,
+   "name": "shuttle",
+   "kind": "classification",
+   "rows": 58000,
+   "features": 9,
+   "classes": 7,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 359985,
+   "dataset_id": 41166,
+   "name": "volkert",
+   "kind": "classification",
+   "rows": 58310,
+   "features": 180,
+   "classes": 10,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 2073,
+   "dataset_id": 181,
+   "name": "yeast",
+   "kind": "classification",
+   "rows": 1484,
+   "features": 8,
+   "classes": 10,
+   "suite": "amlb-clf"
+  },
+  {
+   "task_id": 361077,
+   "dataset_id": 44137,
+   "name": "Ailerons",
+   "kind": "regression",
+   "rows": 13750,
+   "features": 33,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  },
+  {
+   "task_id": 359929,
+   "dataset_id": 42728,
+   "name": "Airlines_DepDelay_10M",
+   "kind": "regression",
+   "rows": 10000000,
+   "features": 9,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361293,
+   "dataset_id": 45047,
+   "name": "Airlines_DepDelay_1M",
+   "kind": "regression",
+   "rows": 1000000,
+   "features": 5,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 361292,
+   "dataset_id": 45046,
+   "name": "Allstate_Claims_Severity",
+   "kind": "regression",
+   "rows": 188318,
+   "features": 124,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 361093,
+   "dataset_id": 44055,
+   "name": "analcatdata_supreme",
+   "kind": "regression",
+   "rows": 4052,
+   "features": 7,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 361082,
+   "dataset_id": 44142,
+   "name": "Bike_Sharing_Demand",
+   "kind": "regression",
+   "rows": 17379,
+   "features": 6,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  },
+  {
+   "task_id": 359937,
+   "dataset_id": 41540,
+   "name": "black_friday",
+   "kind": "regression",
+   "rows": 166821,
+   "features": 9,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 359950,
+   "dataset_id": 531,
+   "name": "boston",
+   "kind": "regression",
+   "rows": 506,
+   "features": 13,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 233213,
+   "dataset_id": 4549,
+   "name": "Buzzinsocialmedia_Twitter",
+   "kind": "regression",
+   "rows": 583250,
+   "features": 77,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 359942,
+   "dataset_id": 42727,
+   "name": "colleges",
+   "kind": "regression",
+   "rows": 7063,
+   "features": 44,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361281,
+   "dataset_id": 45034,
+   "name": "delays_zurich_transport",
+   "kind": "regression",
+   "rows": 5465575,
+   "features": 8,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  },
+  {
+   "task_id": 361074,
+   "dataset_id": 44134,
+   "name": "elevators",
+   "kind": "regression",
+   "rows": 16599,
+   "features": 16,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  },
+  {
+   "task_id": 359951,
+   "dataset_id": 42563,
+   "name": "house_prices_nominal",
+   "kind": "regression",
+   "rows": 1460,
+   "features": 79,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361086,
+   "dataset_id": 44146,
+   "name": "medical_charges",
+   "kind": "regression",
+   "rows": 163065,
+   "features": 3,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  },
+  {
+   "task_id": 361097,
+   "dataset_id": 44061,
+   "name": "Mercedes_Benz_Greener_Manufacturing",
+   "kind": "regression",
+   "rows": 4209,
+   "features": 359,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 360945,
+   "dataset_id": 43071,
+   "name": "MIP-2016-regression",
+   "kind": "regression",
+   "rows": 1090,
+   "features": 144,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361083,
+   "dataset_id": 44143,
+   "name": "nyc-taxi-green-dec-2016",
+   "kind": "regression",
+   "rows": 581835,
+   "features": 9,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  },
+  {
+   "task_id": 359941,
+   "dataset_id": 42724,
+   "name": "OnlineNewsPopularity",
+   "kind": "regression",
+   "rows": 39644,
+   "features": 59,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361103,
+   "dataset_id": 44068,
+   "name": "particulate-matter-ukair-2017",
+   "kind": "regression",
+   "rows": 394299,
+   "features": 6,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 360933,
+   "dataset_id": 3277,
+   "name": "QSAR-TID-10980",
+   "kind": "regression",
+   "rows": 5766,
+   "features": 1025,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 360932,
+   "dataset_id": 3050,
+   "name": "QSAR-TID-11",
+   "kind": "regression",
+   "rows": 5742,
+   "features": 1025,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 359930,
+   "dataset_id": 550,
+   "name": "quake",
+   "kind": "regression",
+   "rows": 2178,
+   "features": 3,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 359948,
+   "dataset_id": 41980,
+   "name": "SAT11-HAND-runtime-regression",
+   "kind": "regression",
+   "rows": 4440,
+   "features": 116,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361289,
+   "dataset_id": 45043,
+   "name": "seattlecrime6",
+   "kind": "regression",
+   "rows": 52031,
+   "features": 4,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 359931,
+   "dataset_id": 546,
+   "name": "sensory",
+   "kind": "regression",
+   "rows": 576,
+   "features": 11,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361104,
+   "dataset_id": 44069,
+   "name": "SGEMM_GPU_kernel_performance",
+   "kind": "regression",
+   "rows": 241600,
+   "features": 9,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 361085,
+   "dataset_id": 44145,
+   "name": "sulfur",
+   "kind": "regression",
+   "rows": 10081,
+   "features": 6,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  },
+  {
+   "task_id": 359934,
+   "dataset_id": 505,
+   "name": "tecator",
+   "kind": "regression",
+   "rows": 240,
+   "features": 124,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361287,
+   "dataset_id": 45041,
+   "name": "topo_2_1",
+   "kind": "regression",
+   "rows": 8885,
+   "features": 255,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 359945,
+   "dataset_id": 42730,
+   "name": "us_crime",
+   "kind": "regression",
+   "rows": 1994,
+   "features": 126,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361094,
+   "dataset_id": 44056,
+   "name": "visualizing_soil",
+   "kind": "regression",
+   "rows": 8641,
+   "features": 4,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg"
+  },
+  {
+   "task_id": 317614,
+   "dataset_id": 42705,
+   "name": "Yolanda",
+   "kind": "regression",
+   "rows": 400000,
+   "features": 100,
+   "classes": 0,
+   "suite": "amlb-reg"
+  },
+  {
+   "task_id": 361279,
+   "dataset_id": 45032,
+   "name": "yprop_4_1",
+   "kind": "regression",
+   "rows": 8885,
+   "features": 42,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg"
+  }
+ ],
+ "excluded": [
+  {
+   "task_id": 190411,
+   "dataset_id": 41156,
+   "name": "ada",
+   "kind": "classification",
+   "rows": 4147,
+   "features": 48,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "suspected overlap: built from the census Adult data (CC18 adult)"
+  },
+  {
+   "task_id": 359983,
+   "dataset_id": 1590,
+   "name": "adult",
+   "kind": "classification",
+   "rows": 48842,
+   "features": 14,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 7592 (adult)"
+  },
+  {
+   "task_id": 189356,
+   "dataset_id": 41147,
+   "name": "albert",
+   "kind": "classification",
+   "rows": 425240,
+   "features": 78,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 10090,
+   "dataset_id": 1457,
+   "name": "amazon-commerce-reviews",
+   "kind": "classification",
+   "rows": 1500,
+   "features": 10000,
+   "classes": 50,
+   "suite": "amlb-clf",
+   "reason": "10000 features > 2000"
+  },
+  {
+   "task_id": 190412,
+   "dataset_id": 41157,
+   "name": "arcene",
+   "kind": "classification",
+   "rows": 100,
+   "features": 10000,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "10000 features > 2000"
+  },
+  {
+   "task_id": 146818,
+   "dataset_id": 40981,
+   "name": "Australian",
+   "kind": "classification",
+   "rows": 690,
+   "features": 14,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "known re-upload of test task 29 (credit-approval)"
+  },
+  {
+   "task_id": 359982,
+   "dataset_id": 1461,
+   "name": "bank-marketing",
+   "kind": "classification",
+   "rows": 45211,
+   "features": 16,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 14965 (bank-marketing)"
+  },
+  {
+   "task_id": 359967,
+   "dataset_id": 4134,
+   "name": "Bioresponse",
+   "kind": "classification",
+   "rows": 3751,
+   "features": 1776,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 9910 (Bioresponse)"
+  },
+  {
+   "task_id": 359955,
+   "dataset_id": 1464,
+   "name": "blood-transfusion-service-center",
+   "kind": "classification",
+   "rows": 748,
+   "features": 4,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 10101 (blood-transfusion-service-center)"
+  },
+  {
+   "task_id": 359960,
+   "dataset_id": 40975,
+   "name": "car",
+   "kind": "classification",
+   "rows": 1728,
+   "features": 6,
+   "classes": 4,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 146821 (car)"
+  },
+  {
+   "task_id": 359968,
+   "dataset_id": 40701,
+   "name": "churn",
+   "kind": "classification",
+   "rows": 5000,
+   "features": 20,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 167141 (churn)"
+  },
+  {
+   "task_id": 359959,
+   "dataset_id": 23,
+   "name": "cmc",
+   "kind": "classification",
+   "rows": 1473,
+   "features": 9,
+   "classes": 3,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 23 (cmc)"
+  },
+  {
+   "task_id": 359957,
+   "dataset_id": 1468,
+   "name": "cnae-9",
+   "kind": "classification",
+   "rows": 1080,
+   "features": 856,
+   "classes": 9,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 9981 (cnae-9)"
+  },
+  {
+   "task_id": 359977,
+   "dataset_id": 40668,
+   "name": "connect-4",
+   "kind": "classification",
+   "rows": 67557,
+   "features": 42,
+   "classes": 3,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 146195 (connect-4)"
+  },
+  {
+   "task_id": 7593,
+   "dataset_id": 1596,
+   "name": "covertype",
+   "kind": "classification",
+   "rows": 581012,
+   "features": 54,
+   "classes": 7,
+   "suite": "amlb-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 168757,
+   "dataset_id": 31,
+   "name": "credit-g",
+   "kind": "classification",
+   "rows": 1000,
+   "features": 20,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 31 (credit-g)"
+  },
+  {
+   "task_id": 211986,
+   "dataset_id": 4541,
+   "name": "Diabetes130US",
+   "kind": "classification",
+   "rows": 101766,
+   "features": 49,
+   "classes": 3,
+   "suite": "amlb-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 189355,
+   "dataset_id": 41167,
+   "name": "dionis",
+   "kind": "classification",
+   "rows": 416188,
+   "features": 60,
+   "classes": 355,
+   "suite": "amlb-clf",
+   "reason": "355 classes"
+  },
+  {
+   "task_id": 359964,
+   "dataset_id": 40670,
+   "name": "dna",
+   "kind": "classification",
+   "rows": 3186,
+   "features": 180,
+   "classes": 3,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 167140 (dna)"
+  },
+  {
+   "task_id": 359954,
+   "dataset_id": 188,
+   "name": "eucalyptus",
+   "kind": "classification",
+   "rows": 736,
+   "features": 19,
+   "classes": 5,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 2079 (eucalyptus)"
+  },
+  {
+   "task_id": 359976,
+   "dataset_id": 40996,
+   "name": "Fashion-MNIST",
+   "kind": "classification",
+   "rows": 70000,
+   "features": 784,
+   "classes": 10,
+   "suite": "amlb-clf",
+   "reason": "same shape as test task 3573 (mnist_784)"
+  },
+  {
+   "task_id": 359969,
+   "dataset_id": 1475,
+   "name": "first-order-theorem-proving",
+   "kind": "classification",
+   "rows": 6118,
+   "features": 51,
+   "classes": 6,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 9985 (first-order-theorem-proving)"
+  },
+  {
+   "task_id": 359970,
+   "dataset_id": 4538,
+   "name": "GesturePhaseSegmentationProcessed",
+   "kind": "classification",
+   "rows": 9873,
+   "features": 32,
+   "classes": 5,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 14969 (GesturePhaseSegmentationProcessed)"
+  },
+  {
+   "task_id": 189922,
+   "dataset_id": 41158,
+   "name": "gina",
+   "kind": "classification",
+   "rows": 3153,
+   "features": 970,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "suspected overlap: built from MNIST digits (CC18 mnist_784)"
+  },
+  {
+   "task_id": 359988,
+   "dataset_id": 41159,
+   "name": "guillermo",
+   "kind": "classification",
+   "rows": 20000,
+   "features": 4296,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "4296 features > 2000"
+  },
+  {
+   "task_id": 360114,
+   "dataset_id": 42769,
+   "name": "Higgs",
+   "kind": "classification",
+   "rows": 1000000,
+   "features": 28,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359966,
+   "dataset_id": 40978,
+   "name": "Internet-Advertisements",
+   "kind": "classification",
+   "rows": 3279,
+   "features": 1558,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 167125 (Internet-Advertisements)"
+  },
+  {
+   "task_id": 211979,
+   "dataset_id": 41168,
+   "name": "jannis",
+   "kind": "classification",
+   "rows": 83733,
+   "features": 54,
+   "classes": 4,
+   "suite": "amlb-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359981,
+   "dataset_id": 41027,
+   "name": "jungle_chess_2pcs_raw_endgame_complete",
+   "kind": "classification",
+   "rows": 44819,
+   "features": 6,
+   "classes": 3,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 167119 (jungle_chess_2pcs_raw_endgame_complete)"
+  },
+  {
+   "task_id": 359962,
+   "dataset_id": 1067,
+   "name": "kc1",
+   "kind": "classification",
+   "rows": 2109,
+   "features": 21,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 3917 (kc1)"
+  },
+  {
+   "task_id": 360975,
+   "dataset_id": 43072,
+   "name": "KDDCup09-Upselling",
+   "kind": "classification",
+   "rows": 50000,
+   "features": 14891,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "14891 features > 2000"
+  },
+  {
+   "task_id": 359965,
+   "dataset_id": 3,
+   "name": "kr-vs-kp",
+   "kind": "classification",
+   "rows": 3196,
+   "features": 36,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 3 (kr-vs-kp)"
+  },
+  {
+   "task_id": 190392,
+   "dataset_id": 41144,
+   "name": "madeline",
+   "kind": "classification",
+   "rows": 3140,
+   "features": 259,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "suspected overlap: artificial AutoML-challenge set generated like madelon (CC18 madelon)"
+  },
+  {
+   "task_id": 359961,
+   "dataset_id": 12,
+   "name": "mfeat-factors",
+   "kind": "classification",
+   "rows": 2000,
+   "features": 216,
+   "classes": 10,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 12 (mfeat-factors)"
+  },
+  {
+   "task_id": 359990,
+   "dataset_id": 41150,
+   "name": "MiniBooNE",
+   "kind": "classification",
+   "rows": 130064,
+   "features": 50,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359980,
+   "dataset_id": 1486,
+   "name": "nomao",
+   "kind": "classification",
+   "rows": 34465,
+   "features": 118,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 9977 (nomao)"
+  },
+  {
+   "task_id": 167120,
+   "dataset_id": 23517,
+   "name": "numerai28.6",
+   "kind": "classification",
+   "rows": 96320,
+   "features": 21,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 167120 (numerai28.6)"
+  },
+  {
+   "task_id": 190137,
+   "dataset_id": 1487,
+   "name": "ozone-level-8hr",
+   "kind": "classification",
+   "rows": 2534,
+   "features": 72,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 9978 (ozone-level-8hr)"
+  },
+  {
+   "task_id": 359958,
+   "dataset_id": 1049,
+   "name": "pc4",
+   "kind": "classification",
+   "rows": 1458,
+   "features": 37,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 3902 (pc4)"
+  },
+  {
+   "task_id": 359971,
+   "dataset_id": 4534,
+   "name": "PhishingWebsites",
+   "kind": "classification",
+   "rows": 11055,
+   "features": 30,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 14952 (PhishingWebsites)"
+  },
+  {
+   "task_id": 168350,
+   "dataset_id": 1489,
+   "name": "phoneme",
+   "kind": "classification",
+   "rows": 5404,
+   "features": 5,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 9952 (phoneme)"
+  },
+  {
+   "task_id": 359956,
+   "dataset_id": 1494,
+   "name": "qsar-biodeg",
+   "kind": "classification",
+   "rows": 1055,
+   "features": 41,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 9957 (qsar-biodeg)"
+  },
+  {
+   "task_id": 359989,
+   "dataset_id": 41161,
+   "name": "riccardo",
+   "kind": "classification",
+   "rows": 20000,
+   "features": 4296,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "4296 features > 2000"
+  },
+  {
+   "task_id": 359986,
+   "dataset_id": 41165,
+   "name": "robert",
+   "kind": "classification",
+   "rows": 10000,
+   "features": 7200,
+   "classes": 10,
+   "suite": "amlb-clf",
+   "reason": "7200 features > 2000"
+  },
+  {
+   "task_id": 359975,
+   "dataset_id": 40900,
+   "name": "Satellite",
+   "kind": "classification",
+   "rows": 5100,
+   "features": 36,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "known re-upload of test task 2074 (satimage)"
+  },
+  {
+   "task_id": 359963,
+   "dataset_id": 40984,
+   "name": "segment",
+   "kind": "classification",
+   "rows": 2310,
+   "features": 19,
+   "classes": 7,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 146822 (segment)"
+  },
+  {
+   "task_id": 168784,
+   "dataset_id": 40982,
+   "name": "steel-plates-fault",
+   "kind": "classification",
+   "rows": 1941,
+   "features": 27,
+   "classes": 7,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 146817 (steel-plates-fault)"
+  },
+  {
+   "task_id": 359972,
+   "dataset_id": 41146,
+   "name": "sylvine",
+   "kind": "classification",
+   "rows": 5124,
+   "features": 20,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "suspected overlap: derived from forest covertype, which the dev suite already has"
+  },
+  {
+   "task_id": 190146,
+   "dataset_id": 54,
+   "name": "vehicle",
+   "kind": "classification",
+   "rows": 846,
+   "features": 18,
+   "classes": 4,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 53 (vehicle)"
+  },
+  {
+   "task_id": 146820,
+   "dataset_id": 40983,
+   "name": "wilt",
+   "kind": "classification",
+   "rows": 4839,
+   "features": 5,
+   "classes": 2,
+   "suite": "amlb-clf",
+   "reason": "same dataset id as test task 146820 (wilt)"
+  },
+  {
+   "task_id": 359974,
+   "dataset_id": 40498,
+   "name": "wine-quality-white",
+   "kind": "classification",
+   "rows": 4898,
+   "features": 11,
+   "classes": 7,
+   "suite": "amlb-clf",
+   "reason": "same shape as test task 361249 (white_wine)"
+  },
+  {
+   "task_id": 359944,
+   "dataset_id": 42726,
+   "name": "abalone",
+   "kind": "regression",
+   "rows": 4177,
+   "features": 8,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "same name as test task 361234 (abalone)"
+  },
+  {
+   "task_id": 233212,
+   "dataset_id": 42571,
+   "name": "Allstate_Claims_Severity",
+   "kind": "regression",
+   "rows": 188318,
+   "features": 130,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359938,
+   "dataset_id": 42688,
+   "name": "Brazilian_houses",
+   "kind": "regression",
+   "rows": 10692,
+   "features": 12,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "same name as test task 361267 (brazilian_houses)"
+  },
+  {
+   "task_id": 233211,
+   "dataset_id": 42225,
+   "name": "diamonds",
+   "kind": "regression",
+   "rows": 53940,
+   "features": 9,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "same name as test task 361257 (diamonds)"
+  },
+  {
+   "task_id": 359936,
+   "dataset_id": 216,
+   "name": "elevators",
+   "kind": "regression",
+   "rows": 16599,
+   "features": 18,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359952,
+   "dataset_id": 574,
+   "name": "house_16H",
+   "kind": "regression",
+   "rows": 22784,
+   "features": 16,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359949,
+   "dataset_id": 42731,
+   "name": "house_sales",
+   "kind": "regression",
+   "rows": 21613,
+   "features": 21,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "known re-upload of test task 361266 (kings_county)"
+  },
+  {
+   "task_id": 233215,
+   "dataset_id": 42570,
+   "name": "Mercedes_Benz_Greener_Manufacturing",
+   "kind": "regression",
+   "rows": 4209,
+   "features": 376,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 167210,
+   "dataset_id": 41021,
+   "name": "Moneyball",
+   "kind": "regression",
+   "rows": 1232,
+   "features": 14,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "same dataset id as test task 361616 (Moneyball)"
+  },
+  {
+   "task_id": 359943,
+   "dataset_id": 42729,
+   "name": "nyc-taxi-green-dec-2016",
+   "kind": "regression",
+   "rows": 581835,
+   "features": 18,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359946,
+   "dataset_id": 201,
+   "name": "pol",
+   "kind": "regression",
+   "rows": 15000,
+   "features": 48,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 233214,
+   "dataset_id": 42572,
+   "name": "Santander_transaction_value",
+   "kind": "regression",
+   "rows": 4459,
+   "features": 4991,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "4991 features > 2000"
+  },
+  {
+   "task_id": 359932,
+   "dataset_id": 541,
+   "name": "socmob",
+   "kind": "regression",
+   "rows": 1156,
+   "features": 5,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "same name as test task 361264 (socmob)"
+  },
+  {
+   "task_id": 359933,
+   "dataset_id": 507,
+   "name": "space_ga",
+   "kind": "regression",
+   "rows": 3107,
+   "features": 6,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "same name as test task 361623 (space_ga)"
+  },
+  {
+   "task_id": 359939,
+   "dataset_id": 422,
+   "name": "topo_2_1",
+   "kind": "regression",
+   "rows": 8885,
+   "features": 266,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 359935,
+   "dataset_id": 287,
+   "name": "wine_quality",
+   "kind": "regression",
+   "rows": 6497,
+   "features": 11,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "known re-upload of test task 361249 (white_wine)"
+  },
+  {
+   "task_id": 359940,
+   "dataset_id": 416,
+   "name": "yprop_4_1",
+   "kind": "regression",
+   "rows": 8885,
+   "features": 251,
+   "classes": 0,
+   "suite": "amlb-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361113,
+   "dataset_id": 44159,
+   "name": "covertype",
+   "kind": "classification",
+   "rows": 423680,
+   "features": 54,
+   "classes": 2,
+   "suite": "grinsztajn-cat-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361283,
+   "dataset_id": 45036,
+   "name": "default-of-credit-card-clients",
+   "kind": "classification",
+   "rows": 13272,
+   "features": 21,
+   "classes": 2,
+   "suite": "grinsztajn-cat-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361110,
+   "dataset_id": 44156,
+   "name": "electricity",
+   "kind": "classification",
+   "rows": 38474,
+   "features": 8,
+   "classes": 2,
+   "suite": "grinsztajn-cat-clf",
+   "reason": "same name as test task 219 (electricity)"
+  },
+  {
+   "task_id": 361111,
+   "dataset_id": 44157,
+   "name": "eye_movements",
+   "kind": "classification",
+   "rows": 7608,
+   "features": 23,
+   "classes": 2,
+   "suite": "grinsztajn-cat-clf",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361288,
+   "dataset_id": 45042,
+   "name": "abalone",
+   "kind": "regression",
+   "rows": 4177,
+   "features": 8,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "same name as test task 361234 (abalone)"
+  },
+  {
+   "task_id": 361099,
+   "dataset_id": 44063,
+   "name": "Bike_Sharing_Demand",
+   "kind": "regression",
+   "rows": 17379,
+   "features": 11,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361098,
+   "dataset_id": 44062,
+   "name": "Brazilian_houses",
+   "kind": "regression",
+   "rows": 10692,
+   "features": 11,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "same name as test task 361267 (brazilian_houses)"
+  },
+  {
+   "task_id": 361291,
+   "dataset_id": 45045,
+   "name": "delays_zurich_transport",
+   "kind": "regression",
+   "rows": 5465575,
+   "features": 11,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361096,
+   "dataset_id": 44059,
+   "name": "diamonds",
+   "kind": "regression",
+   "rows": 53940,
+   "features": 9,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "same name as test task 361257 (diamonds)"
+  },
+  {
+   "task_id": 361102,
+   "dataset_id": 44066,
+   "name": "house_sales",
+   "kind": "regression",
+   "rows": 21613,
+   "features": 17,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "known re-upload of test task 361266 (kings_county)"
+  },
+  {
+   "task_id": 361294,
+   "dataset_id": 45048,
+   "name": "medical_charges",
+   "kind": "regression",
+   "rows": 163065,
+   "features": 3,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361101,
+   "dataset_id": 44065,
+   "name": "nyc-taxi-green-dec-2016",
+   "kind": "regression",
+   "rows": 581835,
+   "features": 16,
+   "classes": 0,
+   "suite": "grinsztajn-cat-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361066,
+   "dataset_id": 44126,
+   "name": "bank-marketing",
+   "kind": "classification",
+   "rows": 10578,
+   "features": 7,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf",
+   "reason": "same name as test task 14965 (bank-marketing)"
+  },
+  {
+   "task_id": 361276,
+   "dataset_id": 45019,
+   "name": "Bioresponse",
+   "kind": "classification",
+   "rows": 3434,
+   "features": 419,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf",
+   "reason": "same name as test task 9910 (Bioresponse)"
+  },
+  {
+   "task_id": 361277,
+   "dataset_id": 45028,
+   "name": "california",
+   "kind": "classification",
+   "rows": 20634,
+   "features": 8,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf",
+   "reason": "known re-upload of test task 361255 (california_housing)"
+  },
+  {
+   "task_id": 361060,
+   "dataset_id": 44120,
+   "name": "electricity",
+   "kind": "classification",
+   "rows": 38474,
+   "features": 7,
+   "classes": 2,
+   "suite": "grinsztajn-num-clf",
+   "reason": "same name as test task 219 (electricity)"
+  },
+  {
+   "task_id": 361280,
+   "dataset_id": 45033,
+   "name": "abalone",
+   "kind": "regression",
+   "rows": 4177,
+   "features": 7,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "same name as test task 361234 (abalone)"
+  },
+  {
+   "task_id": 361081,
+   "dataset_id": 44141,
+   "name": "Brazilian_houses",
+   "kind": "regression",
+   "rows": 10692,
+   "features": 8,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "same name as test task 361267 (brazilian_houses)"
+  },
+  {
+   "task_id": 361072,
+   "dataset_id": 44132,
+   "name": "cpu_act",
+   "kind": "regression",
+   "rows": 8192,
+   "features": 21,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "known re-upload of test task 361256 (cpu_activity)"
+  },
+  {
+   "task_id": 361080,
+   "dataset_id": 44140,
+   "name": "diamonds",
+   "kind": "regression",
+   "rows": 53940,
+   "features": 6,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "same name as test task 361257 (diamonds)"
+  },
+  {
+   "task_id": 361079,
+   "dataset_id": 44139,
+   "name": "house_16H",
+   "kind": "regression",
+   "rows": 22784,
+   "features": 16,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361084,
+   "dataset_id": 44144,
+   "name": "house_sales",
+   "kind": "regression",
+   "rows": 21613,
+   "features": 15,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "known re-upload of test task 361266 (kings_county)"
+  },
+  {
+   "task_id": 361078,
+   "dataset_id": 44138,
+   "name": "houses",
+   "kind": "regression",
+   "rows": 20640,
+   "features": 8,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "known re-upload of test task 361255 (california_housing)"
+  },
+  {
+   "task_id": 361087,
+   "dataset_id": 44147,
+   "name": "MiamiHousing2016",
+   "kind": "regression",
+   "rows": 13932,
+   "features": 13,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "known re-upload of test task 361260 (miami_housing)"
+  },
+  {
+   "task_id": 361073,
+   "dataset_id": 44133,
+   "name": "pol",
+   "kind": "regression",
+   "rows": 15000,
+   "features": 26,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "already in the dev suite from another suite"
+  },
+  {
+   "task_id": 361088,
+   "dataset_id": 44148,
+   "name": "superconduct",
+   "kind": "regression",
+   "rows": 21263,
+   "features": 79,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "known re-upload of test task 361242 (superconductivity)"
+  },
+  {
+   "task_id": 361076,
+   "dataset_id": 44136,
+   "name": "wine_quality",
+   "kind": "regression",
+   "rows": 6497,
+   "features": 11,
+   "classes": 0,
+   "suite": "grinsztajn-num-reg",
+   "reason": "known re-upload of test task 361249 (white_wine)"
+  }
+ ],
+ "test_tasks": [
+  {
+   "task_id": 3,
+   "dataset_id": 3,
+   "name": "kr-vs-kp",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 6,
+   "dataset_id": 6,
+   "name": "letter",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 11,
+   "dataset_id": 11,
+   "name": "balance-scale",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 12,
+   "dataset_id": 12,
+   "name": "mfeat-factors",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 14,
+   "dataset_id": 14,
+   "name": "mfeat-fourier",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 15,
+   "dataset_id": 15,
+   "name": "breast-w",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 16,
+   "dataset_id": 16,
+   "name": "mfeat-karhunen",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 18,
+   "dataset_id": 18,
+   "name": "mfeat-morphological",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 22,
+   "dataset_id": 22,
+   "name": "mfeat-zernike",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 23,
+   "dataset_id": 23,
+   "name": "cmc",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 28,
+   "dataset_id": 28,
+   "name": "optdigits",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 29,
+   "dataset_id": 29,
+   "name": "credit-approval",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 31,
+   "dataset_id": 31,
+   "name": "credit-g",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 32,
+   "dataset_id": 32,
+   "name": "pendigits",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 37,
+   "dataset_id": 37,
+   "name": "diabetes",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 43,
+   "dataset_id": 44,
+   "name": "spambase",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 45,
+   "dataset_id": 46,
+   "name": "splice",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 49,
+   "dataset_id": 50,
+   "name": "tic-tac-toe",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 53,
+   "dataset_id": 54,
+   "name": "vehicle",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 219,
+   "dataset_id": 151,
+   "name": "electricity",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 2074,
+   "dataset_id": 182,
+   "name": "satimage",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 2079,
+   "dataset_id": 188,
+   "name": "eucalyptus",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3021,
+   "dataset_id": 38,
+   "name": "sick",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3022,
+   "dataset_id": 307,
+   "name": "vowel",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3481,
+   "dataset_id": 300,
+   "name": "isolet",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3549,
+   "dataset_id": 458,
+   "name": "analcatdata_authorship",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3560,
+   "dataset_id": 469,
+   "name": "analcatdata_dmft",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3573,
+   "dataset_id": 554,
+   "name": "mnist_784",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3902,
+   "dataset_id": 1049,
+   "name": "pc4",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3903,
+   "dataset_id": 1050,
+   "name": "pc3",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3904,
+   "dataset_id": 1053,
+   "name": "jm1",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3913,
+   "dataset_id": 1063,
+   "name": "kc2",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3917,
+   "dataset_id": 1067,
+   "name": "kc1",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 3918,
+   "dataset_id": 1068,
+   "name": "pc1",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 7592,
+   "dataset_id": 1590,
+   "name": "adult",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9910,
+   "dataset_id": 4134,
+   "name": "Bioresponse",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9946,
+   "dataset_id": 1510,
+   "name": "wdbc",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9952,
+   "dataset_id": 1489,
+   "name": "phoneme",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9957,
+   "dataset_id": 1494,
+   "name": "qsar-biodeg",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9960,
+   "dataset_id": 1497,
+   "name": "wall-robot-navigation",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9964,
+   "dataset_id": 1501,
+   "name": "semeion",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9971,
+   "dataset_id": 1480,
+   "name": "ilpd",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9976,
+   "dataset_id": 1485,
+   "name": "madelon",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9977,
+   "dataset_id": 1486,
+   "name": "nomao",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9978,
+   "dataset_id": 1487,
+   "name": "ozone-level-8hr",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9981,
+   "dataset_id": 1468,
+   "name": "cnae-9",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 9985,
+   "dataset_id": 1475,
+   "name": "first-order-theorem-proving",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 10093,
+   "dataset_id": 1462,
+   "name": "banknote-authentication",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 10101,
+   "dataset_id": 1464,
+   "name": "blood-transfusion-service-center",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 14952,
+   "dataset_id": 4534,
+   "name": "PhishingWebsites",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 14954,
+   "dataset_id": 6332,
+   "name": "cylinder-bands",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 14965,
+   "dataset_id": 1461,
+   "name": "bank-marketing",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 14969,
+   "dataset_id": 4538,
+   "name": "GesturePhaseSegmentationProcessed",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 14970,
+   "dataset_id": 1478,
+   "name": "har",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 125920,
+   "dataset_id": 23381,
+   "name": "dresses-sales",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 125922,
+   "dataset_id": 40499,
+   "name": "texture",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146195,
+   "dataset_id": 40668,
+   "name": "connect-4",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146800,
+   "dataset_id": 40966,
+   "name": "MiceProtein",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146817,
+   "dataset_id": 40982,
+   "name": "steel-plates-fault",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146819,
+   "dataset_id": 40994,
+   "name": "climate-model-simulation-crashes",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146820,
+   "dataset_id": 40983,
+   "name": "wilt",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146821,
+   "dataset_id": 40975,
+   "name": "car",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146822,
+   "dataset_id": 40984,
+   "name": "segment",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146824,
+   "dataset_id": 40979,
+   "name": "mfeat-pixel",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 146825,
+   "dataset_id": 40996,
+   "name": "Fashion-MNIST",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 167119,
+   "dataset_id": 41027,
+   "name": "jungle_chess_2pcs_raw_endgame_complete",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 167120,
+   "dataset_id": 23517,
+   "name": "numerai28.6",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 167121,
+   "dataset_id": 40923,
+   "name": "Devnagari-Script",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 167124,
+   "dataset_id": 40927,
+   "name": "CIFAR_10",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 167125,
+   "dataset_id": 40978,
+   "name": "Internet-Advertisements",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 167140,
+   "dataset_id": 40670,
+   "name": "dna",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 167141,
+   "dataset_id": 40701,
+   "name": "churn",
+   "suite": "cc18"
+  },
+  {
+   "task_id": 361234,
+   "dataset_id": 44956,
+   "name": "abalone",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361235,
+   "dataset_id": 44957,
+   "name": "airfoil_self_noise",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361236,
+   "dataset_id": 44958,
+   "name": "auction_verification",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361237,
+   "dataset_id": 44959,
+   "name": "concrete_compressive_strength",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361241,
+   "dataset_id": 44963,
+   "name": "physiochemical_protein",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361242,
+   "dataset_id": 44964,
+   "name": "superconductivity",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361243,
+   "dataset_id": 44965,
+   "name": "geographical_origin_of_music",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361244,
+   "dataset_id": 44966,
+   "name": "solar_flare",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361247,
+   "dataset_id": 44969,
+   "name": "naval_propulsion_plant",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361249,
+   "dataset_id": 44971,
+   "name": "white_wine",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361250,
+   "dataset_id": 44972,
+   "name": "red_wine",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361251,
+   "dataset_id": 44973,
+   "name": "grid_stability",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361252,
+   "dataset_id": 44974,
+   "name": "video_transcoding",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361253,
+   "dataset_id": 44975,
+   "name": "wave_energy",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361254,
+   "dataset_id": 44976,
+   "name": "sarcos",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361255,
+   "dataset_id": 44977,
+   "name": "california_housing",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361256,
+   "dataset_id": 44978,
+   "name": "cpu_activity",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361257,
+   "dataset_id": 44979,
+   "name": "diamonds",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361258,
+   "dataset_id": 44980,
+   "name": "kin8nm",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361259,
+   "dataset_id": 44981,
+   "name": "pumadyn32nh",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361260,
+   "dataset_id": 44983,
+   "name": "miami_housing",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361261,
+   "dataset_id": 44984,
+   "name": "cps88wages",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361264,
+   "dataset_id": 44987,
+   "name": "socmob",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361266,
+   "dataset_id": 44989,
+   "name": "kings_county",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361267,
+   "dataset_id": 44990,
+   "name": "brazilian_houses",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361268,
+   "dataset_id": 44992,
+   "name": "fps_benchmark",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361269,
+   "dataset_id": 44993,
+   "name": "health_insurance",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361272,
+   "dataset_id": 45012,
+   "name": "fifa",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361616,
+   "dataset_id": 41021,
+   "name": "Moneyball",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361617,
+   "dataset_id": 44960,
+   "name": "energy_efficiency",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361618,
+   "dataset_id": 44962,
+   "name": "forest_fires",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361619,
+   "dataset_id": 44967,
+   "name": "student_performance_por",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361621,
+   "dataset_id": 44970,
+   "name": "QSAR_fish_toxicity",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361622,
+   "dataset_id": 44994,
+   "name": "cars",
+   "suite": "ctr23"
+  },
+  {
+   "task_id": 361623,
+   "dataset_id": 45402,
+   "name": "space_ga",
+   "suite": "ctr23"
+  }
+ ]
+}

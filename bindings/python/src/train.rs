@@ -325,7 +325,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                 // Update max_bin if categories exceed current max.
                 let cat_max_bin = (num_unique - 1) as u16;
                 if cat_max_bin > prepared.binned_matrix.max_bin {
-                    prepared.binned_matrix.max_bin = cat_max_bin;
+                    prepared.binned_matrix.set_max_bin(cat_max_bin);
                 }
 
                 native_cat_infos.push(CategoricalFeatureInfo {
@@ -379,6 +379,14 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                 need_dense_values,
                 continuous_binning_max_bins,
             )?;
+            // Mirror the training matrix: linear leaves evaluate raw feature values,
+            // but with `need_dense_values` the prepared matrix holds bin indices.
+            // Without this the in-training validation curve (and so early stopping
+            // and the auto-rounds holdout) scores linear leaves on bin indices.
+            if is_linear_leaf {
+                prepared_validation.dataset.matrix =
+                    DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
+            }
 
             if !categorical_specs.is_empty() {
                 if validation_categorical_values_list.len() != categorical_specs.len() {
@@ -403,7 +411,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                         let num_unique = cat_to_id.len();
                         let cat_max_bin = (num_unique - 1) as u16;
                         if cat_max_bin > prepared_validation.binned_matrix.max_bin {
-                            prepared_validation.binned_matrix.max_bin = cat_max_bin;
+                            prepared_validation.binned_matrix.set_max_bin(cat_max_bin);
                         }
                         for (row_idx, cat_name) in val_cats.iter().enumerate() {
                             if row_idx < val_row_count {

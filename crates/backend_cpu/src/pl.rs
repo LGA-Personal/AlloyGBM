@@ -17,7 +17,8 @@
 use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
     BinnedMatrix, LinearFeatureHistogram, LinearFeatureScaler, LinearHistogramBin, LinearLeaf,
-    MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, NodeStats, SplitCandidate, pl_matrix_index,
+    MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, MAX_PL_SLOPE_REGRESSORS, NodeStats, SplitCandidate,
+    pl_matrix_index,
 };
 use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
@@ -77,6 +78,50 @@ fn effective_pl_ridge(
     }
     let floor = PL_RELATIVE_RIDGE_FLOOR * (trace / d as f64);
     Some(f64::from(l2_lambda).max(floor))
+}
+
+/// Slope prior, relative to the leaf's hessian sum.
+///
+/// The PL system's last column is the intercept, so the leaf's hessian sum
+/// `H` is `xt_hx[d][d]`. Adding `PL_SLOPE_PRIOR · H` to every slope diagonal
+/// (not the intercept's) shrinks a standardized slope by `var / (var + c)`,
+/// where `var` is the regressor's hessian-weighted spread inside the leaf.
+/// Wide leaves keep their slopes; narrow leaves, whose slopes are noisy and
+/// extrapolate badly, are pulled toward a constant leaf.
+///
+/// Calibrated on the dev suite (`benchmarks/dev_suite.py`, 67 tasks): loss is
+/// flat for c in [0.3, 3] and much worse at 0 (1.36x the constant-leaf loss),
+/// where sign-like gradients (quantile, narrow leaves) give slopes ∝ 1/width.
+/// `ALLOYGBM_EXPERIMENT_PL_SLOPE_PRIOR` overrides it for A/B runs.
+const PL_SLOPE_PRIOR: f64 = 1.0;
+
+fn pl_slope_prior() -> f64 {
+    static PRIOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PRIOR.get_or_init(|| {
+        std::env::var("ALLOYGBM_EXPERIMENT_PL_SLOPE_PRIOR")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(PL_SLOPE_PRIOR)
+    })
+}
+
+/// `xt_hx` for a `d`-slope system (intercept in slot `d`) with the slope
+/// prior added to the slope diagonals.
+fn with_slope_prior(
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+) -> [f32; MAX_PL_MATRIX_ENTRIES] {
+    let mut out = *xt_hx;
+    let prior = pl_slope_prior();
+    if prior > 0.0 && d <= MAX_PL_SLOPE_REGRESSORS {
+        let hess = f64::from(xt_hx[pl_matrix_index(d, d)]).max(0.0);
+        let add = (prior * hess) as f32;
+        for j in 0..d {
+            out[pl_matrix_index(j, j)] += add;
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -316,38 +361,64 @@ fn backward_solve_pl(
 /// Uses a compact Cholesky factorisation on the `d×d` regularised Hessian
 /// matrix. Returns `0.0` when the system is invalid, ill-conditioned, or
 /// cannot produce a finite result.
-pub fn compute_pl_gain_one_side(
+#[cfg(test)]
+fn compute_pl_gain_one_side(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
     d: usize,
     l2_lambda: f32,
 ) -> f32 {
+    try_pl_gain_one_side(xtg, xt_hx, d, l2_lambda).unwrap_or(0.0)
+}
+
+fn try_pl_gain_one_side(
+    xtg: &[f32; MAX_PL_REGRESSORS],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> Option<f32> {
     if d == 0 {
-        return 0.0;
+        return Some(0.0);
     }
 
-    let l = match factor_regularized_pl_hessian(xt_hx, d, l2_lambda) {
-        Some(l) => l,
-        None => return 0.0,
-    };
-    let y = match forward_solve_pl(&l, xtg, d) {
-        Some(y) => y,
-        None => return 0.0,
-    };
+    let l = factor_regularized_pl_hessian(xt_hx, d, l2_lambda)?;
+    let y = forward_solve_pl(&l, xtg, d)?;
 
     let sq = y[..d].iter().fold(0.0_f64, |acc, &yi| acc + yi * yi);
     if !sq.is_finite() {
-        return 0.0;
+        return None;
     }
     let gain = 0.5_f64 * sq;
     if !gain.is_finite() {
-        return 0.0;
+        return None;
     }
     let gain_f32 = gain as f32;
     if !gain_f32.is_finite() {
-        return 0.0;
+        return None;
     }
-    gain_f32
+    Some(gain_f32)
+}
+
+/// Gain of one side of a split for a `d`-slope leaf (intercept in slot `d`),
+/// scored on the same system `solve_pl_leaf` solves. When that system cannot
+/// be solved the leaf falls back to the scalar Newton intercept, so the gain
+/// falls back to the scalar gain `0.5 · G² / (H + λ)` to match it.
+fn pl_side_gain(
+    xtg: &[f32; MAX_PL_REGRESSORS],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> f32 {
+    try_pl_gain_one_side(xtg, &with_slope_prior(xt_hx, d), d + 1, l2_lambda).unwrap_or_else(|| {
+        let g = f64::from(xtg[d]);
+        let h = f64::from(xt_hx[pl_matrix_index(d, d)]) + f64::from(l2_lambda);
+        let gain = 0.5 * g * g / h;
+        if h > 0.0 && gain.is_finite() {
+            gain as f32
+        } else {
+            0.0
+        }
+    })
 }
 
 /// Find the best numeric split for a single feature using the PL gain criterion.
@@ -378,7 +449,7 @@ pub(crate) fn best_split_linear_for_bins(
     ctx: &LinearContext,
 ) -> Option<SplitCandidate> {
     let d = ctx.d();
-    if d == 0 || bins.len() < 2 {
+    if d == 0 || d > MAX_PL_SLOPE_REGRESSORS || bins.len() < 2 {
         return None;
     }
     let missing_bin_idx = options.missing_bin_index;
@@ -418,7 +489,7 @@ pub(crate) fn best_split_linear_for_bins(
     };
 
     // Parent gain (subtracted from every candidate to get net gain).
-    let parent_gain = compute_pl_gain_one_side(&p_xtg, &p_xt_hx, d, ctx.l2_lambda);
+    let parent_gain = pl_side_gain(&p_xtg, &p_xt_hx, d, ctx.l2_lambda);
 
     // ── Non-missing totals (for right-side via subtraction) ──────────────────
     let scan_limit = bins.len().min(missing_bin_idx);
@@ -523,8 +594,8 @@ pub(crate) fn best_split_linear_for_bins(
                 continue;
             }
 
-            let gain = compute_pl_gain_one_side(&eff_lxtg, &eff_lxthx, d, ctx.l2_lambda)
-                + compute_pl_gain_one_side(&eff_rxtg, &eff_rxthx, d, ctx.l2_lambda)
+            let gain = pl_side_gain(&eff_lxtg, &eff_lxthx, d, ctx.l2_lambda)
+                + pl_side_gain(&eff_rxtg, &eff_rxthx, d, ctx.l2_lambda)
                 - parent_gain;
 
             if gain > best_gain {
@@ -723,13 +794,14 @@ fn linear_leaf_l2_penalty(leaf: &LinearLeaf, learning_rate: f32, l2_lambda: f32)
         .then_some(0.5 * f64::from(l2_lambda) * squared_norm)
 }
 
-/// Measure the second-order reduction delivered by the actual independently
-/// solved PL intercept and slope updates, relative to an unsplit PL leaf.
+/// Measure the second-order reduction delivered by the actual solved PL
+/// intercept and slope updates, relative to an unsplit PL leaf.
 ///
-/// The historical matrix gain omits intercept/slope cross terms. That makes it
-/// a useful threshold scanner, but it can overstate a candidate whose solved
-/// updates reinforce each other. This final guard evaluates the model that will
-/// actually be committed without retaining any additional histogram storage.
+/// The matrix gain used by the threshold scan solves intercept and slopes
+/// jointly, but it scores histogram statistics rather than the committed
+/// leaves (learning rate, output ceilings, fallbacks). This final guard
+/// evaluates the model that will actually be committed without retaining any
+/// additional histogram storage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn realized_pl_split_gain(
     binned_matrix: &BinnedMatrix,
@@ -812,43 +884,44 @@ pub(crate) fn realized_pl_split_gain(
 /// Returns the weight vector `[α_0, …, α_{d-1}]`. On an invalid,
 /// ill-conditioned, or non-finite system, returns all-zero (falls back to a
 /// scalar leaf).
+#[cfg_attr(not(test), allow(dead_code))]
 fn cholesky_solve_alpha(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
     d: usize,
     l2_lambda: f32,
 ) -> [f32; MAX_PL_REGRESSORS] {
-    if d == 0 {
-        return [0.0; MAX_PL_REGRESSORS];
-    }
+    try_cholesky_solve_alpha(xtg, xt_hx, d, l2_lambda).unwrap_or([0.0; MAX_PL_REGRESSORS])
+}
 
-    let l = match factor_regularized_pl_hessian(xt_hx, d, l2_lambda) {
-        Some(l) => l,
-        None => return [0.0; MAX_PL_REGRESSORS],
-    };
-    let mut y = match forward_solve_pl(&l, xtg, d) {
-        Some(y) => y,
-        None => return [0.0; MAX_PL_REGRESSORS],
-    };
+/// [`cholesky_solve_alpha`] that reports an unsolvable system as `None`.
+fn try_cholesky_solve_alpha(
+    xtg: &[f32; MAX_PL_REGRESSORS],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> Option<[f32; MAX_PL_REGRESSORS]> {
+    if d == 0 {
+        return None;
+    }
+    let l = factor_regularized_pl_hessian(xt_hx, d, l2_lambda)?;
+    let mut y = forward_solve_pl(&l, xtg, d)?;
     for yi in &mut y[..d] {
         if !yi.is_finite() {
-            return [0.0; MAX_PL_REGRESSORS];
+            return None;
         }
         *yi = -*yi;
     }
-    let alpha = match backward_solve_pl(&l, &y, d) {
-        Some(alpha) => alpha,
-        None => return [0.0; MAX_PL_REGRESSORS],
-    };
+    let alpha = backward_solve_pl(&l, &y, d)?;
     let mut alpha_f32 = [0.0_f32; MAX_PL_REGRESSORS];
     for i in 0..d {
         let value = alpha[i] as f32;
         if !value.is_finite() {
-            return [0.0; MAX_PL_REGRESSORS];
+            return None;
         }
         alpha_f32[i] = value;
     }
-    alpha_f32
+    Some(alpha_f32)
 }
 
 /// Build a [`LinearLeaf`] from the accumulated statistics for one side of a split.
@@ -874,16 +947,32 @@ pub fn solve_pl_leaf(
         return None;
     }
 
-    // Standard Newton-Raphson intercept (same formula as scalar leaves).
-    let intercept =
-        -params.learning_rate * params.grad_sum / (params.hess_sum + params.l2_lambda + LEAF_EPS);
+    if d > MAX_PL_SLOPE_REGRESSORS {
+        return None;
+    }
 
-    // Linear correction weights α* = -(XᵀHX + λI)⁻¹ Xᵀg, scaled by lr.
-    let raw_alpha = cholesky_solve_alpha(xtg, xt_hx, d, params.l2_lambda);
-    let weights: Vec<f32> = raw_alpha[..d]
-        .iter()
-        .map(|&w| params.learning_rate * w)
-        .collect();
+    // Intercept and slopes solve one ridge system, α* = -(XᵀHX + λI)⁻¹ Xᵀg,
+    // whose last column (slot `d`) is the constant 1 the histogram builders
+    // accumulate for every row. Solving them separately (a scalar Newton
+    // intercept plus slopes on uncentred regressors) let the slopes refit
+    // the leaf's mean gradient a second time. An unsolvable system keeps the
+    // scalar Newton leaf with no slopes.
+    let prior_xt_hx = with_slope_prior(xt_hx, d);
+    let (intercept, weights) =
+        match try_cholesky_solve_alpha(xtg, &prior_xt_hx, d + 1, params.l2_lambda) {
+            Some(alpha) => (
+                params.learning_rate * alpha[d],
+                alpha[..d]
+                    .iter()
+                    .map(|&w| params.learning_rate * w)
+                    .collect::<Vec<f32>>(),
+            ),
+            None => (
+                -params.learning_rate * params.grad_sum
+                    / (params.hess_sum + params.l2_lambda + LEAF_EPS),
+                vec![0.0; d],
+            ),
+        };
 
     if !intercept.is_finite() || !weights.iter().all(|weight| weight.is_finite()) {
         return None;
@@ -962,7 +1051,7 @@ pub fn solve_pl_leaf_pair_from_partitions(
     max_abs_leaf_value: f32,
 ) -> Option<(LinearLeaf, LinearLeaf)> {
     let d = regressor_features.len();
-    if d == 0 || d > MAX_PL_REGRESSORS || feature_count == 0 {
+    if d == 0 || d > MAX_PL_SLOPE_REGRESSORS || feature_count == 0 {
         return None;
     }
 
@@ -1067,6 +1156,10 @@ fn accumulate_selected_split_linear_histogram(
         bin.hess_sum += gp.hess;
         bin.count += 1;
 
+        let d = regressor_features.len();
+        if d > MAX_PL_SLOPE_REGRESSORS {
+            return None;
+        }
         let mut x = [0.0_f32; MAX_PL_REGRESSORS];
         for (slot, &feature_u32) in regressor_features.iter().enumerate() {
             let feature = feature_u32 as usize;
@@ -1076,10 +1169,12 @@ fn accumulate_selected_split_linear_histogram(
                 0.0
             };
         }
+        // Intercept column.
+        x[d] = 1.0;
 
-        for j in 0..regressor_features.len() {
+        for j in 0..=d {
             bin.xtg[j] += gp.grad * x[j];
-            for k in 0..regressor_features.len() {
+            for k in 0..=d {
                 bin.xt_hx[pl_matrix_index(j, k)] += gp.hess * x[j] * x[k];
             }
         }
@@ -1246,6 +1341,21 @@ mod tests {
     }
 
     #[test]
+    fn side_gain_falls_back_to_scalar_gain_when_the_joint_system_fails() {
+        // One slope whose diagonal is a million times the intercept's: the
+        // joint system is rejected, so the leaf (and its gain) is scalar.
+        let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        xtg[0] = 1.0;
+        xtg[1] = -2.0;
+        xt_hx[pl_matrix_index(0, 0)] = 1.0e12;
+        xt_hx[pl_matrix_index(1, 1)] = 4.0;
+        assert!(try_pl_gain_one_side(&xtg, &with_slope_prior(&xt_hx, 1), 2, 0.0).is_none());
+        let gain = pl_side_gain(&xtg, &xt_hx, 1, 1.0);
+        assert!((gain - 0.5 * 4.0 / 5.0).abs() < 1e-6, "gain = {gain}");
+    }
+
+    #[test]
     fn gain_and_linear_weights_reject_ill_conditioned_positive_definite_matrix() {
         let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
         let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
@@ -1342,7 +1452,7 @@ mod tests {
                 hess: 1.0,
             },
         ];
-        let raw_feature_values = vec![1000.0_f32, 0.0, 0.0];
+        let raw_feature_values = vec![10_000.0_f32, 0.0, 0.0];
         let scaler = LinearFeatureScaler::identity(1);
 
         let linear_fh = accumulate_selected_split_linear_histogram(

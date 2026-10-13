@@ -217,10 +217,17 @@ class TestPLRegressor:
 
         assert np.isfinite(linear_predictions).all()
         assert linear_rmse < 0.20
-        assert linear_rmse <= constant_rmse * 0.80, (
-            "linear leaves should retain their raw-scale advantage after numeric-solve changes: "
+        assert linear_rmse <= constant_rmse * 0.95, (
+            "linear leaves should keep an advantage on raw-scale features: "
             f"linear RMSE={linear_rmse:.4f}, constant RMSE={constant_rmse:.4f}"
         )
+        # Regressors are standardized internally, so the raw scale must not matter.
+        X_std = ((X - X.mean(axis=0)) / X.std(axis=0)).astype(np.float32)
+        standardized = GBMRegressor(leaf_model="linear", **common_params).fit(X_std, y)
+        standardized_rmse = float(
+            np.sqrt(np.mean((np.asarray(standardized.predict(X_std), dtype=np.float32) - y) ** 2))
+        )
+        assert linear_rmse == pytest.approx(standardized_rmse, rel=1e-3)
 
     @pytest.mark.parametrize(
         ("tree_growth", "max_leaves"),
@@ -476,3 +483,61 @@ class TestLinearLeafConditioningGuards:
         assert np.all(np.isfinite(predictions))
         train_rmse = float(np.sqrt(np.mean((predictions - y.astype(np.float64)) ** 2)))
         assert train_rmse < float(np.std(y.astype(np.float64)))
+
+
+@pytest.mark.parametrize("max_cat_threshold", [0, 8])
+def test_linear_leaf_validation_curve_matches_predict_with_categoricals(max_cat_threshold):
+    """With categorical features the validation curve must score raw values.
+
+    Regression: the validation matrix kept bin indices where linear leaves
+    read raw feature values, so the recorded curve (and with it early
+    stopping and the auto-rounds holdout) diverged from ``predict``.
+    """
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(3)
+    n = 600
+    X = rng.uniform(0.0, 10.0, size=(n, 3))
+    cat = rng.integers(0, 3, size=n)
+    y = 2.0 * X[:, 0] - X[:, 1] + 3.0 * cat + 0.1 * rng.standard_normal(n)
+    frame = pd.DataFrame(X, columns=["a", "b", "c"])
+    frame["d"] = pd.Categorical(cat, categories=[0, 1, 2])
+    X_tr, y_tr, X_va, y_va = frame.iloc[:500], y[:500], frame.iloc[500:], y[500:]
+    model = GBMRegressor(
+        leaf_model="linear",
+        n_estimators=30,
+        learning_rate=0.1,
+        max_cat_threshold=max_cat_threshold,
+        seed=0,
+    )
+    model.fit(X_tr, y_tr, eval_set=(X_va, y_va))
+    recorded = model.evals_result_["validation"]["rmse"][-1]
+    actual = float(np.sqrt(np.mean((np.asarray(model.predict(X_va)) - y_va) ** 2)))
+    assert recorded == pytest.approx(actual, rel=1e-4)
+
+
+def test_linear_leaf_early_stopping_with_categoricals_runs_past_a_few_rounds():
+    """End to end: early stopping must follow the raw-value validation curve.
+
+    Before the fix the curve scored bin indices, looked worse after a few
+    trees, and stopped the fit almost immediately.
+    """
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(4)
+    n = 1200
+    X = rng.uniform(0.0, 10.0, size=(n, 3))
+    cat = rng.integers(0, 3, size=n)
+    y = 2.0 * X[:, 0] - X[:, 1] + 3.0 * cat + np.sin(X[:, 2]) + 0.1 * rng.standard_normal(n)
+    frame = pd.DataFrame(X, columns=["a", "b", "c"])
+    frame["d"] = pd.Categorical(cat, categories=[0, 1, 2])
+    X_tr, y_tr, X_va, y_va = frame.iloc[:1000], y[:1000], frame.iloc[1000:], y[1000:]
+    model = GBMRegressor(
+        leaf_model="linear",
+        n_estimators=300,
+        learning_rate=0.05,
+        early_stopping_rounds=10,
+        seed=0,
+    )
+    model.fit(X_tr, y_tr, eval_set=(X_va, y_va))
+    assert model.best_iteration_ is not None and model.best_iteration_ >= 30
+    actual = float(np.sqrt(np.mean((np.asarray(model.predict(X_va)) - y_va) ** 2)))
+    assert actual < 0.5 * float(np.std(y_va))
