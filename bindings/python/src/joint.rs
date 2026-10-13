@@ -583,7 +583,7 @@ fn train_joint_multi_label_ranker_in_fit_pool(
             }
             let cat_max_bin = (num_categories - 1) as u16;
             if cat_max_bin > prepared.binned_matrix.max_bin {
-                prepared.binned_matrix.max_bin = cat_max_bin;
+                prepared.binned_matrix.set_max_bin(cat_max_bin);
             }
             cat_features.push(CategoricalFeatureInfo {
                 feature_index: fi,

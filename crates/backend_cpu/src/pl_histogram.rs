@@ -10,7 +10,8 @@
 use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
     BinnedMatrix, FeatureTile, GradientPair, LinearFeatureHistogram, LinearFeatureScaler,
-    LinearHistogramBin, LinearHistogramBundle, MAX_PL_REGRESSORS, NodeSlice,
+    LinearHistogramBin, LinearHistogramBundle, MAX_PL_REGRESSORS, MAX_PL_SLOPE_REGRESSORS,
+    NodeSlice,
 };
 use alloygbm_engine::{EngineError, EngineResult};
 use std::cell::RefCell;
@@ -49,9 +50,9 @@ pub(crate) fn with_shortlisted_linear_histogram<R>(
     callback: impl FnOnce(&[LinearHistogramBin]) -> R,
 ) -> EngineResult<R> {
     let d = regressor_features.len();
-    if d == 0 || d > MAX_PL_REGRESSORS {
+    if d == 0 || d > MAX_PL_SLOPE_REGRESSORS {
         return Err(EngineError::ContractViolation(format!(
-            "regressor_features.len() must be in 1..={MAX_PL_REGRESSORS}, got {d}"
+            "regressor_features.len() must be in 1..={MAX_PL_SLOPE_REGRESSORS}, got {d}"
         )));
     }
     if split_feature_index as usize >= binned_matrix.feature_count
@@ -89,9 +90,11 @@ pub(crate) fn with_shortlisted_linear_histogram<R>(
                     raw_feature_values[row_index * feature_count + feature as usize],
                 );
             }
+            // Intercept column (see `MAX_PL_SLOPE_REGRESSORS`).
+            x_array[d] = 1.0;
             let x = f32x8::from(x_array);
             bin.xtg = (f32x8::from(bin.xtg) + f32x8::splat(gradient.grad) * x).to_array();
-            for (row, &x_row) in x_array.iter().enumerate().take(d) {
+            for (row, &x_row) in x_array.iter().enumerate().take(d + 1) {
                 let base = row * MAX_PL_REGRESSORS;
                 let current: [f32; MAX_PL_REGRESSORS] = bin.xt_hx[base..base + MAX_PL_REGRESSORS]
                     .try_into()
@@ -131,9 +134,9 @@ pub fn build_linear_histograms_cpu(
     feature_count: usize,
 ) -> EngineResult<LinearHistogramBundle> {
     let d = regressor_features.len();
-    if d > MAX_PL_REGRESSORS {
+    if d > MAX_PL_SLOPE_REGRESSORS {
         return Err(EngineError::ContractViolation(format!(
-            "regressor_features.len() = {d} exceeds MAX_PL_REGRESSORS = {MAX_PL_REGRESSORS}"
+            "regressor_features.len() = {d} exceeds MAX_PL_SLOPE_REGRESSORS = {MAX_PL_SLOPE_REGRESSORS}"
         )));
     }
     if d == 0 {
@@ -199,6 +202,8 @@ pub fn build_linear_histograms_cpu(
                         0.0
                     };
                 }
+                // Intercept column (see `MAX_PL_SLOPE_REGRESSORS`).
+                x_arr[d] = 1.0;
                 let x_v = f32x8::from(x_arr);
 
                 // Xᵀg: b.xtg += g * x   (1 SIMD op).
@@ -753,30 +758,22 @@ mod tests {
                     b.grad_sum += g;
                     b.hess_sum += h;
                     b.count += 1;
+                    // Slope regressors in slots 0..d, the intercept column in slot d.
+                    let mut x = [0.0_f32; MAX_PL_REGRESSORS];
                     for (j, &feat_j_raw) in regressor_features.iter().enumerate().take(d) {
                         let feat_j = feat_j_raw as usize;
-                        let x_j = if feat_j < feature_count && row_idx < row_count {
-                            feature_scaler.scaled_value(
+                        if feat_j < feature_count && row_idx < row_count {
+                            x[j] = feature_scaler.scaled_value(
                                 feat_j_raw,
                                 raw_feature_values[row_idx * feature_count + feat_j],
-                            )
-                        } else {
-                            0.0
-                        };
-                        b.xtg[j] += g * x_j;
-                        for (k, &feat_k_raw) in
-                            regressor_features.iter().enumerate().skip(j).take(d - j)
-                        {
-                            let feat_k = feat_k_raw as usize;
-                            let x_k = if feat_k < feature_count {
-                                feature_scaler.scaled_value(
-                                    feat_k_raw,
-                                    raw_feature_values[row_idx * feature_count + feat_k],
-                                )
-                            } else {
-                                0.0
-                            };
-                            b.xt_hx[pl_matrix_index(j, k)] += h * x_j * x_k;
+                            );
+                        }
+                    }
+                    x[d] = 1.0;
+                    for j in 0..=d {
+                        b.xtg[j] += g * x[j];
+                        for k in j..=d {
+                            b.xt_hx[pl_matrix_index(j, k)] += h * x[j] * x[k];
                         }
                     }
                 }
@@ -894,14 +891,15 @@ mod tests {
                     rb.hess_sum
                 );
                 assert_eq!(sb.count, rb.count);
-                for j in 0..d {
+                // 0..=d: the intercept column in slot d is checked too.
+                for j in 0..=d {
                     assert!(
                         (sb.xtg[j] - rb.xtg[j]).abs() < 1e-3,
                         "xtg[{j}]: simd={} scalar={}",
                         sb.xtg[j],
                         rb.xtg[j]
                     );
-                    for k in j..d {
+                    for k in j..=d {
                         let idx = j * MAX_PL_REGRESSORS + k;
                         assert!(
                             (sb.xt_hx[idx] - rb.xt_hx[idx]).abs() < 1e-3,

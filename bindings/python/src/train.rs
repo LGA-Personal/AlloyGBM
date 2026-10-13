@@ -325,7 +325,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                 // Update max_bin if categories exceed current max.
                 let cat_max_bin = (num_unique - 1) as u16;
                 if cat_max_bin > prepared.binned_matrix.max_bin {
-                    prepared.binned_matrix.max_bin = cat_max_bin;
+                    prepared.binned_matrix.set_max_bin(cat_max_bin);
                 }
 
                 native_cat_infos.push(CategoricalFeatureInfo {
@@ -411,7 +411,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                         let num_unique = cat_to_id.len();
                         let cat_max_bin = (num_unique - 1) as u16;
                         if cat_max_bin > prepared_validation.binned_matrix.max_bin {
-                            prepared_validation.binned_matrix.max_bin = cat_max_bin;
+                            prepared_validation.binned_matrix.set_max_bin(cat_max_bin);
                         }
                         for (row_idx, cat_name) in val_cats.iter().enumerate() {
                             if row_idx < val_row_count {

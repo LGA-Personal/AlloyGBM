@@ -1,4 +1,4 @@
-use alloygbm_core::{CoreResult, HistogramBundle};
+use alloygbm_core::{CompactHistogramLayout, CoreResult, HistogramBundle};
 
 pub(crate) const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
 pub(crate) const PARALLEL_TILE_WORKLOAD_THRESHOLD: usize = 131_072;
@@ -30,7 +30,16 @@ pub(crate) struct BinAccumulator {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HistogramArena {
+    /// Widest feature's bin count in the current tile (the scratch length).
     pub(crate) bin_count: usize,
+    /// `tile_feature_count + 1` start offsets of each feature's bins.
+    pub(crate) offsets: Vec<usize>,
+    /// Per tile feature, the bin slot a row's bin is clamped to: a compact
+    /// feature's missing slot (`data_bins`), so the matrix-wide missing bin
+    /// lands there; `bin_count - 1` for a uniform tile, where it is a no-op.
+    pub(crate) slot_caps: Vec<usize>,
+    /// `Some(edge_limit)` while the tile uses the compact layout.
+    pub(crate) compact_edge_limit: Option<usize>,
     pub(crate) grad_sums: Vec<f32>,
     pub(crate) hess_sums: Vec<f32>,
     pub(crate) grad_sq_sums: Option<Vec<f32>>,
@@ -44,15 +53,19 @@ pub(crate) struct HistogramArena {
 
 impl HistogramArena {
     pub(crate) fn new(tile_feature_count: usize, bin_count: usize, include_grad_sq: bool) -> Self {
-        let flat_len = tile_feature_count * bin_count;
-        Self {
-            bin_count,
-            grad_sums: vec![0.0; flat_len],
-            hess_sums: vec![0.0; flat_len],
-            grad_sq_sums: include_grad_sq.then(|| vec![0.0; flat_len]),
-            counts: vec![0; flat_len],
-            scratch: vec![BinAccumulator::default(); bin_count],
-        }
+        let mut arena = Self {
+            bin_count: 0,
+            offsets: Vec::new(),
+            slot_caps: Vec::new(),
+            compact_edge_limit: None,
+            grad_sums: Vec::new(),
+            hess_sums: Vec::new(),
+            grad_sq_sums: None,
+            counts: Vec::new(),
+            scratch: Vec::new(),
+        };
+        arena.resize_for_tile(tile_feature_count, bin_count, include_grad_sq);
+        arena
     }
 
     /// Zero all accumulators without deallocating, allowing the arena to be reused.
@@ -65,15 +78,51 @@ impl HistogramArena {
         self.counts.fill(0);
     }
 
-    /// Resize the arena to handle a new tile size without unnecessary re-allocation.
-    /// Only reallocates if the new tile requires more capacity.
+    /// Resize the arena for a uniform tile (`bin_count` bins per feature)
+    /// without unnecessary re-allocation.
     pub(crate) fn resize_for_tile(
         &mut self,
         tile_feature_count: usize,
         bin_count: usize,
         include_grad_sq: bool,
     ) {
-        let flat_len = tile_feature_count * bin_count;
+        self.offsets.clear();
+        self.offsets
+            .extend((0..=tile_feature_count).map(|index| index * bin_count));
+        self.slot_caps.clear();
+        self.slot_caps
+            .resize(tile_feature_count, bin_count.saturating_sub(1));
+        self.compact_edge_limit = None;
+        self.resize_columns(bin_count, include_grad_sq);
+    }
+
+    /// Resize the arena for features `start_feature..end_feature` of a matrix
+    /// whose histograms use the compact layout.
+    pub(crate) fn resize_for_compact_tile(
+        &mut self,
+        layout: &CompactHistogramLayout,
+        start_feature: usize,
+        end_feature: usize,
+        include_grad_sq: bool,
+    ) {
+        self.offsets.clear();
+        self.slot_caps.clear();
+        self.offsets.push(0);
+        let mut widest = 0;
+        for &data_bins in &layout.data_bins[start_feature..end_feature] {
+            let data_bins = usize::from(data_bins);
+            let len = data_bins + 1;
+            widest = widest.max(len);
+            self.slot_caps.push(data_bins);
+            self.offsets
+                .push(self.offsets.last().expect("non-empty") + len);
+        }
+        self.compact_edge_limit = Some(layout.edge_limit);
+        self.resize_columns(widest, include_grad_sq);
+    }
+
+    fn resize_columns(&mut self, bin_count: usize, include_grad_sq: bool) {
+        let flat_len = *self.offsets.last().unwrap_or(&0);
         self.bin_count = bin_count;
         if self.grad_sums.len() != flat_len {
             self.grad_sums.resize(flat_len, 0.0);
@@ -86,10 +135,16 @@ impl HistogramArena {
             (Some(_), false) => self.grad_sq_sums = None,
             (None, false) => {}
         }
-        if self.scratch.len() != bin_count {
+        if self.scratch.len() < bin_count {
             self.scratch.resize(bin_count, BinAccumulator::default());
         }
         self.reset();
+    }
+
+    /// Flat index of `bin` for tile feature `local_feature`.
+    #[inline(always)]
+    pub(crate) fn slot(&self, local_feature: usize, bin: usize) -> usize {
+        self.offsets[local_feature] + bin.min(self.slot_caps[local_feature])
     }
 
     pub(crate) fn to_bundle(
@@ -97,17 +152,30 @@ impl HistogramArena {
         node_id: u32,
         start_feature: usize,
     ) -> CoreResult<HistogramBundle> {
-        let feature_count = self.grad_sums.len() / self.bin_count;
-        HistogramBundle::from_soa(
-            node_id,
-            (start_feature..start_feature + feature_count)
-                .map(|feature| feature as u32)
-                .collect(),
-            self.bin_count,
-            self.grad_sums.clone(),
-            self.hess_sums.clone(),
-            self.grad_sq_sums.clone(),
-            self.counts.clone(),
-        )
+        let feature_count = self.offsets.len() - 1;
+        let feature_indices = (start_feature..start_feature + feature_count)
+            .map(|feature| feature as u32)
+            .collect();
+        match self.compact_edge_limit {
+            Some(edge_limit) => HistogramBundle::from_soa_compact(
+                node_id,
+                feature_indices,
+                self.offsets.clone(),
+                edge_limit,
+                self.grad_sums.clone(),
+                self.hess_sums.clone(),
+                self.grad_sq_sums.clone(),
+                self.counts.clone(),
+            ),
+            None => HistogramBundle::from_soa(
+                node_id,
+                feature_indices,
+                self.bin_count,
+                self.grad_sums.clone(),
+                self.hess_sums.clone(),
+                self.grad_sq_sums.clone(),
+                self.counts.clone(),
+            ),
+        }
     }
 }
