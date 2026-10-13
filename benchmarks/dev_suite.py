@@ -146,7 +146,8 @@ def overlap_reason(entry: dict, test: Sequence[dict]) -> str | None:
             return f"same name as test task {t['task_id']} ({t['name']})"
         if tname in ALIASES.get(name, ()):
             return f"known re-upload of test task {t['task_id']} ({t['name']})"
-        if entry["rows"] and (entry["rows"], entry["features"]) == (t["rows"], t["features"]):
+        shape = (entry.get("rows"), entry.get("features"))
+        if shape[0] and shape == (t.get("rows"), t.get("features")):
             return f"same shape as test task {t['task_id']} ({t['name']})"
     return None
 
@@ -188,7 +189,8 @@ def freeze(path: Path = MANIFEST, log: Callable[[str], None] = print) -> dict:
         "max_features": MAX_FEATURES,
         "tasks": sorted(kept, key=lambda e: (e["kind"], e["name"].lower())),
         "excluded": sorted(excluded, key=lambda e: (e["suite"], e["name"].lower())),
-        "test_tasks": sorted(({k: t[k] for k in ("task_id", "dataset_id", "name", "suite")}
+        "test_tasks": sorted(({k: t[k] for k in (
+                               "task_id", "dataset_id", "name", "suite", "rows", "features")}
                               for t in test), key=lambda t: t["task_id"]),
     }
     path.write_text(json.dumps(manifest, indent=1) + "\n")
@@ -206,8 +208,12 @@ def _subsample(n: int, max_rows: int, labels: np.ndarray | None, seed: int) -> n
         _, counts = np.unique(labels, return_counts=True)
         if counts.min() < 2:
             stratify = None
-    keep, _ = train_test_split(np.arange(n), train_size=max_rows, random_state=seed,
-                               stratify=stratify)
+    try:
+        keep, _ = train_test_split(np.arange(n), train_size=max_rows, random_state=seed,
+                                   stratify=stratify)
+    except ValueError:
+        # Stratifying fails when the left-out part is smaller than the class count.
+        keep, _ = train_test_split(np.arange(n), train_size=max_rows, random_state=seed)
     return np.sort(keep)
 
 
@@ -232,7 +238,9 @@ def export(cache: Path, max_rows: int = DEFAULT_MAX_ROWS, path: Path = MANIFEST,
             X, y, is_cat, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
             if str(getattr(dataset, "format", "")).lower() == "sparse_arff":
                 # Sparse ARFF leaves implicit zeros as missing.
-                X = X.astype(float).fillna(0.0)
+                numeric = [c for c, cat in zip(X.columns, is_cat)
+                           if not cat and pd.api.types.is_numeric_dtype(X[c])]
+                X[numeric] = X[numeric].astype(float).fillna(0.0)
             labels = None if e["kind"] == "regression" else pd.Categorical(y).codes
             keep = _subsample(len(X), max_rows, labels, seed=e["task_id"])
             X, y = X.iloc[keep], y.iloc[keep]

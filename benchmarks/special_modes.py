@@ -106,8 +106,8 @@ def _summary(rows: list[dict]) -> dict:
     w = sum(r["outcome"] == "win" for r in rows)
     t = sum(r["outcome"] == "tie" for r in rows)
     l_ = sum(r["outcome"] == "loss" for r in rows)
-    vp = [r["vs_peer"] for r in rows if r["vs_peer"]]
-    bp = [r["base_vs_peer"] for r in rows if r["base_vs_peer"]]
+    vp = [r["vs_peer"] for r in rows if r["vs_peer"] is not None and r["vs_peer"] > 0]
+    bp = [r["base_vs_peer"] for r in rows if r["base_vs_peer"] is not None and r["base_vs_peer"] > 0]
     return {
         "cells": len(rows),
         "loss_ratio": math.exp(statistics.fmean(r["log_ratio"] for r in rows)),

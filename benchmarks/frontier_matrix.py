@@ -1468,7 +1468,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.dev_suite is not None:
             import dev_suite
 
-            for ds in dev_suite.load(args.dev_suite, tasks=args.dev_tasks,
+            # One split per seed: the full tier runs more seeds than the default.
+            splits = max(dev_suite.SPLITS, max(seeds, default=0) + 1)
+            for ds in dev_suite.load(args.dev_suite, splits=splits, tasks=args.dev_tasks,
                                       train_cap=args.dev_train_cap):
                 if args.cells and not any(c in ds.spec.name for c in args.cells):
                     continue

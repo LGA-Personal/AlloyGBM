@@ -83,3 +83,35 @@ def test_special_modes_pairs_arms_by_seed_and_reports_peers():
     assert abs(np.exp(row["time_log_ratio"]) - 2.0) < 1e-9
     assert abs(row["vs_peer"] - 0.8 / 0.9) < 1e-9
     assert "alloy_pl" in special_modes.render(cmp, "alloy")
+
+
+def test_overlap_tolerates_test_entries_without_shape():
+    # The committed manifest's test_tasks predate the rows/features fields.
+    bare = [{k: t[k] for k in ("task_id", "dataset_id", "name")} for t in TEST]
+    assert dev_suite.overlap_reason(_entry(), bare) is None
+    assert "dataset id" in dev_suite.overlap_reason(_entry(dataset_id=20), bare)
+
+
+def test_load_supports_more_splits_than_the_default(tmp_path):
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(120, 2))
+    np.savez_compressed(tmp_path / "7.npz", X=X, y=X[:, 0], categorical=np.array([], dtype=np.int64),
+                        kind="regression", name="toy", task_id=7, original_rows=120)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"tasks": [{"task_id": 7, "name": "toy", "kind": "regression"}]}))
+    (ds,) = dev_suite.load(tmp_path, splits=5, path=manifest, log=lambda _: None)
+    assert len(ds.folds) == 5
+
+
+def test_subsample_falls_back_when_stratifying_is_impossible():
+    # 10 classes but only 5 rows left out: stratified splitting raises.
+    labels = np.repeat(np.arange(10), 3)
+    keep = dev_suite._subsample(len(labels), 25, labels, seed=0)
+    assert len(keep) == 25 and len(set(keep)) == 25
+
+
+def test_summary_skips_non_positive_peer_ratios():
+    rows = [{"outcome": "tie", "log_ratio": 0.0, "time_log_ratio": 0.0,
+             "vs_peer": v, "base_vs_peer": None} for v in (0.0, 1.0, 4.0)]
+    summary = special_modes._summary(rows)
+    assert summary["vs_peer"] == 2.0 and summary["base_vs_peer"] is None
