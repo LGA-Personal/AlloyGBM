@@ -10,7 +10,8 @@
 use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
     BinnedMatrix, FeatureTile, GradientPair, LinearFeatureHistogram, LinearFeatureScaler,
-    LinearHistogramBin, LinearHistogramBundle, MAX_PL_REGRESSORS, NodeSlice,
+    LinearHistogramBin, LinearHistogramBundle, MAX_PL_REGRESSORS, MAX_PL_SLOPE_REGRESSORS,
+    NodeSlice,
 };
 use alloygbm_engine::{EngineError, EngineResult};
 use std::cell::RefCell;
@@ -49,9 +50,9 @@ pub(crate) fn with_shortlisted_linear_histogram<R>(
     callback: impl FnOnce(&[LinearHistogramBin]) -> R,
 ) -> EngineResult<R> {
     let d = regressor_features.len();
-    if d == 0 || d > MAX_PL_REGRESSORS {
+    if d == 0 || d > MAX_PL_SLOPE_REGRESSORS {
         return Err(EngineError::ContractViolation(format!(
-            "regressor_features.len() must be in 1..={MAX_PL_REGRESSORS}, got {d}"
+            "regressor_features.len() must be in 1..={MAX_PL_SLOPE_REGRESSORS}, got {d}"
         )));
     }
     if split_feature_index as usize >= binned_matrix.feature_count
@@ -89,9 +90,11 @@ pub(crate) fn with_shortlisted_linear_histogram<R>(
                     raw_feature_values[row_index * feature_count + feature as usize],
                 );
             }
+            // Intercept column (see `MAX_PL_SLOPE_REGRESSORS`).
+            x_array[d] = 1.0;
             let x = f32x8::from(x_array);
             bin.xtg = (f32x8::from(bin.xtg) + f32x8::splat(gradient.grad) * x).to_array();
-            for (row, &x_row) in x_array.iter().enumerate().take(d) {
+            for (row, &x_row) in x_array.iter().enumerate().take(d + 1) {
                 let base = row * MAX_PL_REGRESSORS;
                 let current: [f32; MAX_PL_REGRESSORS] = bin.xt_hx[base..base + MAX_PL_REGRESSORS]
                     .try_into()
@@ -131,9 +134,9 @@ pub fn build_linear_histograms_cpu(
     feature_count: usize,
 ) -> EngineResult<LinearHistogramBundle> {
     let d = regressor_features.len();
-    if d > MAX_PL_REGRESSORS {
+    if d > MAX_PL_SLOPE_REGRESSORS {
         return Err(EngineError::ContractViolation(format!(
-            "regressor_features.len() = {d} exceeds MAX_PL_REGRESSORS = {MAX_PL_REGRESSORS}"
+            "regressor_features.len() = {d} exceeds MAX_PL_SLOPE_REGRESSORS = {MAX_PL_SLOPE_REGRESSORS}"
         )));
     }
     if d == 0 {
@@ -199,6 +202,8 @@ pub fn build_linear_histograms_cpu(
                         0.0
                     };
                 }
+                // Intercept column (see `MAX_PL_SLOPE_REGRESSORS`).
+                x_arr[d] = 1.0;
                 let x_v = f32x8::from(x_arr);
 
                 // Xᵀg: b.xtg += g * x   (1 SIMD op).

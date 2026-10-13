@@ -517,7 +517,17 @@ fn shortlisted_linear_feature_matches_owned_histogram_and_leaf_oracle() {
     assert_eq!(prepared.split.default_left, oracle_split.default_left);
     assert_eq!(prepared.split.threshold_bin, 0);
     assert!(prepared.split.default_left);
-    assert!((prepared.split.gain - (32.0 / 9.0)).abs() < 1e-5);
+    // The constant regressor duplicates the intercept column. Per child the
+    // ridge system is A = [[2 + 1 + c·H, 2], [2, 2 + 1]] with the slope prior
+    // c·H = 1·2, b = [4, 4], so the coefficients are -A⁻¹b = [-4/11, -12/11]
+    // (update -16/11 per row). The split's realized gain under the unprimed
+    // ridge A₀ is Σ children (-bᵀα - ½ αᵀA₀α) = 2 x (64/11 - 336/121).
+    let expected_gain = 2.0 * (64.0 / 11.0 - 336.0 / 121.0);
+    assert!(
+        (prepared.split.gain - expected_gain).abs() < 1e-4,
+        "gain {}",
+        prepared.split.gain
+    );
     assert_eq!(prepared.left_leaf.regressor_features, regressors);
     assert_eq!((prepared.left_leaf, prepared.right_leaf), oracle_leaves);
 }
@@ -541,7 +551,7 @@ fn shortlisted_linear_feature_rejects_row_over_output_ceiling() {
         },
     ];
     let node = NodeSlice::new(0, vec![0, 1, 2]).expect("valid node");
-    let raw = vec![1000.0_f32, 0.0, 0.0];
+    let raw = vec![10_000.0_f32, 0.0, 0.0];
     let options = SplitSelectionOptions {
         l2_lambda: 0.0,
         min_child_hessian: 0.0,
