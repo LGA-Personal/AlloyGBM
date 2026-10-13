@@ -170,7 +170,7 @@ jobs:
 
       - name: Frontier matrix contract tests
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
-        run: python -m pytest benchmarks/tests/test_frontier_matrix.py -q
+        run: python -m pytest benchmarks/tests/test_frontier_matrix.py benchmarks/tests/test_dev_suite.py -q
 
       - name: Frontier matrix AlloyGBM smoke
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
