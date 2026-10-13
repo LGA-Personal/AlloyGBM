@@ -1,0 +1,62 @@
+[
+ {
+  "dataset": "dev_361062_pol",
+  "split": 0,
+  "fit_seconds": 0.8083541510022769,
+  "loss": 0.03615461978836875
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 1,
+  "fit_seconds": 1.416140882000036,
+  "loss": 0.03744383680395666
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 2,
+  "fit_seconds": 1.0059581589994195,
+  "loss": 0.03224334019037588
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 3,
+  "fit_seconds": 1.8406867560006503,
+  "loss": 0.0400013272466781
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 4,
+  "fit_seconds": 1.5933486969988735,
+  "loss": 0.03455066456360197
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 5,
+  "fit_seconds": 1.6575896860013017,
+  "loss": 0.035192653035895013
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 6,
+  "fit_seconds": 1.0701358930018614,
+  "loss": 0.03477641042448221
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 7,
+  "fit_seconds": 1.7930331060015305,
+  "loss": 0.029073017161415363
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 8,
+  "fit_seconds": 1.4314144150011998,
+  "loss": 0.03935305871655851
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 9,
+  "fit_seconds": 1.6702122530005,
+  "loss": 0.037417942436971226
+ }
+]

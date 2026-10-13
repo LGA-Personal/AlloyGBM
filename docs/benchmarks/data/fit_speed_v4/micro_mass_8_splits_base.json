@@ -1,0 +1,50 @@
+[
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 0,
+  "fit_seconds": 121.06592552599977,
+  "loss": 0.33701158798883585
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 1,
+  "fit_seconds": 221.25555922700005,
+  "loss": 0.4081433615231299
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 2,
+  "fit_seconds": 196.40115303399944,
+  "loss": 0.45703669354438586
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 3,
+  "fit_seconds": 10.76234624800054,
+  "loss": 0.5841427492449578
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 4,
+  "fit_seconds": 114.2459914300016,
+  "loss": 0.5515615649673107
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 5,
+  "fit_seconds": 20.639938314001483,
+  "loss": 0.4298376319538973
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 6,
+  "fit_seconds": 27.189547943002253,
+  "loss": 0.3535140566621581
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 7,
+  "fit_seconds": 9.393937928001833,
+  "loss": 0.34243644621341196
+ }
+]

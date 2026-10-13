@@ -1,0 +1,254 @@
+[
+ {
+  "dataset": "dev_3945_KDDCup09_appetency",
+  "split": 0,
+  "fit_seconds": 2.9081935730000623,
+  "loss": 0.08927531527798628
+ },
+ {
+  "dataset": "dev_3945_KDDCup09_appetency",
+  "split": 1,
+  "fit_seconds": 2.8580750179999086,
+  "loss": 0.08918188600466637
+ },
+ {
+  "dataset": "dev_3945_KDDCup09_appetency",
+  "split": 2,
+  "fit_seconds": 2.6856535589995474,
+  "loss": 0.08976444982269051
+ },
+ {
+  "dataset": "dev_360113_porto-seguro",
+  "split": 0,
+  "fit_seconds": 1.3347997339997164,
+  "loss": 0.15483023481742111
+ },
+ {
+  "dataset": "dev_360113_porto-seguro",
+  "split": 1,
+  "fit_seconds": 1.2534285100000488,
+  "loss": 0.15513676455644324
+ },
+ {
+  "dataset": "dev_360113_porto-seguro",
+  "split": 2,
+  "fit_seconds": 1.0435086489997047,
+  "loss": 0.15570570376122506
+ },
+ {
+  "dataset": "dev_361292_Allstate_Claims_Severity",
+  "split": 0,
+  "fit_seconds": 5.908474208000371,
+  "loss": 0.5479306566736336
+ },
+ {
+  "dataset": "dev_361292_Allstate_Claims_Severity",
+  "split": 1,
+  "fit_seconds": 6.179474816999573,
+  "loss": 0.559132074958826
+ },
+ {
+  "dataset": "dev_361292_Allstate_Claims_Severity",
+  "split": 2,
+  "fit_seconds": 5.777863951000654,
+  "loss": 0.5592953494229218
+ },
+ {
+  "dataset": "dev_168910_fabert",
+  "split": 0,
+  "fit_seconds": 33.28374336300021,
+  "loss": 0.8294433866981924
+ },
+ {
+  "dataset": "dev_168910_fabert",
+  "split": 1,
+  "fit_seconds": 26.17681222400006,
+  "loss": 0.857975160281347
+ },
+ {
+  "dataset": "dev_168910_fabert",
+  "split": 2,
+  "fit_seconds": 26.49037813399991,
+  "loss": 0.8226143668746493
+ },
+ {
+  "dataset": "dev_168911_jasmine",
+  "split": 0,
+  "fit_seconds": 1.0925417190001099,
+  "loss": 0.40034916056160746
+ },
+ {
+  "dataset": "dev_168911_jasmine",
+  "split": 1,
+  "fit_seconds": 1.1267033920003087,
+  "loss": 0.4141464740629456
+ },
+ {
+  "dataset": "dev_168911_jasmine",
+  "split": 2,
+  "fit_seconds": 1.0335097640008826,
+  "loss": 0.40183207017211076
+ },
+ {
+  "dataset": "dev_359951_house_prices_nominal",
+  "split": 0,
+  "fit_seconds": 0.46130026999981055,
+  "loss": 28353.87933624525
+ },
+ {
+  "dataset": "dev_359951_house_prices_nominal",
+  "split": 1,
+  "fit_seconds": 0.42174367500047083,
+  "loss": 25633.86033491426
+ },
+ {
+  "dataset": "dev_359951_house_prices_nominal",
+  "split": 2,
+  "fit_seconds": 0.4212390559996493,
+  "loss": 40692.35331809875
+ },
+ {
+  "dataset": "dev_360112_KDDCup99",
+  "split": 0,
+  "fit_seconds": 3.804249130000244,
+  "loss": 0.0038645639336867626
+ },
+ {
+  "dataset": "dev_360112_KDDCup99",
+  "split": 1,
+  "fit_seconds": 9.49300086600033,
+  "loss": 0.005926713286992812
+ },
+ {
+  "dataset": "dev_360112_KDDCup99",
+  "split": 2,
+  "fit_seconds": 3.2823436359994957,
+  "loss": 0.0019811497715371104
+ },
+ {
+  "dataset": "dev_360932_QSAR-TID-11",
+  "split": 0,
+  "fit_seconds": 9.038847624000482,
+  "loss": 0.7486898391522455
+ },
+ {
+  "dataset": "dev_360932_QSAR-TID-11",
+  "split": 1,
+  "fit_seconds": 8.211918201000117,
+  "loss": 0.7334914941396686
+ },
+ {
+  "dataset": "dev_360932_QSAR-TID-11",
+  "split": 2,
+  "fit_seconds": 5.748619861999941,
+  "loss": 0.7464769773896347
+ },
+ {
+  "dataset": "dev_360933_QSAR-TID-10980",
+  "split": 0,
+  "fit_seconds": 7.230249469000228,
+  "loss": 0.7335318671590273
+ },
+ {
+  "dataset": "dev_360933_QSAR-TID-10980",
+  "split": 1,
+  "fit_seconds": 6.645318091999798,
+  "loss": 0.7277446086573592
+ },
+ {
+  "dataset": "dev_360933_QSAR-TID-10980",
+  "split": 2,
+  "fit_seconds": 8.754505656999754,
+  "loss": 0.7535393432501946
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 0,
+  "fit_seconds": 1.2082566389999556,
+  "loss": 0.03398559937924607
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 1,
+  "fit_seconds": 2.408448426999712,
+  "loss": 0.03740653397784454
+ },
+ {
+  "dataset": "dev_361062_pol",
+  "split": 2,
+  "fit_seconds": 2.099427451000338,
+  "loss": 0.030914990265480807
+ },
+ {
+  "dataset": "dev_361093_analcatdata_supreme",
+  "split": 0,
+  "fit_seconds": 0.5873281860003772,
+  "loss": 0.06127819465018019
+ },
+ {
+  "dataset": "dev_361093_analcatdata_supreme",
+  "split": 1,
+  "fit_seconds": 0.27801012300005823,
+  "loss": 0.053789479107757464
+ },
+ {
+  "dataset": "dev_361093_analcatdata_supreme",
+  "split": 2,
+  "fit_seconds": 0.2522025140006008,
+  "loss": 0.06407825345440203
+ },
+ {
+  "dataset": "dev_361097_Mercedes_Benz_Greener_Manufacturing",
+  "split": 0,
+  "fit_seconds": 2.178303584999412,
+  "loss": 9.523488104291213
+ },
+ {
+  "dataset": "dev_361097_Mercedes_Benz_Greener_Manufacturing",
+  "split": 1,
+  "fit_seconds": 2.573347983000531,
+  "loss": 7.935422407442008
+ },
+ {
+  "dataset": "dev_361097_Mercedes_Benz_Greener_Manufacturing",
+  "split": 2,
+  "fit_seconds": 2.1054937409999184,
+  "loss": 8.25062190866256
+ },
+ {
+  "dataset": "dev_361286_compas-two-years",
+  "split": 0,
+  "fit_seconds": 0.3369163209999897,
+  "loss": 0.5997888669517758
+ },
+ {
+  "dataset": "dev_361286_compas-two-years",
+  "split": 1,
+  "fit_seconds": 0.2110042300000714,
+  "loss": 0.6201800746679734
+ },
+ {
+  "dataset": "dev_361286_compas-two-years",
+  "split": 2,
+  "fit_seconds": 0.2636326250003549,
+  "loss": 0.6002056715688606
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 0,
+  "fit_seconds": 102.58013713699984,
+  "loss": 0.33701158798883585
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 1,
+  "fit_seconds": 120.69142170499981,
+  "loss": 0.4081433615231299
+ },
+ {
+  "dataset": "dev_359953_micro-mass",
+  "split": 2,
+  "fit_seconds": 161.52762226899995,
+  "loss": 0.45703669354438586
+ }
+]

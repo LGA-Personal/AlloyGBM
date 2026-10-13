@@ -31,8 +31,13 @@ class ExactFeatureBundlingTests(unittest.TestCase):
         baseline = GBMRegressor(**parameters).fit(X, y)
         bundled = GBMRegressor(**parameters, feature_bundling="exact").fit(X, y)
 
-        self.assertEqual(bundled.artifact_bytes, baseline.artifact_bytes)
+        # Same trees and leaves, so predictions match bit for bit. Artifact
+        # bytes can differ in the last bit of stored split statistics: unbundled
+        # one-hot columns fill their dominant histogram bin as node total
+        # minus the other bins, the bundle sums it directly.
         np.testing.assert_array_equal(bundled.predict(X), baseline.predict(X))
+        probe = np.random.default_rng(0).integers(0, 2, size=(64, X.shape[1])).astype(np.float32)
+        np.testing.assert_array_equal(bundled.predict(probe), baseline.predict(probe))
         self.assertEqual(
             bundled.feature_bundling_diagnostics_,
             {

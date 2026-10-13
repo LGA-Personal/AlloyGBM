@@ -147,6 +147,26 @@ impl HistogramArena {
         self.offsets[local_feature] + bin.min(self.slot_caps[local_feature])
     }
 
+    /// Append this tile's histograms to `bundle` without an intermediate
+    /// bundle; the same result as `bundle.append(self.to_bundle(..))`.
+    pub(crate) fn append_onto(
+        &self,
+        bundle: &mut HistogramBundle,
+        start_feature: usize,
+    ) -> CoreResult<()> {
+        let feature_count = self.offsets.len() - 1;
+        bundle.append_parts(
+            (start_feature..start_feature + feature_count).map(|feature| feature as u32),
+            &self.offsets,
+            self.bin_count,
+            self.compact_edge_limit,
+            &self.grad_sums,
+            &self.hess_sums,
+            self.grad_sq_sums.as_deref(),
+            &self.counts,
+        )
+    }
+
     pub(crate) fn to_bundle(
         &self,
         node_id: u32,

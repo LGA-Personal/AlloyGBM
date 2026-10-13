@@ -4,6 +4,13 @@
 
 ### Performance
 
+- **Wide data with mostly-constant columns fits about twice as fast.** When
+  one bin holds at least 80% of a feature's rows, histograms skip it and fill
+  it as the node total minus the other bins, and large nodes walk only that
+  feature's other rows. On the 14 sparsest dev-suite tasks default fits take
+  0.70× the time (fabert 0.43×, QSAR 0.49–0.54×) with loss unchanged within
+  noise (geomean ratio 1.0005). Models differ from before only in float
+  rounding. See `docs/benchmarks/fit_speed_v4.md`.
 - **Dense and multiclass fits take 0.72–0.84× the time, with bit-identical
   models.** The multiclass softmax normalizer is computed once per row
   instead of once per class (helena, 100 classes: 108 s to 15.6 s for 100

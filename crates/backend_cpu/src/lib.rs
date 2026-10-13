@@ -10,6 +10,7 @@ use alloygbm_engine::{
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod arena;
 mod backend_ops;
@@ -50,6 +51,60 @@ pub(crate) const PARTITION_STATS_CHUNK_ROWS: usize = 4_096;
 thread_local! {
     /// Per-thread reusable histogram arena to avoid repeated allocation.
     static THREAD_ARENA: RefCell<HistogramArena> = RefCell::new(HistogramArena::new(0, 0, false));
+    /// Per-thread map from row to its position in the node being built; see
+    /// [`RowPositions`].
+    static THREAD_ROW_POSITIONS: RefCell<RowPositions> = RefCell::new(RowPositions::default());
+}
+
+/// A feature's rows outside its dominant bin are walked instead of the
+/// node's rows when there are fewer than `1 / SPARSE_WALK_COST` as many: each
+/// costs a membership lookup on top of the work a node row costs.
+const SPARSE_WALK_COST: usize = 3;
+
+/// Identifies one histogram build, so a thread's [`RowPositions`] knows
+/// whether it already holds that node's rows. Starts at 1: 0 marks a row
+/// stamped by no build.
+static NODE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// What a histogram build of a matrix with dominant bins passes its kernels.
+pub(crate) struct SparseNode {
+    totals: BinAccumulator,
+    generation: u64,
+}
+
+/// For one node: each row's position in the node's row list, or none.
+/// Stamped per thread once per node build that walks sparse rows, in time
+/// proportional to the node's rows; rows of earlier nodes carry an older
+/// generation and read as absent.
+#[derive(Default)]
+struct RowPositions {
+    generation: u64,
+    stamps: Vec<u64>,
+    positions: Vec<u32>,
+}
+
+impl RowPositions {
+    fn stamp(&mut self, generation: u64, row_count: usize, rows: &[u32]) {
+        if self.generation == generation && self.stamps.len() == row_count {
+            return;
+        }
+        if self.stamps.len() != row_count {
+            self.stamps.clear();
+            self.stamps.resize(row_count, 0);
+            self.positions.resize(row_count, 0);
+        }
+        for (position, &row) in rows.iter().enumerate() {
+            self.stamps[row as usize] = generation;
+            self.positions[row as usize] = position as u32;
+        }
+        self.generation = generation;
+    }
+
+    #[inline(always)]
+    fn position(&self, row: u32) -> Option<usize> {
+        (self.stamps[row as usize] == self.generation)
+            .then(|| self.positions[row as usize] as usize)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +288,85 @@ impl CpuBackend {
         }
     }
 
+    /// [`Self::accumulate_column`] for a feature with a dominant bin: rows in
+    /// `skip_slot` are left out, so that slot stays empty here and is filled
+    /// in from the node totals afterwards.
+    #[inline(always)]
+    fn accumulate_column_skipping<T: Copy + Into<usize>, const INCLUDE_GRAD_SQ: bool>(
+        column: &[T],
+        node_gradients: &[GradientPair],
+        row_indices: &[u32],
+        scratch: &mut [BinAccumulator],
+        slot_cap: usize,
+        skip_slot: usize,
+    ) {
+        for (&row_index, &gradient) in row_indices.iter().zip(node_gradients) {
+            let bin_index: usize = column[row_index as usize].into();
+            let slot = bin_index.min(slot_cap);
+            if slot != skip_slot {
+                Self::accumulate_slot::<INCLUDE_GRAD_SQ>(&mut scratch[slot], gradient);
+            }
+        }
+    }
+
+    /// Accumulate the node's rows of `other_rows` (one feature's rows outside
+    /// its dominant bin), visiting each in ascending row order.
+    #[inline(always)]
+    fn accumulate_sparse_rows<T: Copy + Into<usize>, const INCLUDE_GRAD_SQ: bool>(
+        column: &[T],
+        other_rows: &[u32],
+        positions: &RowPositions,
+        node_gradients: &[GradientPair],
+        scratch: &mut [BinAccumulator],
+        slot_cap: usize,
+    ) {
+        for &row_index in other_rows {
+            if let Some(position) = positions.position(row_index) {
+                let bin_index: usize = column[row_index as usize].into();
+                Self::accumulate_slot::<INCLUDE_GRAD_SQ>(
+                    &mut scratch[bin_index.min(slot_cap)],
+                    node_gradients[position],
+                );
+            }
+        }
+    }
+
+    /// Fill a skipped dominant slot with the node totals less every other
+    /// slot of the feature. Its count is exact; its sums carry rounding from
+    /// the subtraction, and an empty slot is set to exactly zero.
+    fn fill_dominant_slot<const INCLUDE_GRAD_SQ: bool>(
+        scratch: &mut [BinAccumulator],
+        skip_slot: usize,
+        node_totals: &BinAccumulator,
+    ) {
+        let mut others = BinAccumulator::default();
+        for (slot, value) in scratch.iter().enumerate() {
+            if slot != skip_slot {
+                others.grad += value.grad;
+                others.hess += value.hess;
+                if INCLUDE_GRAD_SQ {
+                    others.grad_sq += value.grad_sq;
+                }
+                others.count += value.count;
+            }
+        }
+        let count = node_totals.count - others.count;
+        scratch[skip_slot] = if count == 0 {
+            BinAccumulator::default()
+        } else {
+            BinAccumulator {
+                grad: node_totals.grad - others.grad,
+                hess: (node_totals.hess - others.hess).max(0.0),
+                grad_sq: if INCLUDE_GRAD_SQ {
+                    (node_totals.grad_sq - others.grad_sq).max(0.0)
+                } else {
+                    0.0
+                },
+                count,
+            }
+        };
+    }
+
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
     /// [`gather_node_gradients`]. Reading by position keeps this loop's
     /// gradient access sequential; only the bin lookup still gathers.
@@ -242,8 +376,10 @@ impl CpuBackend {
         node: &NodeSlice,
         start_feature: usize,
         end_feature: usize,
+        sparse_node: Option<&SparseNode>,
         arena: &mut HistogramArena,
     ) {
+        let dominant_bins = binned_matrix.dominant_bins();
         let row_count = binned_matrix.row_count;
         let use_col_major = binned_matrix.has_col_major();
         for feature_index in start_feature..end_feature {
@@ -271,33 +407,117 @@ impl CpuBackend {
                 // slot; data bins are below the cap and keep their index.
                 let col_base = feature_index * row_count;
                 arena.scratch[..feature_bins].fill(BinAccumulator::default());
-                // Dispatch on the storage width once per column rather than
-                // once per row.
-                match binned_matrix.col_bins(feature_index) {
-                    Some(BinColumn::U8(column)) => Self::accumulate_column::<u8, INCLUDE_GRAD_SQ>(
-                        column,
-                        node_gradients,
-                        &node.row_indices,
-                        &mut arena.scratch,
-                        slot_cap,
-                    ),
-                    Some(BinColumn::U16(column)) => {
-                        Self::accumulate_column::<u16, INCLUDE_GRAD_SQ>(
-                            column,
-                            node_gradients,
-                            &node.row_indices,
-                            &mut arena.scratch,
-                            slot_cap,
-                        )
+                let skip_slot = sparse_node.and_then(|sparse| {
+                    let dominant = dominant_bins.get(feature_index).copied().flatten()?;
+                    Some((usize::from(dominant).min(slot_cap), &sparse.totals))
+                });
+                // When the feature has far fewer rows outside its dominant bin
+                // than the node has rows, walk those rows instead and keep the
+                // ones in the node.
+                let sparse_walk = match (sparse_node, skip_slot) {
+                    (Some(sparse), Some(_)) => {
+                        let other_rows = binned_matrix.non_dominant_rows(feature_index);
+                        (other_rows.len().saturating_mul(SPARSE_WALK_COST) < node.row_indices.len())
+                            .then_some((sparse.generation, other_rows))
                     }
-                    None => {
-                        for (position, &row_index) in node.row_indices.iter().enumerate() {
-                            let bin_index =
-                                binned_matrix.col_bin(col_base + row_index as usize) as usize;
-                            Self::accumulate_slot::<INCLUDE_GRAD_SQ>(
-                                &mut arena.scratch[bin_index.min(slot_cap)],
-                                node_gradients[position],
+                    _ => None,
+                };
+                if let (Some((generation, other_rows)), Some((skip_slot, totals))) =
+                    (sparse_walk, skip_slot)
+                {
+                    THREAD_ROW_POSITIONS.with(|cell| {
+                        let mut positions = cell.borrow_mut();
+                        positions.stamp(generation, row_count, &node.row_indices);
+                        match binned_matrix.col_bins(feature_index) {
+                            Some(BinColumn::U8(column)) => {
+                                Self::accumulate_sparse_rows::<u8, INCLUDE_GRAD_SQ>(
+                                    column,
+                                    other_rows,
+                                    &positions,
+                                    node_gradients,
+                                    &mut arena.scratch,
+                                    slot_cap,
+                                )
+                            }
+                            Some(BinColumn::U16(column)) => {
+                                Self::accumulate_sparse_rows::<u16, INCLUDE_GRAD_SQ>(
+                                    column,
+                                    other_rows,
+                                    &positions,
+                                    node_gradients,
+                                    &mut arena.scratch,
+                                    slot_cap,
+                                )
+                            }
+                            None => unreachable!("non-dominant rows require column-major bins"),
+                        }
+                    });
+                    Self::fill_dominant_slot::<INCLUDE_GRAD_SQ>(
+                        &mut arena.scratch[..feature_bins],
+                        skip_slot,
+                        totals,
+                    );
+                } else {
+                    // Dispatch on the storage width once per column rather than
+                    // once per row.
+                    match (binned_matrix.col_bins(feature_index), skip_slot) {
+                        (Some(BinColumn::U8(column)), Some((skip_slot, totals))) => {
+                            Self::accumulate_column_skipping::<u8, INCLUDE_GRAD_SQ>(
+                                column,
+                                node_gradients,
+                                &node.row_indices,
+                                &mut arena.scratch,
+                                slot_cap,
+                                skip_slot,
                             );
+                            Self::fill_dominant_slot::<INCLUDE_GRAD_SQ>(
+                                &mut arena.scratch[..feature_bins],
+                                skip_slot,
+                                totals,
+                            );
+                        }
+                        (Some(BinColumn::U16(column)), Some((skip_slot, totals))) => {
+                            Self::accumulate_column_skipping::<u16, INCLUDE_GRAD_SQ>(
+                                column,
+                                node_gradients,
+                                &node.row_indices,
+                                &mut arena.scratch,
+                                slot_cap,
+                                skip_slot,
+                            );
+                            Self::fill_dominant_slot::<INCLUDE_GRAD_SQ>(
+                                &mut arena.scratch[..feature_bins],
+                                skip_slot,
+                                totals,
+                            );
+                        }
+                        (Some(BinColumn::U8(column)), None) => {
+                            Self::accumulate_column::<u8, INCLUDE_GRAD_SQ>(
+                                column,
+                                node_gradients,
+                                &node.row_indices,
+                                &mut arena.scratch,
+                                slot_cap,
+                            )
+                        }
+                        (Some(BinColumn::U16(column)), None) => {
+                            Self::accumulate_column::<u16, INCLUDE_GRAD_SQ>(
+                                column,
+                                node_gradients,
+                                &node.row_indices,
+                                &mut arena.scratch,
+                                slot_cap,
+                            )
+                        }
+                        (None, _) => {
+                            for (position, &row_index) in node.row_indices.iter().enumerate() {
+                                let bin_index =
+                                    binned_matrix.col_bin(col_base + row_index as usize) as usize;
+                                Self::accumulate_slot::<INCLUDE_GRAD_SQ>(
+                                    &mut arena.scratch[bin_index.min(slot_cap)],
+                                    node_gradients[position],
+                                );
+                            }
                         }
                     }
                 }
@@ -402,15 +622,46 @@ impl CpuBackend {
         tile: &FeatureTile,
         bin_count: usize,
         include_grad_sq: bool,
+        sparse_node: Option<&SparseNode>,
     ) -> EngineResult<HistogramBundle> {
+        Self::build_tile_then(
+            binned_matrix,
+            node_gradients,
+            node,
+            tile,
+            bin_count,
+            include_grad_sq,
+            sparse_node,
+            |arena, start_feature| {
+                arena
+                    .to_bundle(node.node_id, start_feature)
+                    .map_err(EngineError::from)
+            },
+        )
+    }
+
+    /// Build one tile's histograms in this thread's arena, then hand the
+    /// arena and the tile's first feature to `finish`.
+    #[allow(clippy::too_many_arguments)]
+    fn build_tile_then<R>(
+        binned_matrix: &BinnedMatrix,
+        node_gradients: &[GradientPair],
+        node: &NodeSlice,
+        tile: &FeatureTile,
+        bin_count: usize,
+        include_grad_sq: bool,
+        sparse_node: Option<&SparseNode>,
+        finish: impl FnOnce(&HistogramArena, usize) -> EngineResult<R>,
+    ) -> EngineResult<R> {
         if binned_matrix.feature_bundle_map().is_some() {
-            return Self::build_feature_histograms_for_bundled_tile(
+            return Self::build_bundled_tile_then(
                 binned_matrix,
                 node_gradients,
                 node,
                 tile,
                 bin_count,
                 include_grad_sq,
+                finish,
             );
         }
         let feature_count = binned_matrix.feature_count;
@@ -451,6 +702,7 @@ impl CpuBackend {
                     node,
                     start_feature,
                     end_feature,
+                    sparse_node,
                     &mut arena,
                 ),
                 (true, true) => Self::build_tile_histograms_per_feature::<true>(
@@ -459,6 +711,7 @@ impl CpuBackend {
                     node,
                     start_feature,
                     end_feature,
+                    sparse_node,
                     &mut arena,
                 ),
                 (false, false) => Self::build_tile_histograms_row_first_unrolled::<false>(
@@ -478,14 +731,13 @@ impl CpuBackend {
                     &mut arena,
                 ),
             }
-            arena
-                .to_bundle(node.node_id, start_feature)
-                .map_err(EngineError::from)
+            finish(&arena, start_feature)
         })
     }
 
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see
     /// [`gather_node_gradients`].
+    #[cfg(test)]
     pub(crate) fn build_feature_histograms_for_bundled_tile(
         binned_matrix: &BinnedMatrix,
         node_gradients: &[GradientPair],
@@ -494,6 +746,30 @@ impl CpuBackend {
         bin_count: usize,
         include_grad_sq: bool,
     ) -> EngineResult<HistogramBundle> {
+        Self::build_bundled_tile_then(
+            binned_matrix,
+            node_gradients,
+            node,
+            tile,
+            bin_count,
+            include_grad_sq,
+            |arena, start_feature| {
+                arena
+                    .to_bundle(node.node_id, start_feature)
+                    .map_err(EngineError::from)
+            },
+        )
+    }
+
+    fn build_bundled_tile_then<R>(
+        binned_matrix: &BinnedMatrix,
+        node_gradients: &[GradientPair],
+        node: &NodeSlice,
+        tile: &FeatureTile,
+        bin_count: usize,
+        include_grad_sq: bool,
+        finish: impl FnOnce(&HistogramArena, usize) -> EngineResult<R>,
+    ) -> EngineResult<R> {
         let map = binned_matrix.feature_bundle_map().ok_or_else(|| {
             EngineError::ContractViolation(
                 "bundled histogram kernel requires a feature bundle map".to_string(),
@@ -545,9 +821,7 @@ impl CpuBackend {
                     }
                 }
             }
-            arena
-                .to_bundle(node.node_id, start_feature)
-                .map_err(EngineError::from)
+            finish(&arena, start_feature)
         })
     }
 
@@ -602,8 +876,38 @@ impl CpuBackend {
         // once instead of once per feature.
         let node_gradients = Self::gather_node_gradients(gradients, &node.row_indices);
         let node_gradients = node_gradients.as_slice();
-        let mut per_tile_histograms = if parallel_tiles {
-            feature_tiles
+        // Node totals let the kernel skip each sparse feature's dominant bin
+        // and fill it in afterwards; only computed when some feature has one.
+        let sparse_node = binned_matrix
+            .dominant_bins()
+            .iter()
+            .any(Option::is_some)
+            .then(|| {
+                let mut totals = BinAccumulator::default();
+                for &gradient in node_gradients {
+                    Self::accumulate_slot::<true>(&mut totals, gradient);
+                }
+                SparseNode {
+                    totals,
+                    generation: NODE_GENERATION.fetch_add(1, Ordering::Relaxed),
+                }
+            });
+        let sparse_node = sparse_node.as_ref();
+        // Every tile lands in one bundle sized for the whole node up front,
+        // so appending tiles never reallocates or copies earlier tiles.
+        let total_bins = match binned_matrix.compact_histogram_layout() {
+            Some(layout) if binned_matrix.feature_bundle_map().is_none() => feature_tiles
+                .iter()
+                .flat_map(|tile| tile.start_feature as usize..tile.end_feature as usize)
+                .map(|feature| usize::from(layout.data_bins[feature]) + 1)
+                .sum(),
+            _ => feature_tiles
+                .iter()
+                .map(|tile| (tile.end_feature - tile.start_feature) as usize * bin_count)
+                .sum::<usize>(),
+        };
+        if parallel_tiles {
+            let mut per_tile_histograms = feature_tiles
                 .par_iter()
                 .map(|tile| {
                     Self::build_feature_histograms_for_tile(
@@ -613,34 +917,48 @@ impl CpuBackend {
                         tile,
                         bin_count,
                         include_grad_sq,
+                        sparse_node,
                     )
                 })
-                .collect::<Vec<_>>()
-        } else {
-            feature_tiles
-                .iter()
-                .map(|tile| {
-                    Self::build_feature_histograms_for_tile(
-                        binned_matrix,
-                        node_gradients,
-                        node,
-                        tile,
-                        bin_count,
-                        include_grad_sq,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut histograms = per_tile_histograms
-            .drain(..1)
-            .next()
-            .expect("feature tiles are non-empty")?;
-        for tile_histograms in per_tile_histograms {
-            histograms
-                .append(tile_histograms?)
-                .map_err(EngineError::from)?;
+                .collect::<Vec<_>>();
+            let mut histograms = per_tile_histograms
+                .drain(..1)
+                .next()
+                .expect("feature tiles are non-empty")?;
+            histograms.reserve_bins(total_bins.saturating_sub(histograms.total_bin_count()));
+            for tile_histograms in per_tile_histograms {
+                histograms
+                    .append(tile_histograms?)
+                    .map_err(EngineError::from)?;
+            }
+            return Ok(histograms);
         }
-        Ok(histograms)
+        // Serially, each tile's arena is copied straight into the bundle.
+        let mut histograms: Option<HistogramBundle> = None;
+        for tile in feature_tiles {
+            Self::build_tile_then(
+                binned_matrix,
+                node_gradients,
+                node,
+                tile,
+                bin_count,
+                include_grad_sq,
+                sparse_node,
+                |arena, start_feature| {
+                    match &mut histograms {
+                        Some(bundle) => arena.append_onto(bundle, start_feature)?,
+                        None => {
+                            let mut bundle = arena.to_bundle(node.node_id, start_feature)?;
+                            bundle
+                                .reserve_bins(total_bins.saturating_sub(bundle.total_bin_count()));
+                            histograms = Some(bundle);
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(histograms.expect("feature tiles are non-empty"))
     }
 
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see

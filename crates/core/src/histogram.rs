@@ -491,6 +491,76 @@ impl HistogramBundle {
         Ok(())
     }
 
+    /// Reserve room for `additional` more bins in every column, so later
+    /// appends do not reallocate.
+    pub fn reserve_bins(&mut self, additional: usize) {
+        self.grad_sums.reserve_exact(additional);
+        self.hess_sums.reserve_exact(additional);
+        if let Some(values) = &mut self.grad_sq_sums {
+            values.reserve_exact(additional);
+        }
+        self.counts.reserve_exact(additional);
+    }
+
+    /// [`Self::append`] from borrowed columns: `offsets` are the parts' own
+    /// per-feature start offsets (starting at 0, one more than the features),
+    /// and `bin_count` its widest feature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_parts(
+        &mut self,
+        feature_indices: impl IntoIterator<Item = u32>,
+        offsets: &[usize],
+        bin_count: usize,
+        compact_edge_limit: Option<usize>,
+        grad_sums: &[f32],
+        hess_sums: &[f32],
+        grad_sq_sums: Option<&[f32]>,
+        counts: &[u32],
+    ) -> CoreResult<()> {
+        if self.compact_edge_limit != compact_edge_limit
+            || (self.compact_edge_limit.is_none() && self.bin_count != bin_count)
+        {
+            return Err(CoreError::Validation(
+                "cannot append histograms with different bin layouts".to_string(),
+            ));
+        }
+        if self.has_grad_sq_sums() != grad_sq_sums.is_some() {
+            return Err(CoreError::Validation(
+                "cannot append histograms with different squared-gradient layouts".to_string(),
+            ));
+        }
+        let flat_len = offsets.last().copied().unwrap_or(0);
+        if offsets.first() != Some(&0)
+            || grad_sums.len() != flat_len
+            || hess_sums.len() != flat_len
+            || counts.len() != flat_len
+            || grad_sq_sums.is_some_and(|values| values.len() != flat_len)
+        {
+            return Err(CoreError::Validation(
+                "appended histogram columns do not match their offsets".to_string(),
+            ));
+        }
+        let feature_count_before = self.feature_indices.len();
+        self.feature_indices.extend(feature_indices);
+        if self.feature_indices.len() - feature_count_before + 1 != offsets.len() {
+            self.feature_indices.truncate(feature_count_before);
+            return Err(CoreError::Validation(
+                "appended histogram has one offset per feature plus one".to_string(),
+            ));
+        }
+        let base = self.grad_sums.len();
+        self.offsets
+            .extend(offsets[1..].iter().map(|&offset| base + offset));
+        self.bin_count = self.bin_count.max(bin_count);
+        self.grad_sums.extend_from_slice(grad_sums);
+        self.hess_sums.extend_from_slice(hess_sums);
+        if let (Some(dest), Some(source)) = (&mut self.grad_sq_sums, grad_sq_sums) {
+            dest.extend_from_slice(source);
+        }
+        self.counts.extend_from_slice(counts);
+        Ok(())
+    }
+
     pub fn filtered(&self, is_allowed: impl Fn(u32) -> bool) -> Self {
         let selected: Vec<usize> = self
             .feature_indices
