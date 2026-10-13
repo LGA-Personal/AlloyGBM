@@ -215,6 +215,29 @@ fn binned_split_went_left(stump: &TrainedStump, bin: u16, missing_bin: u16) -> b
     }
 }
 
+/// Local node id of the terminal leaf `row_index` lands in, routed like the
+/// predictor (learned missing direction, native categorical bitsets).
+/// `stump_at` returns the split stored at a local node id, if any.
+#[inline]
+pub(crate) fn terminal_local_node_for_row<'a>(
+    row_index: usize,
+    binned_matrix: &BinnedMatrix,
+    stump_at: impl Fn(u32) -> Option<&'a TrainedStump>,
+    missing_bin: u16,
+) -> u32 {
+    let mut local_id = 0_u32;
+    while let Some(stump) = stump_at(local_id) {
+        let feature_index = stump.split.feature_index as usize;
+        let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
+        local_id = if binned_split_went_left(stump, bin, missing_bin) {
+            local_id * 2 + 1
+        } else {
+            local_id * 2 + 2
+        };
+    }
+    local_id
+}
+
 fn build_stump_lookup(
     stumps: &[TrainedStump],
     feature_count: usize,
@@ -1106,5 +1129,94 @@ mod tests {
     fn scaled_prediction_buffer_rejects_prediction_contribution_length_mismatch() {
         let result = apply_scaled_prediction_buffer(&mut [0.0, 0.0], &[1.0], 1.0);
         assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    fn binary_leaf_optimum(targets: &[f32], l2: f32) -> f32 {
+        // Solve sum(sigmoid(v) - y) + l2 * v = 0 by bisection.
+        let (mut lo, mut hi) = (-50.0_f64, 50.0_f64);
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            let p = 1.0 / (1.0 + (-mid).exp());
+            let g: f64 = targets.iter().map(|&y| p - y as f64).sum::<f64>() + l2 as f64 * mid;
+            if g > 0.0 { hi = mid } else { lo = mid }
+        }
+        (0.5 * (lo + hi)) as f32
+    }
+
+    #[test]
+    fn binary_newton_refinement_converges_to_the_regularized_leaf_optimum() -> EngineResult<()> {
+        // Rows 0,1 (bin 0) and the missing row 2 go left (default_left);
+        // row 3 (bin 2) goes right. Left is pure positive, right negative.
+        let binned =
+            BinnedMatrix::new(4, 1, 2, vec![0, 0, MISSING_BIN_U8, 2]).expect("valid binned matrix");
+        let targets = [1.0, 1.0, 1.0, 0.0];
+        let predictions = [0.0_f32; 4];
+        let (l2, lr) = (1.0_f32, 0.1_f32);
+        // Builder's single step from p = 0.5: -G / (H + l2), scaled by lr.
+        let left_one_step = 1.5 / (0.75 + l2) * lr;
+        let right_one_step = -0.5 / (0.25 + l2) * lr;
+        let mut stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(left_one_step),
+            LeafValue::Scalar(right_one_step),
+        )];
+
+        let mut candidate = predictions.to_vec();
+        apply_tree_to_binned_predictions(&mut candidate, &binned, &stumps, None)?;
+        crate::leaf_refinement::refine_binary_newton_leaf_values(
+            &mut stumps,
+            &binned,
+            &predictions,
+            &mut candidate,
+            &targets,
+            None,
+            l2,
+            lr,
+            50,
+            100.0,
+        )?;
+        // The candidate scores now carry the refined tree.
+        let mut replayed = predictions.to_vec();
+        apply_tree_to_binned_predictions(&mut replayed, &binned, &stumps, None)?;
+        assert_close(&candidate, &replayed);
+
+        let left = stumps[0].left_leaf_value.as_scalar() / lr;
+        let right = stumps[0].right_leaf_value.as_scalar() / lr;
+        assert!(
+            (left - binary_leaf_optimum(&targets[..3], l2)).abs() < 1e-4,
+            "{left}"
+        );
+        assert!(
+            (right - binary_leaf_optimum(&targets[3..], l2)).abs() < 1e-4,
+            "{right}"
+        );
+        // The single step undershoots both leaves.
+        assert!(left > left_one_step / lr && right < right_one_step / lr);
+        Ok(())
+    }
+
+    #[test]
+    fn binary_newton_refinement_with_zero_steps_is_a_no_op() -> EngineResult<()> {
+        let binned = BinnedMatrix::new(2, 1, 2, vec![0, 2]).expect("valid binned matrix");
+        let original = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(0.3),
+            LeafValue::Scalar(-0.2),
+        )];
+        let mut stumps = original.clone();
+        crate::leaf_refinement::refine_binary_newton_leaf_values(
+            &mut stumps,
+            &binned,
+            &[0.0, 0.0],
+            &mut [0.3, -0.2],
+            &[1.0, 0.0],
+            None,
+            3.0,
+            0.1,
+            0,
+            100.0,
+        )?;
+        assert_eq!(stumps, original);
+        Ok(())
     }
 }

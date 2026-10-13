@@ -15,18 +15,31 @@ use crate::types::{
 
 pub(crate) const AUTO_SPLIT_L2_NOISY_SMALL_WIDE: f32 = 2.0;
 
-/// Auto-policy minimum child Hessian for binary classifiers. Mirrors
-/// XGBoost's `min_child_weight=1`: a log-loss row contributes at most 0.25,
-/// so a leaf needs at least four maximally uncertain rows, and more as the
-/// model grows confident. Without it, a leaf holding a few rows that are
-/// already classified confidently has a Hessian sum near zero and gets an
-/// enormous value, which wrecks calibration (breast_cancer test log loss
-/// 0.53 without it, 0.10 with it; docs/benchmarks/default_quality_v1.md).
-pub(crate) const AUTO_MIN_CHILD_HESSIAN_BINARY: f32 = 1.0;
+/// Auto-policy leaf L2 for binary classifiers (CatBoost's `l2_leaf_reg`
+/// default). It shrinks every leaf by `H / (H + l2)`, so leaves holding
+/// few rows, or rows the model already classifies confidently (small
+/// Hessian), move little, while large leaves are barely touched. On the
+/// small-data binary dev suite (`benchmarks/binary_dev_suite.py`) it
+/// replaces the old Hessian floor (min_child_hessian 1.0), which capped
+/// how confident the model could get: near-separable tasks ended 3-10x
+/// worse in log loss than with L2. See docs/benchmarks/binary_small_data_v1.md.
+pub(crate) const AUTO_LAMBDA_L2_BINARY: f32 = 3.0;
+/// A small Hessian floor kept next to the L2 for binary classifiers. It
+/// rarely binds and stops splits that only isolate a couple of rows the
+/// model is already sure about, which saves rounds without costing accuracy.
+pub(crate) const AUTO_MIN_CHILD_HESSIAN_BINARY: f32 = 0.1;
 /// Below this many rows the binary Hessian floor shrinks in proportion.
 /// A binary row carries at most 0.25 Hessian, so a full floor would leave
 /// toy datasets (a handful of rows) with no legal split at all.
 pub(crate) const AUTO_MIN_CHILD_HESSIAN_FULL_ROWS: usize = 64;
+/// Auto-policy row subsample for binary classifiers at every size (the
+/// generic auto rule only subsamples from 2,048 rows up).
+pub(crate) const AUTO_ROW_SUBSAMPLE_BINARY: f32 = 0.8;
+/// Extra Newton steps per leaf for binary log loss under the auto policy
+/// (CatBoost's `leaf_estimation_iterations`). One step from the current
+/// predictions undershoots a log-loss leaf's regularized optimum; most of
+/// the gain comes from the first extra steps.
+pub(crate) const AUTO_LEAF_NEWTON_STEPS_BINARY: usize = 2;
 /// Auto-policy L2 for multiclass softmax. Per-class Hessians are smaller
 /// than binary ones, so a Hessian floor blocks too many splits there; leaf
 /// L2 gives the same protection and measurably helps every multiclass
@@ -35,6 +48,7 @@ pub(crate) const AUTO_LAMBDA_L2_MULTICLASS: f32 = 1.0;
 
 /// `(lambda_l2, min_child_hessian)` the auto policy proposes for `family`.
 ///
+/// Binary classification keeps both: leaf L2 plus a small Hessian floor.
 /// Regression keeps neither (outside the small-wide rule): on the
 /// default-quality suite L2 helped some regression fixtures and hurt others
 /// by similar amounts. Ranking keeps neither: pairwise Hessians are often far
@@ -44,7 +58,7 @@ pub(crate) fn auto_leaf_regularization(family: ObjectiveFamily, row_count: usize
     match family {
         ObjectiveFamily::BinaryClassification => {
             let taper = (row_count as f32 / AUTO_MIN_CHILD_HESSIAN_FULL_ROWS as f32).min(1.0);
-            (0.0, AUTO_MIN_CHILD_HESSIAN_BINARY * taper)
+            (AUTO_LAMBDA_L2_BINARY, AUTO_MIN_CHILD_HESSIAN_BINARY * taper)
         }
         ObjectiveFamily::MulticlassClassification => (AUTO_LAMBDA_L2_MULTICLASS, 0.0),
         ObjectiveFamily::Regression | ObjectiveFamily::Ranking => (0.0, 0.0),

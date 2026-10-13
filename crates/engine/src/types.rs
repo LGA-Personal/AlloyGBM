@@ -116,6 +116,10 @@ pub struct IterationControls {
     /// Minimum child Hessian sum chosen by the auto policy, under the same
     /// rule as `auto_lambda_l2`. `0.0` means "no auto value".
     pub auto_min_child_hessian: f32,
+    /// Extra Newton steps the auto policy runs on each leaf after a tree is
+    /// built (binary log loss only; see `refine_binary_newton_leaf_values`).
+    /// `0` keeps the builder's single step.
+    pub auto_leaf_newton_steps: usize,
     /// Relative validation tolerance for early stopping; see
     /// `TrainParams::early_stopping_relative_tolerance`. `0.0` disables it.
     pub relative_validation_improvement: f64,
@@ -472,6 +476,7 @@ impl IterationControls {
             requested_policy_mode: TrainingPolicyMode::Manual,
             auto_lambda_l2: 0.0,
             auto_min_child_hessian: 0.0,
+            auto_leaf_newton_steps: 0,
             relative_validation_improvement: 0.0,
         })
     }
