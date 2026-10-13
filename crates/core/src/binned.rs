@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::error::CoreResult;
 use crate::validate_binned_matrix;
 use crate::{CoreError, FeatureBundleMap};
@@ -93,6 +95,24 @@ pub struct BinnedMatrix {
     pub(crate) bins_adaptive: BinStorage,
     /// Required column-major adaptive storage used by histogram construction.
     pub(crate) bins_col_adaptive: BinStorage,
+    /// Lazily computed compact histogram layout; see
+    /// [`BinnedMatrix::compact_histogram_layout`]. Cleared by every mutation.
+    pub(crate) compact_layout: OnceLock<Option<CompactHistogramLayout>>,
+}
+
+/// Per-feature histogram sizes for the compact histogram layout.
+///
+/// Feature `f` stores `data_bins[f]` data bins (bins `0..data_bins[f]`, the
+/// highest bin any row uses plus one) followed by one missing bin, instead of
+/// the matrix-wide bin count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactHistogramLayout {
+    /// Data bins per feature: the largest non-missing bin present, plus one.
+    pub data_bins: Vec<u16>,
+    /// The scan limit a uniform histogram of this matrix would use,
+    /// `min(max_bin + 1, missing_bin)`; split scans keep their last-threshold
+    /// rule relative to it.
+    pub edge_limit: usize,
 }
 
 impl BinnedMatrix {
@@ -128,6 +148,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive,
             bins_col_adaptive: BinStorage::U8(bins_col),
+            compact_layout: OnceLock::new(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -150,6 +171,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive: BinStorage::U8(Vec::new()),
             bins_col_adaptive: BinStorage::U8(bins_col),
+            compact_layout: OnceLock::new(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -197,6 +219,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive,
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
+            compact_layout: OnceLock::new(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -220,6 +243,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive: BinStorage::U16(Vec::new()),
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
+            compact_layout: OnceLock::new(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -338,9 +362,67 @@ impl BinnedMatrix {
             self.bins_adaptive.set(row_idx, value);
         }
         self.bins_col_adaptive.set(col_idx, value);
+        self.compact_layout = OnceLock::new();
         if value != self.nan_bin_index {
             self.storage_max_bin = self.storage_max_bin.max(value);
         }
+    }
+
+    /// The compact histogram layout for this matrix, or `None` when histograms
+    /// should keep the uniform layout: bundled features (their bins are
+    /// decoded per row), no column-major copy, no feature narrower than the
+    /// uniform width, or a data bin at or past the missing bin.
+    ///
+    /// Computed once (one pass over the column-major bins) and cached.
+    pub fn compact_histogram_layout(&self) -> Option<&CompactHistogramLayout> {
+        self.compact_layout
+            .get_or_init(|| self.compute_compact_histogram_layout())
+            .as_ref()
+    }
+
+    fn compute_compact_histogram_layout(&self) -> Option<CompactHistogramLayout> {
+        if self.feature_bundle_map.is_some() || !self.has_col_major() || self.row_count == 0 {
+            return None;
+        }
+        let missing = usize::from(self.nan_bin_index);
+        let uniform_bins = usize::from(self.max_bin) + 1;
+        if missing >= uniform_bins {
+            return None;
+        }
+        let mut data_bins = Vec::with_capacity(self.feature_count);
+        for feature in 0..self.feature_count {
+            let start = feature * self.row_count;
+            let end = start + self.row_count;
+            let max_data_bin = match &self.bins_col_adaptive {
+                BinStorage::U8(bins) => bins[start..end]
+                    .iter()
+                    .map(|&bin| usize::from(bin))
+                    .filter(|&bin| bin != missing)
+                    .max(),
+                BinStorage::U16(bins) => bins[start..end]
+                    .iter()
+                    .map(|&bin| usize::from(bin))
+                    .filter(|&bin| bin != missing)
+                    .max(),
+            };
+            let used = max_data_bin.map_or(0, |bin| bin + 1);
+            if used > missing {
+                return None;
+            }
+            data_bins.push(used as u16);
+        }
+        // Compact pays off only when some feature is narrower than the
+        // uniform width; otherwise both layouts are the same size.
+        if data_bins
+            .iter()
+            .all(|&used| usize::from(used) + 1 >= uniform_bins)
+        {
+            return None;
+        }
+        Some(CompactHistogramLayout {
+            data_bins,
+            edge_limit: missing,
+        })
     }
 
     pub fn effective_feature_count(&self) -> usize {
@@ -438,6 +520,7 @@ impl BinnedMatrix {
                 BinStorage::U16(Vec::new())
             },
             bins_col_adaptive,
+            compact_layout: OnceLock::new(),
         };
         validate_binned_matrix(&bundled)?;
         Ok(bundled)

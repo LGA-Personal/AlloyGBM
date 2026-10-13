@@ -244,6 +244,7 @@ fn binned_matrix_rejects_bin_above_max() {
         feature_bundle_map: None,
         bins_adaptive: BinStorage::U8(vec![3, 8]),
         bins_col_adaptive: BinStorage::U8(vec![3, 8]),
+        compact_layout: Default::default(),
     };
     assert!(matches!(
         validate_binned_matrix(&matrix),

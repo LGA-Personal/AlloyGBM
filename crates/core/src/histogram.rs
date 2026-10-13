@@ -143,6 +143,9 @@ pub struct HistogramFeatureView<'a> {
     hess_sums: &'a [f32],
     grad_sq_sums: Option<&'a [f32]>,
     counts: &'a [u32],
+    /// `Some(edge_limit)` for a compact view (see [`HistogramBundle`]); its
+    /// last bin is the missing bin.
+    compact_edge_limit: Option<usize>,
 }
 
 impl<'a> HistogramFeatureView<'a> {
@@ -174,6 +177,36 @@ impl<'a> HistogramFeatureView<'a> {
         self.counts
     }
 
+    /// Index of this feature's missing-value bin within the view.
+    ///
+    /// A compact view stores the missing bin last. A uniform view keeps it at
+    /// the matrix-wide index the caller passes (`options.missing_bin_index`),
+    /// which may lie past the end when the histogram has no missing bin.
+    #[inline]
+    pub fn missing_index(self, uniform_missing_bin: usize) -> usize {
+        match self.compact_edge_limit {
+            Some(_) => self.len().saturating_sub(1),
+            None => uniform_missing_bin,
+        }
+    }
+
+    /// The scan limit the "last threshold" rule compares against.
+    ///
+    /// Split scans skip a threshold whose left side already holds every
+    /// non-missing row when `threshold + 1 >= limit`. For a uniform view the
+    /// limit is the view's own scan limit; a compact view drops the empty bins
+    /// between its last data bin and the missing bin, so it carries the limit
+    /// its uniform layout would have had, which keeps the rule -- and the
+    /// chosen split -- unchanged.
+    #[inline]
+    pub fn edge_scan_limit(self, scan_limit: usize) -> usize {
+        self.compact_edge_limit.unwrap_or(scan_limit)
+    }
+
+    pub fn is_compact(self) -> bool {
+        self.compact_edge_limit.is_some()
+    }
+
     pub fn bin(self, index: usize) -> Option<HistogramBin> {
         Some(HistogramBin {
             grad_sum: *self.grad_sums.get(index)?,
@@ -193,11 +226,28 @@ impl<'a> HistogramFeatureView<'a> {
     }
 }
 
+/// Per-node gradient histograms for a set of features, stored as SoA columns.
+///
+/// Two layouts share the flat columns:
+///
+/// - **Uniform**: every feature owns `bin_count` consecutive bins and the
+///   missing bin sits at the matrix-wide missing index.
+/// - **Compact**: feature `i` owns `offsets[i]..offsets[i + 1]`, sized to the
+///   bins its data actually uses plus one trailing missing bin. A feature with
+///   two distinct values costs three bins instead of 256 (or 65,536 for wide
+///   bins), which is what makes wide, low-cardinality data cheap to histogram,
+///   subtract and scan. Data bin `b` keeps index `b`, so split thresholds mean
+///   the same thing in both layouts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistogramBundle {
     pub node_id: u32,
     feature_indices: Vec<u32>,
     bin_count: usize,
+    /// `feature_count + 1` start offsets into the flat columns.
+    offsets: Vec<usize>,
+    /// `Some(limit)` for the compact layout; see
+    /// [`HistogramFeatureView::edge_scan_limit`].
+    compact_edge_limit: Option<usize>,
     grad_sums: Vec<f32>,
     hess_sums: Vec<f32>,
     grad_sq_sums: Option<Vec<f32>>,
@@ -232,10 +282,66 @@ impl HistogramBundle {
                 "histogram SoA columns must all have length {expected_len}"
             )));
         }
+        let offsets = uniform_offsets(feature_indices.len(), bin_count);
         Ok(Self {
             node_id,
             feature_indices,
             bin_count,
+            offsets,
+            compact_edge_limit: None,
+            grad_sums,
+            hess_sums,
+            grad_sq_sums,
+            counts,
+        })
+    }
+
+    /// Build a compact-layout bundle (see the type docs). `offsets` has one
+    /// entry per feature plus a final end offset; each feature needs at least
+    /// one bin (its missing bin).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_soa_compact(
+        node_id: u32,
+        feature_indices: Vec<u32>,
+        offsets: Vec<usize>,
+        edge_limit: usize,
+        grad_sums: Vec<f32>,
+        hess_sums: Vec<f32>,
+        grad_sq_sums: Option<Vec<f32>>,
+        counts: Vec<u32>,
+    ) -> CoreResult<Self> {
+        if offsets.len() != feature_indices.len() + 1
+            || offsets.first() != Some(&0)
+            || offsets.windows(2).any(|pair| pair[1] <= pair[0])
+        {
+            return Err(CoreError::Validation(
+                "compact histogram offsets must start at 0 and give every feature a bin"
+                    .to_string(),
+            ));
+        }
+        let expected_len = *offsets.last().expect("offsets are non-empty");
+        if grad_sums.len() != expected_len
+            || hess_sums.len() != expected_len
+            || counts.len() != expected_len
+            || grad_sq_sums
+                .as_ref()
+                .is_some_and(|values| values.len() != expected_len)
+        {
+            return Err(CoreError::Validation(format!(
+                "histogram SoA columns must all have length {expected_len}"
+            )));
+        }
+        let bin_count = offsets
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .max()
+            .unwrap_or(0);
+        Ok(Self {
+            node_id,
+            feature_indices,
+            bin_count,
+            offsets,
+            compact_edge_limit: Some(edge_limit),
             grad_sums,
             hess_sums,
             grad_sq_sums,
@@ -291,8 +397,19 @@ impl HistogramBundle {
         self.feature_indices.len()
     }
 
+    /// Bins per feature for a uniform bundle; the widest feature's bin count
+    /// for a compact one.
     pub fn bin_count(&self) -> usize {
         self.bin_count
+    }
+
+    pub fn is_compact(&self) -> bool {
+        self.compact_edge_limit.is_some()
+    }
+
+    /// Total bins across every feature (the length of each SoA column).
+    pub fn total_bin_count(&self) -> usize {
+        self.grad_sums.len()
     }
 
     pub fn feature_indices(&self) -> &[u32] {
@@ -305,14 +422,15 @@ impl HistogramBundle {
 
     pub fn feature(&self, index: usize) -> Option<HistogramFeatureView<'_>> {
         let feature_index = *self.feature_indices.get(index)?;
-        let start = index * self.bin_count;
-        let end = start + self.bin_count;
+        let start = self.offsets[index];
+        let end = self.offsets[index + 1];
         Some(HistogramFeatureView {
             feature_index,
             grad_sums: &self.grad_sums[start..end],
             hess_sums: &self.hess_sums[start..end],
             grad_sq_sums: self.grad_sq_sums.as_ref().map(|values| &values[start..end]),
             counts: &self.counts[start..end],
+            compact_edge_limit: self.compact_edge_limit,
         })
     }
 
@@ -329,12 +447,14 @@ impl HistogramBundle {
         bin_index: usize,
         bin: HistogramBin,
     ) -> CoreResult<()> {
-        if feature_index >= self.feature_count() || bin_index >= self.bin_count {
+        if feature_index >= self.feature_count()
+            || bin_index >= self.offsets[feature_index + 1] - self.offsets[feature_index]
+        {
             return Err(CoreError::Validation(
                 "histogram feature or bin index is out of bounds".to_string(),
             ));
         }
-        let index = feature_index * self.bin_count + bin_index;
+        let index = self.offsets[feature_index] + bin_index;
         self.grad_sums[index] = bin.grad_sum;
         self.hess_sums[index] = bin.hess_sum;
         if let Some(values) = &mut self.grad_sq_sums {
@@ -345,9 +465,11 @@ impl HistogramBundle {
     }
 
     pub fn append(&mut self, other: Self) -> CoreResult<()> {
-        if self.bin_count != other.bin_count {
+        if self.compact_edge_limit != other.compact_edge_limit
+            || (self.compact_edge_limit.is_none() && self.bin_count != other.bin_count)
+        {
             return Err(CoreError::Validation(
-                "cannot append histograms with different bin counts".to_string(),
+                "cannot append histograms with different bin layouts".to_string(),
             ));
         }
         if self.has_grad_sq_sums() != other.has_grad_sq_sums() {
@@ -355,6 +477,10 @@ impl HistogramBundle {
                 "cannot append histograms with different squared-gradient layouts".to_string(),
             ));
         }
+        let base = self.grad_sums.len();
+        self.offsets
+            .extend(other.offsets[1..].iter().map(|&offset| base + offset));
+        self.bin_count = self.bin_count.max(other.bin_count);
         self.feature_indices.extend(other.feature_indices);
         self.grad_sums.extend(other.grad_sums);
         self.hess_sums.extend(other.hess_sums);
@@ -372,20 +498,32 @@ impl HistogramBundle {
             .enumerate()
             .filter_map(|(index, &feature)| is_allowed(feature).then_some(index))
             .collect();
-        let mut result = Self::new_zeroed_with_grad_sq(
-            &selected
+        let mut offsets = Vec::with_capacity(selected.len() + 1);
+        offsets.push(0);
+        for &source_feature in &selected {
+            let len = self.offsets[source_feature + 1] - self.offsets[source_feature];
+            offsets.push(offsets.last().expect("non-empty") + len);
+        }
+        let flat_len = *offsets.last().expect("non-empty");
+        let mut result = Self {
+            node_id: self.node_id,
+            feature_indices: selected
                 .iter()
                 .map(|&index| self.feature_indices[index])
-                .collect::<Vec<_>>(),
-            self.bin_count,
-            self.has_grad_sq_sums(),
-        );
-        result.node_id = self.node_id;
+                .collect(),
+            bin_count: self.bin_count,
+            offsets,
+            compact_edge_limit: self.compact_edge_limit,
+            grad_sums: vec![0.0; flat_len],
+            hess_sums: vec![0.0; flat_len],
+            grad_sq_sums: self.grad_sq_sums.as_ref().map(|_| vec![0.0; flat_len]),
+            counts: vec![0; flat_len],
+        };
         for (dest_feature, &source_feature) in selected.iter().enumerate() {
-            let source_start = source_feature * self.bin_count;
-            let source_end = source_start + self.bin_count;
-            let dest_start = dest_feature * self.bin_count;
-            let dest_end = dest_start + self.bin_count;
+            let source_start = self.offsets[source_feature];
+            let source_end = self.offsets[source_feature + 1];
+            let dest_start = result.offsets[dest_feature];
+            let dest_end = result.offsets[dest_feature + 1];
             result.grad_sums[dest_start..dest_end]
                 .copy_from_slice(&self.grad_sums[source_start..source_end]);
             result.hess_sums[dest_start..dest_end]
@@ -406,8 +544,10 @@ impl HistogramBundle {
     ) -> CoreResult<()> {
         if parent.feature_indices != child.feature_indices
             || destination.feature_indices != parent.feature_indices
-            || parent.bin_count != child.bin_count
-            || destination.bin_count != parent.bin_count
+            || parent.offsets != child.offsets
+            || destination.offsets != parent.offsets
+            || parent.compact_edge_limit != child.compact_edge_limit
+            || destination.compact_edge_limit != parent.compact_edge_limit
             || parent.has_grad_sq_sums() != child.has_grad_sq_sums()
             || destination.has_grad_sq_sums() != parent.has_grad_sq_sums()
         {
@@ -527,12 +667,18 @@ impl HistogramBundle {
             node_id: 0,
             feature_indices: feature_indices.to_vec(),
             bin_count,
+            offsets: uniform_offsets(feature_indices.len(), bin_count),
+            compact_edge_limit: None,
             grad_sums: vec![0.0; flat_len],
             hess_sums: vec![0.0; flat_len],
             grad_sq_sums: include_grad_sq.then(|| vec![0.0; flat_len]),
             counts: vec![0; flat_len],
         }
     }
+}
+
+fn uniform_offsets(feature_count: usize, bin_count: usize) -> Vec<usize> {
+    (0..=feature_count).map(|index| index * bin_count).collect()
 }
 
 #[cfg(test)]
