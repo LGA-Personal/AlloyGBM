@@ -261,8 +261,13 @@ def export(cache: Path, max_rows: int = DEFAULT_MAX_ROWS, path: Path = MANIFEST,
 
 
 def load(cache: Path, splits: int = SPLITS, tasks: Iterable[int] | None = None,
-         path: Path = MANIFEST, log: Callable[[str], None] = print) -> list:
-    """Datasets from an exported cache, each with ``splits`` seeded 75/25 folds."""
+         path: Path = MANIFEST, log: Callable[[str], None] = print,
+         train_cap: int | None = None) -> list:
+    """Datasets from an exported cache, each with ``splits`` seeded 75/25 folds.
+
+    ``train_cap`` caps training rows per split (test splits stay whole), for
+    cheap screening runs.
+    """
     sys.path.insert(0, str(HERE))
     from sklearn.model_selection import train_test_split
 
@@ -302,7 +307,7 @@ def load(cache: Path, splits: int = SPLITS, tasks: Iterable[int] | None = None,
                            features=X.shape[1], n_classes=max(n_classes, 2),
                            cat_low=0, cat_high=0)
         out.append(fm.Dataset(spec, X, y, tuple(int(c) for c in z["categorical"]), None,
-                              folds=tuple(folds)))
+                              folds=tuple(folds), train_cap=train_cap))
     return out
 
 
