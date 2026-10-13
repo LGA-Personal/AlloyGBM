@@ -96,6 +96,42 @@ def test_numpy_codes_follow_sorted_category_order():
     assert _rmse(model.predict(matrix), y) < 0.15
 
 
+@pytest.mark.parametrize("labels", [np.arange(12), np.arange(12) * 10 + 10])
+def test_numpy_integer_categories_match_by_value(labels):
+    # 12 levels: "10" sorts before "2" as a string, and labels 10..120 are
+    # not positions, so numeric input must match categories by value.
+    rng = np.random.default_rng(6)
+    codes = rng.integers(0, 12, 3000)
+    effects = rng.normal(size=12) * 2.0
+    y = effects[codes] + 0.05 * rng.normal(size=3000)
+    matrix = np.column_stack([rng.normal(size=3000), labels[codes].astype(float)])
+    names = [str(v) for v in labels[codes]]
+    model = GBMRegressor(n_estimators=100, seed=0, categorical_feature_indices=[1])
+    model.fit(matrix, y, categorical_feature_values_list=[names])
+    assert _rmse(model.predict(matrix), y) < 0.15
+
+
+def test_numpy_nan_uses_the_missing_category_bin():
+    rng = np.random.default_rng(7)
+    codes = rng.integers(0, 4, 3000).astype(float)
+    codes[::5] = np.nan
+    y = np.where(np.isnan(codes), 5.0, np.nan_to_num(codes)) + 0.05 * rng.normal(size=3000)
+    matrix = np.column_stack([rng.normal(size=3000), codes])
+    names = [str(c) for c in codes]  # NaN becomes the category "nan"
+    model = GBMRegressor(n_estimators=100, seed=0, categorical_feature_indices=[1])
+    model.fit(matrix, y, categorical_feature_values_list=[names])
+    assert np.all(np.abs(model.predict(matrix[np.isnan(codes)]) - 5.0) < 0.3)
+
+
+def test_non_finite_category_values_are_placeholders():
+    X, y, _ = _data()
+    names = ["inf" if i % 9 == 0 else str(c) for i, c in enumerate(X["c"])]
+    rows = [[float(x), name] for x, name in zip(X["x"], names)]
+    model = GBMRegressor(n_estimators=20, seed=0, categorical_feature_indices=[1])
+    model.fit(rows, y, categorical_feature_values_list=[names])
+    assert np.all(np.isfinite(model.predict(rows)))
+
+
 def test_save_load_and_pickle_keep_target_encoding(tmp_path):
     X, y, _ = _data()
     model = GBMRegressor(n_estimators=50, seed=0).fit(X, y)

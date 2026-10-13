@@ -386,11 +386,13 @@ provided, they are merged.
 Target-encoded columns are stored as bins ordered by each category's encoded
 value, and the model keeps the category→bin mapping for prediction. At
 `predict()`, DataFrame columns of category, object or string dtype are looked
-up by value; numeric columns (including NumPy input) follow the same
-convention as native categorical splits, where value `k` is the `k`-th
-training category in sorted string order. Categories not seen in training,
-and missing values when training had none, get the bin of the global target
-mean.
+up by value. Numeric columns (including NumPy input) are also looked up by
+value when the training categories are numbers, so `2.0` matches the category
+`"2"`. When the training categories are not numbers, numeric value `k` is the
+`k`-th training category in sorted string order, the native categorical
+convention. NaN gets the missing-category bin when training saw missing
+values. Unseen categories, and NaN when training had no missing values, get
+the bin of the global target mean.
 
 ## DRO Leaf Solver
 

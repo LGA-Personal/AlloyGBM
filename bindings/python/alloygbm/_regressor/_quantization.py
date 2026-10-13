@@ -85,10 +85,14 @@ class _QuantizationMixin:
             row_values: list[float] = []
             for feature_index, value in enumerate(row):
                 if feature_index in cat_indices_set:
+                    # Placeholder only: the bridge rebins categorical columns
+                    # from their string values, so a NaN or "inf" category
+                    # must not fail validation or disable pre-binned input.
                     try:
-                        row_values.append(float(value))
+                        numeric = float(value)
                     except (TypeError, ValueError):
-                        row_values.append(0.0)
+                        numeric = 0.0
+                    row_values.append(numeric if math.isfinite(numeric) else 0.0)
                 else:
                     row_values.append(float(value))
             if expected_width is None:

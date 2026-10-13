@@ -512,24 +512,44 @@ class _ValidationMixin:
         Training stores a target-encoded column as bin indices ordered by
         encoded value, so prediction must feed the same index. DataFrame
         columns of category, object or string dtype are looked up by their
-        string form (as at fit time). Numeric columns follow the native
-        categorical convention: value ``k`` is the ``k``-th training category
-        in sorted order. Unseen categories and NaN outside training get the
-        bin of the global target mean.
+        string form (as at fit time). Numeric columns are looked up by value
+        when the training categories are numbers (``2.0`` matches the
+        category ``"2"`` or ``"2.0"``); otherwise value ``k`` is the ``k``-th
+        training category in sorted order, the native categorical convention.
+        NaN gets the missing-category bin when training saw one. Unseen
+        categories get the bin of the global target mean.
         """
         encodings = getattr(self, "_target_encoding_bins_", None)
         if not encodings:
             return X
+        import math
+
         import numpy as np
 
-        def numeric_lookup(info: dict) -> np.ndarray:
-            ordered = sorted(info["bins"])
-            return np.asarray([info["bins"][c] for c in ordered], dtype=np.float32)
+        def numeric_keys(info: dict) -> dict[float, int] | None:
+            keyed: dict[float, int] = {}
+            for category, bin_ in info["bins"].items():
+                try:
+                    value = float(category)
+                except ValueError:
+                    return None
+                if math.isfinite(value):
+                    keyed[value] = bin_
+            return keyed or None
 
         def map_numeric(values: np.ndarray, info: dict) -> np.ndarray:
-            table = numeric_lookup(info)
-            out = np.full(values.shape, float(info["unknown"]), dtype=np.float32)
+            unknown = float(info["unknown"])
+            out = np.full(values.shape, unknown, dtype=np.float32)
+            out[np.isnan(values)] = float(info["bins"].get("nan", unknown))
             finite = np.isfinite(values)
+            keyed = numeric_keys(info)
+            if keyed is not None:
+                uniques, inverse = np.unique(values[finite], return_inverse=True)
+                table = np.asarray([keyed.get(float(v), unknown) for v in uniques], dtype=np.float32)
+                out[finite] = table[inverse]
+                return out
+            ordered = sorted(info["bins"])
+            table = np.asarray([info["bins"][c] for c in ordered], dtype=np.float32)
             codes = np.where(finite, values, -1.0)
             valid = finite & (codes >= 0) & (codes < len(table)) & (codes == np.floor(codes))
             out[valid] = table[codes[valid].astype(np.int64)]
