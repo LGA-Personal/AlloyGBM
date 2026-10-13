@@ -28,7 +28,7 @@ use crate::JointObjective;
 use crate::MorphState;
 use crate::error::{EngineError, EngineResult};
 use crate::objectives::weighted_quantile;
-use crate::round::apply_tree_to_binned_predictions;
+use crate::round::{apply_tree_to_binned_predictions, binned_split_went_left};
 use crate::tree_node::{decode_tree_node_id, left_child_node_id, right_child_node_id};
 use crate::types::TrainedStump;
 
@@ -293,7 +293,8 @@ fn terminal_local_node_id_for_row(
             )));
         }
         let bin = binned_matrix.row_bin(cell_index);
-        let next_local_node_id = if bin <= stump.split.threshold_bin {
+        let next_local_node_id = if binned_split_went_left(stump, bin, binned_matrix.missing_bin())
+        {
             left_child_node_id(local_node_id)?
         } else {
             right_child_node_id(local_node_id)?

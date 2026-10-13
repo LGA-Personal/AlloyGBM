@@ -197,7 +197,7 @@ pub(crate) fn apply_weighted_round_to_rows(
 }
 
 #[inline]
-fn binned_split_went_left(stump: &TrainedStump, bin: u16, missing_bin: u16) -> bool {
+pub(crate) fn binned_split_went_left(stump: &TrainedStump, bin: u16, missing_bin: u16) -> bool {
     if bin == missing_bin {
         stump.split.default_left
     } else if stump.split.is_categorical {
