@@ -810,7 +810,206 @@ fn bundled_histograms_preserve_logical_missing_bins_on_unbundled_features() {
     )
     .expect("bundled histograms");
 
-    assert_eq!(actual, expected);
+    // The unbundled matrix uses the compact layout and the bundled one the
+    // uniform layout, so compare bin contents rather than storage.
+    assert!(expected.is_compact());
+    assert!(!actual.is_compact());
+    assert_same_histogram_contents(&expected, &actual, usize::from(MISSING_BIN_U8));
+}
+
+/// Assert two bundles hold the same per-feature bins, whatever their layouts:
+/// every data bin and the missing bin match, and bins one layout omits are
+/// zero in the other.
+fn assert_same_histogram_contents(
+    left: &HistogramBundle,
+    right: &HistogramBundle,
+    uniform_missing_bin: usize,
+) {
+    assert_eq!(left.feature_indices(), right.feature_indices());
+    assert_eq!(left.has_grad_sq_sums(), right.has_grad_sq_sums());
+    for (left, right) in left.features().zip(right.features()) {
+        let left_missing = left.missing_index(uniform_missing_bin);
+        let right_missing = right.missing_index(uniform_missing_bin);
+        assert_eq!(left.bin(left_missing), right.bin(right_missing));
+        let data_bins = left_missing
+            .min(left.len())
+            .max(right_missing.min(right.len()));
+        let zero = HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        for bin in 0..data_bins {
+            let read = |view: HistogramFeatureView<'_>, missing: usize| {
+                if bin < missing.min(view.len()) {
+                    view.bin(bin).expect("bounded bin")
+                } else {
+                    zero.clone()
+                }
+            };
+            assert_eq!(
+                read(left, left_missing),
+                read(right, right_missing),
+                "feature {} bin {bin}",
+                left.feature_index()
+            );
+        }
+    }
+}
+
+/// A uniform-layout copy of a bundle: every feature padded to `bin_count`
+/// bins with its missing bin at `missing_bin`.
+fn uniform_copy(bundle: &HistogramBundle, bin_count: usize, missing_bin: usize) -> HistogramBundle {
+    let mut uniform = HistogramBundle::new_zeroed_with_grad_sq(
+        bundle.feature_indices(),
+        bin_count,
+        bundle.has_grad_sq_sums(),
+    );
+    uniform.node_id = bundle.node_id;
+    for (index, view) in bundle.features().enumerate() {
+        let missing = view.missing_index(missing_bin);
+        for bin in 0..view.len() {
+            let target = if bin == missing { missing_bin } else { bin };
+            uniform
+                .set_bin(index, target, view.bin(bin).expect("bounded bin"))
+                .expect("uniform bin in range");
+        }
+    }
+    uniform
+}
+
+#[test]
+fn compact_layout_sizes_each_feature_to_its_bins() {
+    // Feature 0 uses bins 0..=2 plus missing, feature 1 a single bin, and
+    // feature 2 spans the full u8 range.
+    let rows = 300;
+    let mut bins = Vec::with_capacity(rows * 3);
+    for row in 0..rows {
+        bins.push(if row % 7 == 0 {
+            MISSING_BIN_U8
+        } else {
+            (row % 3) as u8
+        });
+        bins.push(0);
+        bins.push((row % 255) as u8);
+    }
+    let matrix = BinnedMatrix::new(rows, 3, u16::from(MISSING_BIN_U8), bins).expect("matrix");
+    let layout = matrix.compact_histogram_layout().expect("compact layout");
+    assert_eq!(layout.data_bins, vec![3, 1, 255]);
+    assert_eq!(layout.edge_limit, usize::from(MISSING_BIN_U8));
+
+    let gradients = (0..rows)
+        .map(|row| GradientPair::new((row as f32 * 0.37).sin(), 1.0 + (row % 5) as f32 * 0.1))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("gradients");
+    let node = NodeSlice::new(0, (0..rows as u32).collect()).expect("node");
+    let compact = CpuBackend
+        .build_histograms(
+            &matrix,
+            &gradients,
+            &node,
+            &[FeatureTile::new(0, 3).expect("tile")],
+        )
+        .expect("histograms");
+    assert!(compact.is_compact());
+    let lengths: Vec<usize> = compact.features().map(|view| view.len()).collect();
+    assert_eq!(lengths, vec![4, 2, 256]);
+    assert_eq!(
+        compact
+            .feature(0)
+            .expect("feature")
+            .bin(3)
+            .expect("missing")
+            .count,
+        43
+    );
+}
+
+#[test]
+fn compact_and_uniform_layouts_choose_identical_splits() {
+    let rows = 400;
+    let feature_count = 4;
+    let mut bins = Vec::with_capacity(rows * feature_count);
+    for row in 0..rows {
+        // Binary with missing values, ternary, a 40-bin feature and a
+        // single-valued feature.
+        bins.push(if row % 11 == 0 {
+            MISSING_BIN_U8
+        } else {
+            (row % 2) as u8
+        });
+        bins.push((row % 3) as u8);
+        bins.push(((row * 7) % 40) as u8);
+        bins.push(0);
+    }
+    let matrix =
+        BinnedMatrix::new(rows, feature_count, u16::from(MISSING_BIN_U8), bins).expect("matrix");
+    let gradients = (0..rows)
+        .map(|row| {
+            let signal = if row % 2 == 0 { 1.0 } else { -0.5 } + ((row * 7) % 40) as f32 * 0.01;
+            GradientPair::new(signal + (row as f32 * 0.13).cos() * 0.2, 1.0)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("gradients");
+    let node = NodeSlice::new(0, (0..rows as u32).collect()).expect("node");
+    let tiles = [FeatureTile::new(0, feature_count as u32).expect("tile")];
+    for include_grad_sq in [false, true] {
+        let compact = CpuBackend::build_histograms_internal(
+            &matrix,
+            &gradients,
+            &node,
+            &tiles,
+            false,
+            include_grad_sq,
+        )
+        .expect("histograms");
+        assert!(compact.is_compact());
+        let uniform = uniform_copy(&compact, 256, usize::from(MISSING_BIN_U8));
+        assert_same_histogram_contents(&compact, &uniform, usize::from(MISSING_BIN_U8));
+        let dro_configs: &[Option<alloygbm_core::DroConfig>] = if include_grad_sq {
+            &[
+                None,
+                Some(alloygbm_core::DroConfig {
+                    radius: 0.2,
+                    ..alloygbm_core::DroConfig::default()
+                }),
+            ]
+        } else {
+            &[None]
+        };
+        for (min_rows_per_leaf, &dro_config) in [1, 20]
+            .into_iter()
+            .flat_map(|rows| dro_configs.iter().map(move |dro| (rows, dro)))
+        {
+            let options = SplitSelectionOptions {
+                min_rows_per_leaf,
+                missing_bin_index: usize::from(MISSING_BIN_U8),
+                dro_config,
+                ..SplitSelectionOptions::default()
+            };
+            assert_eq!(
+                CpuBackend
+                    .best_split_with_options(&compact, options, &[], &[])
+                    .expect("split"),
+                CpuBackend
+                    .best_split_with_options(&uniform, options, &[], &[])
+                    .expect("split"),
+            );
+            let categorical = [CategoricalFeatureInfo {
+                feature_index: 1,
+                num_categories: 3,
+            }];
+            assert_eq!(
+                CpuBackend
+                    .best_split_with_options(&compact, options, &[], &categorical)
+                    .expect("split"),
+                CpuBackend
+                    .best_split_with_options(&uniform, options, &[], &categorical)
+                    .expect("split"),
+            );
+        }
+    }
 }
 
 #[test]
