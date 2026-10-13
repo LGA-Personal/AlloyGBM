@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 
 use alloygbm_core::GradientPair;
 
+use super::fill_rowwise_gradients;
 use crate::error::{EngineError, EngineResult};
 use crate::traits::ObjectiveOps;
 
@@ -114,11 +115,7 @@ impl ObjectiveOps for QuantileObjective {
             }
         }
 
-        buffer.clear();
-        if buffer.capacity() < predictions.len() {
-            buffer.reserve(predictions.len() - buffer.capacity());
-        }
-        for index in 0..predictions.len() {
+        fill_rowwise_gradients(buffer, predictions.len(), |index| {
             let weight = sample_weights.map_or(1.0, |weights| weights[index]);
             let target = targets[index];
             let prediction = predictions[index];
@@ -127,8 +124,8 @@ impl ObjectiveOps for QuantileObjective {
             } else {
                 (1.0 - self.alpha) * weight
             };
-            buffer.push(GradientPair { grad, hess: weight });
-        }
+            GradientPair { grad, hess: weight }
+        });
         Ok(())
     }
 

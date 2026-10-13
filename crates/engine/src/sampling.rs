@@ -93,23 +93,62 @@ fn sampled_index_partition(
         return ((0..total_count as u32).collect(), Vec::new());
     }
     let round_seed = round_seed_for(seed_base, round_index);
-    let mut scored: Vec<(u64, u32)> = (0..total_count)
-        .map(|index| selection_key(round_seed, index))
+    let hashes: Vec<u64> = (0..total_count)
+        .map(|index| selection_key(round_seed, index).0)
         .collect();
-    scored.select_nth_unstable(keep_count);
-    let pivot = scored[keep_count];
-    drop(scored);
+    let pivot = selection_pivot(&hashes, keep_count);
 
-    let mut selected = Vec::with_capacity(keep_count);
-    let mut excluded = Vec::with_capacity(total_count - keep_count);
-    for index in 0..total_count {
-        if selection_key(round_seed, index) < pivot {
-            selected.push(index as u32);
-        } else {
-            excluded.push(index as u32);
-        }
+    // Branch-free split: each index is written to both lists and only the
+    // matching list's length advances (the sample is close to a coin flip
+    // per row, so a branch here mispredicts often). Both lists come out in
+    // ascending index order.
+    let mut selected = vec![0_u32; keep_count + 1];
+    let mut excluded = vec![0_u32; total_count - keep_count + 1];
+    let mut selected_len = 0;
+    let mut excluded_len = 0;
+    for (index, &hash) in hashes.iter().enumerate() {
+        let keep = (hash, index as u32) < pivot;
+        selected[selected_len] = index as u32;
+        excluded[excluded_len] = index as u32;
+        selected_len += usize::from(keep);
+        excluded_len += usize::from(!keep);
     }
+    selected.truncate(selected_len);
+    excluded.truncate(excluded_len);
     (selected, excluded)
+}
+
+/// The `keep_count`-th smallest `(hash, index)` key (0-based), i.e. the key
+/// `select_nth_unstable(keep_count)` would place at `keep_count`.
+///
+/// Keys are bucketed by their top hash bits; only the bucket holding that
+/// rank is materialized and selected within. Keys are unique, so the
+/// result is exactly the pivot a full selection finds, at the cost of two
+/// linear passes over the hashes instead of a selection over every key.
+fn selection_pivot(hashes: &[u64], keep_count: usize) -> (u64, u32) {
+    const BUCKET_BITS: u32 = 12;
+    let shift = u64::BITS - BUCKET_BITS;
+    let mut bucket_counts = vec![0_usize; 1 << BUCKET_BITS];
+    for &hash in hashes {
+        bucket_counts[(hash >> shift) as usize] += 1;
+    }
+    let mut rank = keep_count;
+    let mut target_bucket = 0;
+    for (bucket, &count) in bucket_counts.iter().enumerate() {
+        if rank < count {
+            target_bucket = bucket as u64;
+            break;
+        }
+        rank -= count;
+    }
+    let mut bucket_keys: Vec<(u64, u32)> = hashes
+        .iter()
+        .enumerate()
+        .filter(|&(_, &hash)| hash >> shift == target_bucket)
+        .map(|(index, &hash)| (hash, index as u32))
+        .collect();
+    bucket_keys.select_nth_unstable(rank);
+    bucket_keys[rank]
 }
 
 pub(crate) fn sampled_indices(
@@ -498,4 +537,41 @@ pub(crate) fn goss_sample_indices(
         round_index,
     );
     (selection.top, selection.other, selection.amplification)
+}
+
+#[cfg(test)]
+mod pivot_tests {
+    use super::{round_seed_for, selection_key, selection_pivot};
+
+    #[test]
+    fn bucketed_pivot_matches_full_selection() {
+        for total_count in [1_usize, 2, 7, 100, 4_097, 40_000] {
+            for round in 0..3_u64 {
+                let round_seed = round_seed_for(17, round);
+                let hashes: Vec<u64> = (0..total_count)
+                    .map(|index| selection_key(round_seed, index).0)
+                    .collect();
+                let mut keys: Vec<(u64, u32)> = (0..total_count)
+                    .map(|index| selection_key(round_seed, index))
+                    .collect();
+                for keep_count in [0, total_count / 3, total_count.saturating_sub(1)] {
+                    keys.select_nth_unstable(keep_count);
+                    assert_eq!(selection_pivot(&hashes, keep_count), keys[keep_count]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bucketed_pivot_handles_one_crowded_bucket() {
+        // Every hash shares its top bits, so the whole input lands in one bucket.
+        let hashes: Vec<u64> = (0..500_u64).map(|value| (value * 7919) % 500).collect();
+        let mut keys: Vec<(u64, u32)> = hashes
+            .iter()
+            .enumerate()
+            .map(|(index, &hash)| (hash, index as u32))
+            .collect();
+        keys.select_nth_unstable(250);
+        assert_eq!(selection_pivot(&hashes, 250), keys[250]);
+    }
 }

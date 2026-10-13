@@ -4,6 +4,15 @@
 
 ### Performance
 
+- **Dense and multiclass fits take 0.72–0.84× the time, with bit-identical
+  models.** The multiclass softmax normalizer is computed once per row
+  instead of once per class (helena, 100 classes: 108 s to 15.6 s for 100
+  rounds); rows are partitioned through a per-split direction table without
+  a per-row branch; the out-of-bag replay walks an index tree instead of a
+  hash map; the split scan skips threshold chunks that cannot win; the
+  row-sample pivot is found by bucketing; and row-wise gradients and binary
+  log loss run in parallel with serial-order sums. See
+  `docs/benchmarks/fit_speed_v3.md`.
 - **Wide, low-cardinality data fits about twice as fast, with bit-identical
   models.** Each feature's histogram is now sized to the bins it actually
   uses instead of the full `max_bin` width, so a 0/1 column no longer pays

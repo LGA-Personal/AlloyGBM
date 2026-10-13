@@ -114,6 +114,57 @@ impl SplitRowLookup {
     }
 }
 
+/// Per-row split direction with the bin-storage dispatch hoisted out of the
+/// row loop. For a u8 column the direction of every possible bin is
+/// precomputed, so a row costs one table load instead of the missing /
+/// categorical / threshold branches; other layouts use [`SplitRowLookup`].
+// One value lives on the stack per split; boxing the table would add a
+// pointer chase to every row.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy)]
+enum SplitDirection<'a> {
+    U8Table {
+        column: &'a [u8],
+        goes_left: [bool; 256],
+    },
+    Lookup {
+        matrix: &'a BinnedMatrix,
+        split: &'a SplitCandidate,
+        lookup: SplitRowLookup,
+    },
+}
+
+impl<'a> SplitDirection<'a> {
+    fn new(matrix: &'a BinnedMatrix, split: &'a SplitCandidate, lookup: SplitRowLookup) -> Self {
+        match matrix.col_bins(lookup.feature_index) {
+            Some(BinColumn::U8(column)) => {
+                let mut goes_left = [false; 256];
+                for (bin, left) in goes_left.iter_mut().enumerate() {
+                    *left = goes_left_for_split(bin as u16, lookup.missing_bin, split);
+                }
+                Self::U8Table { column, goes_left }
+            }
+            _ => Self::Lookup {
+                matrix,
+                split,
+                lookup,
+            },
+        }
+    }
+
+    #[inline]
+    fn goes_left(&self, row: u32) -> bool {
+        match self {
+            Self::U8Table { column, goes_left } => goes_left[usize::from(column[row as usize])],
+            Self::Lookup {
+                matrix,
+                split,
+                lookup,
+            } => lookup.goes_left(matrix, row, split),
+        }
+    }
+}
+
 impl CpuBackend {
     pub fn device(&self) -> Device {
         Device::Cpu
@@ -1025,6 +1076,16 @@ impl CpuBackend {
                         for slot in g_arr.iter_mut().skip(chunk_len) {
                             *slot = f32::NEG_INFINITY;
                         }
+                        // A lane can only win by materially exceeding the
+                        // running best, which needs `gain > best_gain`. When no
+                        // lane clears that, the edge filter (which only lowers
+                        // gains) and the argmax below cannot change anything.
+                        // `f32::max` skips NaN lanes, which never win either.
+                        let chunk_max = g_arr.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        if chunk_max <= best_gain {
+                            chunk_start = chunk_end;
+                            continue;
+                        }
                         // Skip "edge" thresholds where left covers all non-missing bins.
                         // Replicates the scalar check:
                         //   if threshold_bin + 1 >= edge_limit && nm_total_count == left_count { skip }
@@ -1910,15 +1971,16 @@ impl CpuBackend {
         split: &SplitCandidate,
         lookup: SplitRowLookup,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let direction = SplitDirection::new(binned_matrix, split, lookup);
         let (left_stats, right_stats) =
-            Self::parallel_split_stats(binned_matrix, gradients, &node.row_indices, split, lookup);
+            Self::parallel_split_stats(gradients, &node.row_indices, &direction);
         let left_count = left_stats.row_count as usize;
         let right_count = right_stats.row_count as usize;
         let mut left_row_indices = Vec::with_capacity(left_count);
         let mut right_row_indices = Vec::with_capacity(right_count);
 
         for &row in &node.row_indices {
-            if lookup.goes_left(binned_matrix, row, split) {
+            if direction.goes_left(row) {
                 left_row_indices.push(row);
             } else {
                 right_row_indices.push(row);
@@ -1940,19 +2002,31 @@ impl CpuBackend {
         left_capacity: usize,
         mut goes_left: impl FnMut(u32) -> bool,
     ) -> (Vec<u32>, Vec<u32>) {
-        let mut left_rows = Vec::with_capacity(left_capacity);
+        // Branch-free: every row is written to both the left buffer and the
+        // in-place right prefix, and only the matching side's length
+        // advances. A split sends rows left or right close to at random, so
+        // a branch per row mispredicts often; the extra store is cheaper.
+        // The right write never passes the read position, so reading
+        // `rows[read_index]` still sees the original row.
+        let mut left_rows = vec![0_u32; rows.len()];
+        let mut left_len = 0;
         let mut right_len = 0;
 
         for read_index in 0..rows.len() {
             let row = rows[read_index];
-            if goes_left(row) {
-                left_rows.push(row);
-            } else {
-                rows[right_len] = row;
-                right_len += 1;
-            }
+            let left = goes_left(row);
+            left_rows[left_len] = row;
+            rows[right_len] = row;
+            left_len += usize::from(left);
+            right_len += usize::from(!left);
         }
         rows.truncate(right_len);
+        left_rows.truncate(left_len);
+        // Give back the buffer's unused half rather than holding twice the
+        // left child's rows while it waits to be split.
+        if left_rows.capacity() > left_capacity.max(left_len) {
+            left_rows.shrink_to(left_capacity.max(left_len));
+        }
 
         (left_rows, rows)
     }
@@ -1964,12 +2038,13 @@ impl CpuBackend {
         split: &SplitCandidate,
         lookup: SplitRowLookup,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let direction = SplitDirection::new(binned_matrix, split, lookup);
         let (left_stats, right_stats) =
-            Self::parallel_split_stats(binned_matrix, gradients, &node.row_indices, split, lookup);
+            Self::parallel_split_stats(gradients, &node.row_indices, &direction);
         let (left_row_indices, right_row_indices) = Self::stable_partition_owned_rows(
             node.row_indices,
             left_stats.row_count as usize,
-            |row| lookup.goes_left(binned_matrix, row, split),
+            |row| direction.goes_left(row),
         );
 
         Ok((
@@ -1983,11 +2058,9 @@ impl CpuBackend {
     }
 
     fn parallel_split_stats(
-        binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
         rows: &[u32],
-        split: &SplitCandidate,
-        lookup: SplitRowLookup,
+        direction: &SplitDirection<'_>,
     ) -> (NodeStats, NodeStats) {
         // Chunk width must depend only on the row count. Deriving it from
         // `current_num_threads()` made the per-chunk gradient sums fold in a
@@ -2001,7 +2074,7 @@ impl CpuBackend {
                 let mut stats = ChunkStats::default();
                 for &row in chunk {
                     let gradient = gradients[row as usize];
-                    if lookup.goes_left(binned_matrix, row, split) {
+                    if direction.goes_left(row) {
                         stats.left.add(gradient);
                     } else {
                         stats.right.add(gradient);

@@ -14,7 +14,7 @@ use crate::factor_split::validate_factor_split_context;
 use crate::split_helpers::{
     apply_feature_weight, feature_weight_allows_split, gain_materially_exceeds,
 };
-use crate::{NodeStatsAccumulator, pl, pl_histogram};
+use crate::{NodeStatsAccumulator, SplitDirection, pl, pl_histogram};
 
 pub(crate) fn morph_uses_standard_gain_only(morph: &MorphContext) -> bool {
     morph.precomputed.in_warmup
@@ -401,20 +401,19 @@ impl BackendOps for CpuBackend {
             });
         }
 
-        let mut left_stats = NodeStatsAccumulator::default();
-        let mut right_stats = NodeStatsAccumulator::default();
+        // Index 0 accumulates the left child, index 1 the right. Each side
+        // still sums its rows in row order, so the stats are bit-identical to
+        // separate accumulators.
+        let mut side_stats = [NodeStatsAccumulator::default(); 2];
         let left_capacity = node.row_indices.len() / 2;
+        let direction = SplitDirection::new(binned_matrix, split, lookup);
         let (left_row_indices, right_row_indices) =
             Self::stable_partition_owned_rows(node.row_indices, left_capacity, |row| {
-                let gradient = gradients[row as usize];
-                if lookup.goes_left(binned_matrix, row, split) {
-                    left_stats.add(gradient);
-                    true
-                } else {
-                    right_stats.add(gradient);
-                    false
-                }
+                let left = direction.goes_left(row);
+                side_stats[usize::from(!left)].add(gradients[row as usize]);
+                left
             });
+        let [left_stats, right_stats] = side_stats;
 
         let partition = PartitionResult {
             left_row_indices,

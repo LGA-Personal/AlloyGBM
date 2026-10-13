@@ -1436,16 +1436,13 @@ impl Trainer {
             let mut class_gradient_buffers: Vec<Vec<GradientPair>> = Vec::with_capacity(k);
             let mut class_original_gradient_norms: Vec<Option<f32>> = Vec::with_capacity(k);
             {
-                let mut tmp_buf: Vec<GradientPair> = Vec::with_capacity(n);
                 let mut projection_scratch: Vec<f32> = Vec::with_capacity(n);
-                for class_k in 0..k {
-                    objective.compute_gradients_for_class(
-                        &class_predictions,
-                        &dataset.targets,
-                        dataset.sample_weights.as_deref(),
-                        class_k,
-                        &mut tmp_buf,
-                    )?;
+                let all_class_gradients = objective.compute_gradients_all_classes(
+                    &class_predictions,
+                    &dataset.targets,
+                    dataset.sample_weights.as_deref(),
+                )?;
+                for mut tmp_buf in all_class_gradients {
                     let original_norm = if gradient_projector.is_some() {
                         Some(gradient_l2_norm_only(&tmp_buf))
                     } else {
@@ -1457,7 +1454,7 @@ impl Trainer {
                             &mut projection_scratch,
                         )?;
                     }
-                    class_gradient_buffers.push(tmp_buf.clone());
+                    class_gradient_buffers.push(tmp_buf);
                     class_original_gradient_norms.push(original_norm);
                 }
             }

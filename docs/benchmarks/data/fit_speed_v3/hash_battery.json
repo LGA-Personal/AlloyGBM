@@ -1,0 +1,710 @@
+{
+ "main_22232d8_1_threads": {
+  "reg": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_auto": [
+   "dfb5574d237e962b",
+   "a39d217b534615fc"
+  ],
+  "reg_manual": [
+   "623ba0818ec3ce77",
+   "7c82f54a0e435311"
+  ],
+  "reg_leaf": [
+   "a21805510a8b6b76",
+   "974ed0fc1006f50e"
+  ],
+  "reg_deep": [
+   "cdbab91c2816c986",
+   "b7d513fc1c62dfbe"
+  ],
+  "reg_l1l2": [
+   "87ab8c761e81f7ca",
+   "37a4804b4a03713d"
+  ],
+  "reg_mono": [
+   "95c9e48e4df2e1bf",
+   "efb2af716bb03f5d"
+  ],
+  "reg_inter": [
+   "2287d9077a8ea526",
+   "d6153b7117a9469d"
+  ],
+  "reg_fw": [
+   "66343da08feea648",
+   "4ac5ad41b8ce1b2c"
+  ],
+  "reg_cat_native": [
+   "f009ae3793c16b8b",
+   "762a112e98255554"
+  ],
+  "reg_cat_te": [
+   "6311559a8184dd41",
+   "a0956a715b1bcce9"
+  ],
+  "reg_pl": [
+   "c8ef97c8b797af00",
+   "51b875eb85c95ad0"
+  ],
+  "reg_dro": [
+   "7d130f42ba672fc1",
+   "46878dbf871ab224"
+  ],
+  "reg_morph": [
+   "4bce85111afc12d8",
+   "0308d40927ad5b42"
+  ],
+  "reg_goss": [
+   "b9bf7eb15eb5a58f",
+   "ed1a18cfd5afd3f4"
+  ],
+  "reg_dart": [
+   "bbbab70203cfdadc",
+   "3608ca246a74c537"
+  ],
+  "reg_colnode": [
+   "3fb357fdb74e0f55",
+   "ff0920a681eff3f2"
+  ],
+  "reg_quantile": [
+   "826d3d7500ad2005",
+   "cf18382b885a5f81"
+  ],
+  "reg_poisson": [
+   "1e6de8b6655e959c",
+   "1f6197c25cddcb9d"
+  ],
+  "reg_bundle": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_wide": [
+   "ca1b51325c8ed45f",
+   "b2cbb745c65b4a51"
+  ],
+  "bin": [
+   "1d94832ca2ade2ef",
+   "ea9e8f938b97d0ca"
+  ],
+  "bin_auto": [
+   "73fdf5853beb92b9",
+   "b4632c0375ede9b8"
+  ],
+  "bin_pl": [
+   "8ea0930823f7d0db",
+   "ee6a812b54c5e47d"
+  ],
+  "mc": [
+   "784c43af2746121a",
+   "3ed42faf93b8d807"
+  ],
+  "mc_dart": [
+   "0f2481e4c111626e",
+   "83c02ae51a22c806"
+  ],
+  "mc_leaf": [
+   "ef6926abaa2b126d",
+   "258d5e3fadcf4a5e"
+  ],
+  "rank": [
+   "dcf32e66818412ac",
+   "1f652e10df5d826b"
+  ],
+  "joint": [
+   "-",
+   "d0764211ad8fa72e"
+  ]
+ },
+ "branch_1_threads": {
+  "reg": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_auto": [
+   "dfb5574d237e962b",
+   "a39d217b534615fc"
+  ],
+  "reg_manual": [
+   "623ba0818ec3ce77",
+   "7c82f54a0e435311"
+  ],
+  "reg_leaf": [
+   "a21805510a8b6b76",
+   "974ed0fc1006f50e"
+  ],
+  "reg_deep": [
+   "cdbab91c2816c986",
+   "b7d513fc1c62dfbe"
+  ],
+  "reg_l1l2": [
+   "87ab8c761e81f7ca",
+   "37a4804b4a03713d"
+  ],
+  "reg_mono": [
+   "95c9e48e4df2e1bf",
+   "efb2af716bb03f5d"
+  ],
+  "reg_inter": [
+   "2287d9077a8ea526",
+   "d6153b7117a9469d"
+  ],
+  "reg_fw": [
+   "66343da08feea648",
+   "4ac5ad41b8ce1b2c"
+  ],
+  "reg_cat_native": [
+   "f009ae3793c16b8b",
+   "762a112e98255554"
+  ],
+  "reg_cat_te": [
+   "6311559a8184dd41",
+   "a0956a715b1bcce9"
+  ],
+  "reg_pl": [
+   "c8ef97c8b797af00",
+   "51b875eb85c95ad0"
+  ],
+  "reg_dro": [
+   "7d130f42ba672fc1",
+   "46878dbf871ab224"
+  ],
+  "reg_morph": [
+   "4bce85111afc12d8",
+   "0308d40927ad5b42"
+  ],
+  "reg_goss": [
+   "b9bf7eb15eb5a58f",
+   "ed1a18cfd5afd3f4"
+  ],
+  "reg_dart": [
+   "bbbab70203cfdadc",
+   "3608ca246a74c537"
+  ],
+  "reg_colnode": [
+   "3fb357fdb74e0f55",
+   "ff0920a681eff3f2"
+  ],
+  "reg_quantile": [
+   "826d3d7500ad2005",
+   "cf18382b885a5f81"
+  ],
+  "reg_poisson": [
+   "1e6de8b6655e959c",
+   "1f6197c25cddcb9d"
+  ],
+  "reg_bundle": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_wide": [
+   "ca1b51325c8ed45f",
+   "b2cbb745c65b4a51"
+  ],
+  "bin": [
+   "1d94832ca2ade2ef",
+   "ea9e8f938b97d0ca"
+  ],
+  "bin_auto": [
+   "73fdf5853beb92b9",
+   "b4632c0375ede9b8"
+  ],
+  "bin_pl": [
+   "8ea0930823f7d0db",
+   "ee6a812b54c5e47d"
+  ],
+  "mc": [
+   "784c43af2746121a",
+   "3ed42faf93b8d807"
+  ],
+  "mc_dart": [
+   "0f2481e4c111626e",
+   "83c02ae51a22c806"
+  ],
+  "mc_leaf": [
+   "ef6926abaa2b126d",
+   "258d5e3fadcf4a5e"
+  ],
+  "rank": [
+   "dcf32e66818412ac",
+   "1f652e10df5d826b"
+  ],
+  "joint": [
+   "-",
+   "d0764211ad8fa72e"
+  ]
+ },
+ "main_22232d8_4_threads": {
+  "reg": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_auto": [
+   "dfb5574d237e962b",
+   "a39d217b534615fc"
+  ],
+  "reg_manual": [
+   "623ba0818ec3ce77",
+   "7c82f54a0e435311"
+  ],
+  "reg_leaf": [
+   "a21805510a8b6b76",
+   "974ed0fc1006f50e"
+  ],
+  "reg_deep": [
+   "cdbab91c2816c986",
+   "b7d513fc1c62dfbe"
+  ],
+  "reg_l1l2": [
+   "87ab8c761e81f7ca",
+   "37a4804b4a03713d"
+  ],
+  "reg_mono": [
+   "95c9e48e4df2e1bf",
+   "efb2af716bb03f5d"
+  ],
+  "reg_inter": [
+   "2287d9077a8ea526",
+   "d6153b7117a9469d"
+  ],
+  "reg_fw": [
+   "66343da08feea648",
+   "4ac5ad41b8ce1b2c"
+  ],
+  "reg_cat_native": [
+   "f009ae3793c16b8b",
+   "762a112e98255554"
+  ],
+  "reg_cat_te": [
+   "6311559a8184dd41",
+   "a0956a715b1bcce9"
+  ],
+  "reg_pl": [
+   "c8ef97c8b797af00",
+   "51b875eb85c95ad0"
+  ],
+  "reg_dro": [
+   "7d130f42ba672fc1",
+   "46878dbf871ab224"
+  ],
+  "reg_morph": [
+   "4bce85111afc12d8",
+   "0308d40927ad5b42"
+  ],
+  "reg_goss": [
+   "b9bf7eb15eb5a58f",
+   "ed1a18cfd5afd3f4"
+  ],
+  "reg_dart": [
+   "bbbab70203cfdadc",
+   "3608ca246a74c537"
+  ],
+  "reg_colnode": [
+   "3fb357fdb74e0f55",
+   "ff0920a681eff3f2"
+  ],
+  "reg_quantile": [
+   "826d3d7500ad2005",
+   "cf18382b885a5f81"
+  ],
+  "reg_poisson": [
+   "1e6de8b6655e959c",
+   "1f6197c25cddcb9d"
+  ],
+  "reg_bundle": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_wide": [
+   "ca1b51325c8ed45f",
+   "b2cbb745c65b4a51"
+  ],
+  "bin": [
+   "1d94832ca2ade2ef",
+   "ea9e8f938b97d0ca"
+  ],
+  "bin_auto": [
+   "73fdf5853beb92b9",
+   "b4632c0375ede9b8"
+  ],
+  "bin_pl": [
+   "8ea0930823f7d0db",
+   "ee6a812b54c5e47d"
+  ],
+  "mc": [
+   "784c43af2746121a",
+   "3ed42faf93b8d807"
+  ],
+  "mc_dart": [
+   "0f2481e4c111626e",
+   "83c02ae51a22c806"
+  ],
+  "mc_leaf": [
+   "ef6926abaa2b126d",
+   "258d5e3fadcf4a5e"
+  ],
+  "rank": [
+   "dcf32e66818412ac",
+   "1f652e10df5d826b"
+  ],
+  "joint": [
+   "-",
+   "d0764211ad8fa72e"
+  ]
+ },
+ "branch_4_threads": {
+  "reg": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_auto": [
+   "dfb5574d237e962b",
+   "a39d217b534615fc"
+  ],
+  "reg_manual": [
+   "623ba0818ec3ce77",
+   "7c82f54a0e435311"
+  ],
+  "reg_leaf": [
+   "a21805510a8b6b76",
+   "974ed0fc1006f50e"
+  ],
+  "reg_deep": [
+   "cdbab91c2816c986",
+   "b7d513fc1c62dfbe"
+  ],
+  "reg_l1l2": [
+   "87ab8c761e81f7ca",
+   "37a4804b4a03713d"
+  ],
+  "reg_mono": [
+   "95c9e48e4df2e1bf",
+   "efb2af716bb03f5d"
+  ],
+  "reg_inter": [
+   "2287d9077a8ea526",
+   "d6153b7117a9469d"
+  ],
+  "reg_fw": [
+   "66343da08feea648",
+   "4ac5ad41b8ce1b2c"
+  ],
+  "reg_cat_native": [
+   "f009ae3793c16b8b",
+   "762a112e98255554"
+  ],
+  "reg_cat_te": [
+   "6311559a8184dd41",
+   "a0956a715b1bcce9"
+  ],
+  "reg_pl": [
+   "c8ef97c8b797af00",
+   "51b875eb85c95ad0"
+  ],
+  "reg_dro": [
+   "7d130f42ba672fc1",
+   "46878dbf871ab224"
+  ],
+  "reg_morph": [
+   "4bce85111afc12d8",
+   "0308d40927ad5b42"
+  ],
+  "reg_goss": [
+   "b9bf7eb15eb5a58f",
+   "ed1a18cfd5afd3f4"
+  ],
+  "reg_dart": [
+   "bbbab70203cfdadc",
+   "3608ca246a74c537"
+  ],
+  "reg_colnode": [
+   "3fb357fdb74e0f55",
+   "ff0920a681eff3f2"
+  ],
+  "reg_quantile": [
+   "826d3d7500ad2005",
+   "cf18382b885a5f81"
+  ],
+  "reg_poisson": [
+   "1e6de8b6655e959c",
+   "1f6197c25cddcb9d"
+  ],
+  "reg_bundle": [
+   "18f72a88f8d3c6ef",
+   "da3a622b6e34a631"
+  ],
+  "reg_wide": [
+   "ca1b51325c8ed45f",
+   "b2cbb745c65b4a51"
+  ],
+  "bin": [
+   "1d94832ca2ade2ef",
+   "ea9e8f938b97d0ca"
+  ],
+  "bin_auto": [
+   "73fdf5853beb92b9",
+   "b4632c0375ede9b8"
+  ],
+  "bin_pl": [
+   "8ea0930823f7d0db",
+   "ee6a812b54c5e47d"
+  ],
+  "mc": [
+   "784c43af2746121a",
+   "3ed42faf93b8d807"
+  ],
+  "mc_dart": [
+   "0f2481e4c111626e",
+   "83c02ae51a22c806"
+  ],
+  "mc_leaf": [
+   "ef6926abaa2b126d",
+   "258d5e3fadcf4a5e"
+  ],
+  "rank": [
+   "dcf32e66818412ac",
+   "1f652e10df5d826b"
+  ],
+  "joint": [
+   "-",
+   "d0764211ad8fa72e"
+  ]
+ },
+ "main_22232d8_60k_rows_2_threads": {
+  "reg": [
+   "1d785fb7df5a9f70",
+   "9c5035628550b0e3"
+  ],
+  "reg_auto": [
+   "2cfad4bf4acc3dec",
+   "f0843bcce6b208fd"
+  ],
+  "reg_manual": [
+   "fc39c646bfefcded",
+   "c52585d26fbb16c8"
+  ],
+  "reg_leaf": [
+   "578d4dd86459e31b",
+   "97337f3f79b60aea"
+  ],
+  "reg_deep": [
+   "8ad637b27d80ea91",
+   "2ad38ffdcd79f76f"
+  ],
+  "reg_l1l2": [
+   "1914ff928a7b5634",
+   "066fbcaea7f0c3ba"
+  ],
+  "reg_mono": [
+   "1c01d307d68aaa11",
+   "8a24e655d927eb6d"
+  ],
+  "reg_inter": [
+   "68b497a8a5f48e01",
+   "9b8bdcba687d70a5"
+  ],
+  "reg_fw": [
+   "fc0d44fcea695ad8",
+   "ad9063595bba77b6"
+  ],
+  "reg_cat_native": [
+   "698c998b87b45907",
+   "8b0c05cdca3a2df5"
+  ],
+  "reg_cat_te": [
+   "0d09720a86c83d6d",
+   "92a495f905cdebfb"
+  ],
+  "reg_pl": [
+   "b589a7d6375132d0",
+   "ac46ec607a5412f7"
+  ],
+  "reg_dro": [
+   "358cc2a426c52eab",
+   "095e3908c66213bd"
+  ],
+  "reg_morph": [
+   "484ed286632fca46",
+   "536cac74bc495238"
+  ],
+  "reg_goss": [
+   "1ec2818ebb65acca",
+   "31ecd4f8aef91735"
+  ],
+  "reg_dart": [
+   "35ffe3fadcb8eda1",
+   "21e82653bc9d25fb"
+  ],
+  "reg_colnode": [
+   "bfd3e72dbfcfabee",
+   "8c1fea0155e6ce5b"
+  ],
+  "reg_quantile": [
+   "93555edab97edc40",
+   "7bec16b4d7976392"
+  ],
+  "reg_poisson": [
+   "209ab624e3018d41",
+   "57c7a2ca6f064a96"
+  ],
+  "reg_bundle": [
+   "1d785fb7df5a9f70",
+   "9c5035628550b0e3"
+  ],
+  "reg_wide": [
+   "c0af167443f15411",
+   "fd05c21c8c566af4"
+  ],
+  "bin": [
+   "53ffd6244d228a89",
+   "73cdba48e3fb450f"
+  ],
+  "bin_auto": [
+   "d08681292d15fa0b",
+   "4d3a12fec8ebf8e5"
+  ],
+  "bin_pl": [
+   "9fb3aef14556ac88",
+   "e401a91412de43c3"
+  ],
+  "mc": [
+   "3fa7aed1deb9edba",
+   "a15183d684714aa5"
+  ],
+  "mc_dart": [
+   "7e8f6c2531b359b4",
+   "d2cd7ecaf004a49f"
+  ],
+  "mc_leaf": [
+   "ee04183a8c79716c",
+   "aab70e902177de91"
+  ],
+  "rank": [
+   "7a843a8e549f24cf",
+   "13cf90b733c62b9b"
+  ],
+  "joint": [
+   "-",
+   "115b7cc2a1311d64"
+  ]
+ },
+ "branch_60k_rows_2_threads": {
+  "reg": [
+   "1d785fb7df5a9f70",
+   "9c5035628550b0e3"
+  ],
+  "reg_auto": [
+   "2cfad4bf4acc3dec",
+   "f0843bcce6b208fd"
+  ],
+  "reg_manual": [
+   "fc39c646bfefcded",
+   "c52585d26fbb16c8"
+  ],
+  "reg_leaf": [
+   "578d4dd86459e31b",
+   "97337f3f79b60aea"
+  ],
+  "reg_deep": [
+   "8ad637b27d80ea91",
+   "2ad38ffdcd79f76f"
+  ],
+  "reg_l1l2": [
+   "1914ff928a7b5634",
+   "066fbcaea7f0c3ba"
+  ],
+  "reg_mono": [
+   "1c01d307d68aaa11",
+   "8a24e655d927eb6d"
+  ],
+  "reg_inter": [
+   "68b497a8a5f48e01",
+   "9b8bdcba687d70a5"
+  ],
+  "reg_fw": [
+   "fc0d44fcea695ad8",
+   "ad9063595bba77b6"
+  ],
+  "reg_cat_native": [
+   "698c998b87b45907",
+   "8b0c05cdca3a2df5"
+  ],
+  "reg_cat_te": [
+   "0d09720a86c83d6d",
+   "92a495f905cdebfb"
+  ],
+  "reg_pl": [
+   "b589a7d6375132d0",
+   "ac46ec607a5412f7"
+  ],
+  "reg_dro": [
+   "358cc2a426c52eab",
+   "095e3908c66213bd"
+  ],
+  "reg_morph": [
+   "484ed286632fca46",
+   "536cac74bc495238"
+  ],
+  "reg_goss": [
+   "1ec2818ebb65acca",
+   "31ecd4f8aef91735"
+  ],
+  "reg_dart": [
+   "35ffe3fadcb8eda1",
+   "21e82653bc9d25fb"
+  ],
+  "reg_colnode": [
+   "bfd3e72dbfcfabee",
+   "8c1fea0155e6ce5b"
+  ],
+  "reg_quantile": [
+   "93555edab97edc40",
+   "7bec16b4d7976392"
+  ],
+  "reg_poisson": [
+   "209ab624e3018d41",
+   "57c7a2ca6f064a96"
+  ],
+  "reg_bundle": [
+   "1d785fb7df5a9f70",
+   "9c5035628550b0e3"
+  ],
+  "reg_wide": [
+   "c0af167443f15411",
+   "fd05c21c8c566af4"
+  ],
+  "bin": [
+   "53ffd6244d228a89",
+   "73cdba48e3fb450f"
+  ],
+  "bin_auto": [
+   "d08681292d15fa0b",
+   "4d3a12fec8ebf8e5"
+  ],
+  "bin_pl": [
+   "9fb3aef14556ac88",
+   "e401a91412de43c3"
+  ],
+  "mc": [
+   "3fa7aed1deb9edba",
+   "a15183d684714aa5"
+  ],
+  "mc_dart": [
+   "7e8f6c2531b359b4",
+   "d2cd7ecaf004a49f"
+  ],
+  "mc_leaf": [
+   "ee04183a8c79716c",
+   "aab70e902177de91"
+  ],
+  "rank": [
+   "7a843a8e549f24cf",
+   "13cf90b733c62b9b"
+  ],
+  "joint": [
+   "-",
+   "115b7cc2a1311d64"
+  ]
+ }
+}

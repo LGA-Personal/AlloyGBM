@@ -1,0 +1,14 @@
+reg_60k_x18 300 1 main 3.748 branch 2.945 ratio 0.786
+bin_40k_x8 300 1 main 1.922 branch 1.506 ratio 0.784
+bin_900_x20_lowcard 1000 1 main 0.704 branch 0.571 ratio 0.811
+reg_800_x17 300 1 main 0.222 branch 0.197 ratio 0.887
+bin_3k_x1000_sparse 300 1 main 3.249 branch 3.187 ratio 0.981
+mc10_1800_x216 100 1 main 27.446 branch 22.979 ratio 0.837
+mc26_7k_x300 30 1 main 28.346 branch 22.17 ratio 0.782
+reg_60k_x18 300 4 main 2.636 branch 1.936 ratio 0.734
+bin_40k_x8 300 4 main 1.642 branch 1.194 ratio 0.727
+bin_900_x20_lowcard 1000 4 main 0.789 branch 0.71 ratio 0.9
+reg_800_x17 300 4 main 0.154 branch 0.152 ratio 0.987
+bin_3k_x1000_sparse 300 4 main 1.542 branch 1.508 ratio 0.978
+mc10_1800_x216 100 4 main 7.209 branch 6.077 ratio 0.843
+mc26_7k_x300 30 4 main 8.166 branch 5.85 ratio 0.716
