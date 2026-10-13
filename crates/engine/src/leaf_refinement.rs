@@ -989,6 +989,9 @@ pub(crate) fn refine_binary_newton_leaf_values(
             .collect(),
     );
     let l2 = l2_lambda as f64;
+    // The builder clamps the learning-rate-scaled leaf, so bound the
+    // unscaled value by the same limit divided by the learning rate.
+    let max_abs_value = max_abs_leaf_value / learning_rate;
     for iteration in 0..extra_iterations {
         if iteration > 0 {
             let current = &values;
@@ -1019,8 +1022,7 @@ pub(crate) fn refine_binary_newton_leaf_values(
             }
             let step = -(grad + l2 * *value as f64) / (hess + l2);
             if step.is_finite() {
-                *value =
-                    ((*value as f64 + step) as f32).clamp(-max_abs_leaf_value, max_abs_leaf_value);
+                *value = ((*value as f64 + step) as f32).clamp(-max_abs_value, max_abs_value);
                 largest_step = largest_step.max(step.abs());
             }
         }

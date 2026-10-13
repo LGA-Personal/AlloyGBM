@@ -227,6 +227,10 @@ pub(crate) fn terminal_local_node_for_row<'a>(
 ) -> u32 {
     let mut local_id = 0_u32;
     while let Some(stump) = stump_at(local_id) {
+        debug_assert!(
+            local_id < u32::MAX / 2,
+            "local node id {local_id} overflows"
+        );
         let feature_index = stump.split.feature_index as usize;
         let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
         local_id = if binned_split_went_left(stump, bin, missing_bin) {
@@ -1242,6 +1246,36 @@ mod tests {
             assert_eq!(stumps, one_stumps, "{threads} threads");
             assert_eq!(scores, one_scores, "{threads} threads");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn binary_newton_refinement_bounds_the_scaled_leaf_like_the_builder() -> EngineResult<()> {
+        // A pure-positive leaf wants a large value; the cap applies to the
+        // learning-rate-scaled leaf, as in the tree builder.
+        let binned = BinnedMatrix::new(4, 1, 2, vec![0, 0, 0, 2]).expect("valid binned matrix");
+        let (lr, cap) = (0.1_f32, 0.2_f32);
+        let mut stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(0.1),
+            LeafValue::Scalar(-0.1),
+        )];
+        let predictions = [0.0_f32; 4];
+        let mut candidate = predictions.to_vec();
+        apply_tree_to_binned_predictions(&mut candidate, &binned, &stumps, None)?;
+        crate::leaf_refinement::refine_binary_newton_leaf_values(
+            &mut stumps,
+            &binned,
+            &predictions,
+            &mut candidate,
+            &[1.0, 1.0, 1.0, 0.0],
+            None,
+            0.01,
+            lr,
+            50,
+            cap,
+        )?;
+        assert!((stumps[0].left_leaf_value.as_scalar() - cap).abs() < 1e-6);
         Ok(())
     }
 
