@@ -78,6 +78,19 @@
   anything larger gets the usual continuous binning. The default 256 bins
   also now use the compact 8-bit bin storage, as intended (the threshold
   was off by one).
+- **Target-encoded categoricals now predict correctly.** A categorical column
+  trained with target encoding (the default, `max_cat_threshold=0`, or any
+  column above the threshold) was fed to `predict()` as its raw category
+  values instead of the bins it was trained on, so predictions ignored the
+  column even on training rows, and `eval_set` rows were binned
+  inconsistently too. Training now stores each such column as bins ordered
+  by encoded value, keeps the category→bin mapping on the model (saved by
+  `save_model` and pickle), and applies it at prediction and to `eval_set`.
+  Unseen categories get the bin of the global target mean. Columns with
+  more distinct encodings than bins no longer fail ("encoded cardinality
+  exceeds supported max 256"); neighbouring encodings share bins instead.
+  Models saved by earlier builds load as before but keep the old behavior
+  until refit.
 - A feature with `feature_weights` 0 could still be split on when no
   positively weighted feature had positive gain. It is now never a split
   candidate.

@@ -491,6 +491,113 @@ class _ValidationMixin:
             raise TypeError("categorical_feature_values must be a sequence of strings")
         return [str(value) for value in values_like]
 
+    @staticmethod
+    def _target_encoding_bins_from_native(native_result: object) -> dict[int, dict] | None:
+        """Category→bin mappings for target-encoded categorical features."""
+        raw_bins = getattr(native_result, "target_encoding_bins", None)
+        if not raw_bins:
+            return None
+        unknown = getattr(native_result, "target_encoding_unknown_bins", None) or {}
+        return {
+            int(feature): {
+                "bins": {str(category): int(bin_) for category, bin_ in bins.items()},
+                "unknown": int(unknown.get(feature, 0)),
+            }
+            for feature, bins in raw_bins.items()
+        }
+
+    def _apply_target_encoding_bins_for_predict(self, X: object) -> object:
+        """Replace target-encoded categorical columns with their training bins.
+
+        Training stores a target-encoded column as bin indices ordered by
+        encoded value, so prediction must feed the same index. DataFrame
+        columns of category, object or string dtype are looked up by their
+        string form (as at fit time). Numeric columns are looked up by value
+        when the training categories are numbers (``2.0`` matches the
+        category ``"2"`` or ``"2.0"``); otherwise value ``k`` is the ``k``-th
+        training category in sorted order, the native categorical convention.
+        NaN gets the missing-category bin when training saw one. Unseen
+        categories get the bin of the global target mean.
+        """
+        encodings = getattr(self, "_target_encoding_bins_", None)
+        if not encodings:
+            return X
+        import math
+
+        import numpy as np
+
+        def numeric_keys(info: dict) -> dict[float, int] | None:
+            keyed: dict[float, int] = {}
+            for category, bin_ in info["bins"].items():
+                try:
+                    value = float(category)
+                except ValueError:
+                    return None
+                if math.isfinite(value):
+                    keyed[value] = bin_
+            return keyed or None
+
+        def map_numeric(values: np.ndarray, info: dict) -> np.ndarray:
+            unknown = float(info["unknown"])
+            out = np.full(values.shape, unknown, dtype=np.float32)
+            out[np.isnan(values)] = float(info["bins"].get("nan", unknown))
+            finite = np.isfinite(values)
+            keyed = numeric_keys(info)
+            if keyed is not None:
+                uniques, inverse = np.unique(values[finite], return_inverse=True)
+                table = np.asarray([keyed.get(float(v), unknown) for v in uniques], dtype=np.float32)
+                out[finite] = table[inverse]
+                return out
+            ordered = sorted(info["bins"])
+            table = np.asarray([info["bins"][c] for c in ordered], dtype=np.float32)
+            codes = np.where(finite, values, -1.0)
+            valid = finite & (codes >= 0) & (codes < len(table)) & (codes == np.floor(codes))
+            out[valid] = table[codes[valid].astype(np.int64)]
+            return out
+
+        def map_strings(values: Sequence[object], info: dict) -> np.ndarray:
+            bins, unknown = info["bins"], info["unknown"]
+            return np.asarray([bins.get(str(v), unknown) for v in values], dtype=np.float32)
+
+        if hasattr(X, "columns") and hasattr(X, "iloc"):
+            X = X.copy()
+            for feature, info in encodings.items():
+                if feature >= len(X.columns):
+                    continue
+                col = X.iloc[:, feature]
+                dtype = getattr(col, "dtype", None)
+                if str(dtype) == "category" or dtype == object or str(dtype).startswith("string"):
+                    # The extraction fit used, so the string forms match.
+                    mapped = map_strings(
+                        GBMRegressor._extract_column_values(X, X.columns[feature], feature), info
+                    )
+                else:
+                    mapped = map_numeric(np.asarray(col, dtype=np.float64), info)
+                X[X.columns[feature]] = mapped
+            return X
+        if hasattr(X, "dtype") and hasattr(X, "shape"):
+            arr = np.array(X, dtype=np.float64, copy=True)
+            if arr.ndim == 2:
+                for feature, info in encodings.items():
+                    if feature < arr.shape[1]:
+                        arr[:, feature] = map_numeric(arr[:, feature], info)
+            return arr
+        if isinstance(X, (list, tuple)) and len(X) > 0 and isinstance(X[0], (list, tuple)):
+            result = [list(row) for row in X]
+            for feature, info in encodings.items():
+                column = [row[feature] for row in result if feature < len(row)]
+                if len(column) != len(result):
+                    continue
+                if all(isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool)
+                       for v in column):
+                    mapped = map_numeric(np.asarray(column, dtype=np.float64), info)
+                else:
+                    mapped = map_strings(column, info)
+                for row, value in zip(result, mapped):
+                    row[feature] = float(value)
+            return result
+        return X
+
     def _apply_native_cat_mappings_for_predict(self, X: object) -> object:
         """Replace native-categorical columns with integer IDs for prediction.
 
@@ -500,6 +607,7 @@ class _ValidationMixin:
         looked up in the mapping. Unknown categories become NaN (will follow
         the default_left direction in the tree).
         """
+        X = self._apply_target_encoding_bins_for_predict(X)
         mappings = getattr(self, "_native_cat_mappings_", None)
         if not mappings:
             return X

@@ -1,4 +1,6 @@
-use crate::categorical_bridge::{flatten_rows, resolve_categorical_spec};
+use crate::categorical_bridge::{
+    encoded_value_bin, flatten_rows, resolve_categorical_spec, target_encoding_cuts,
+};
 use crate::predict::{
     checked_dense_prediction_bytes, checked_dense_prediction_elements,
     predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
@@ -1298,4 +1300,30 @@ fn weighted_greedy_log_sum_cuts_match_row_repetition_and_ignore_weight_scale() {
             "uniform weight {weight} must not change the borders"
         );
     }
+}
+
+#[test]
+fn target_encoding_cuts_give_one_bin_per_value_when_they_fit() {
+    let encoded = [0.7_f32, -1.0, 0.7, 2.5, -1.0];
+    let cuts = target_encoding_cuts(&encoded, 255);
+    assert_eq!(cuts, vec![-0.15, 1.6]);
+    let bins: Vec<u16> = encoded
+        .iter()
+        .map(|&value| encoded_value_bin(value, &cuts))
+        .collect();
+    assert_eq!(bins, vec![1, 0, 1, 2, 0]);
+}
+
+#[test]
+fn target_encoding_cuts_group_values_beyond_the_bin_budget() {
+    let encoded: Vec<f32> = (0..600).map(|value| value as f32).collect();
+    let cuts = target_encoding_cuts(&encoded, 255);
+    assert_eq!(cuts.len(), 254);
+    assert!(cuts.windows(2).all(|pair| pair[0] < pair[1]));
+    let top = encoded
+        .iter()
+        .map(|&value| encoded_value_bin(value, &cuts))
+        .max()
+        .unwrap();
+    assert_eq!(top, 254);
 }

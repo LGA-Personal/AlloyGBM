@@ -124,6 +124,11 @@ class _ShapMixin:
         _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
+        # Same categorical mapping as predict(), so attributions add up to it.
+        # (MultiLabelGBMRanker reuses this mixin without categorical support.)
+        apply_mappings = getattr(self, "_apply_native_cat_mappings_for_predict", None)
+        if apply_mappings is not None:
+            X = apply_mappings(X)
 
         # v0.7.3+: when we have a `BinningContext` available (continuous
         # features under linear, quantile, or — as of v0.8.0 — mixed
@@ -247,6 +252,11 @@ class _ShapMixin:
         _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
+        # Same categorical mapping as predict(), so attributions add up to it.
+        # (MultiLabelGBMRanker reuses this mixin without categorical support.)
+        apply_mappings = getattr(self, "_apply_native_cat_mappings_for_predict", None)
+        if apply_mappings is not None:
+            X = apply_mappings(X)
 
         binning_kwargs = self._shap_binning_kwargs()
         if binning_kwargs is not None:
@@ -351,6 +361,11 @@ class _ShapMixin:
         _require_fitted_estimator(self)
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
+        # Same categorical mapping as predict(), so attributions add up to it.
+        # (MultiLabelGBMRanker reuses this mixin without categorical support.)
+        apply_mappings = getattr(self, "_apply_native_cat_mappings_for_predict", None)
+        if apply_mappings is not None:
+            X = apply_mappings(X)
 
         binning_kwargs = self._shap_binning_kwargs()
         if binning_kwargs is not None:

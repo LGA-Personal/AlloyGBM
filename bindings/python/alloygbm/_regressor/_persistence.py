@@ -28,6 +28,7 @@ class _PersistenceMixin:
         self._continuous_feature_quantile_cuts = None
         self._continuous_feature_linear_rank_flags = None
         self._native_cat_mappings_ = None
+        self._target_encoding_bins_ = None
         for attribute in (
             "n_features_in_",
             "feature_names_in_",
@@ -159,6 +160,11 @@ class _PersistenceMixin:
                 if self._native_cat_mappings_
                 else None
             ),
+            "target_encoding_bins": (
+                {str(k): v for k, v in self._target_encoding_bins_.items()}
+                if getattr(self, "_target_encoding_bins_", None)
+                else None
+            ),
         }
         # Classifier-specific metadata
         from alloygbm.classifier import GBMClassifier
@@ -273,6 +279,10 @@ class _PersistenceMixin:
             }
         else:
             model._native_cat_mappings_ = None
+        saved_te_bins = metadata.get("target_encoding_bins")
+        model._target_encoding_bins_ = (
+            {int(k): v for k, v in saved_te_bins.items()} if saved_te_bins else None
+        )
         model._fit_neutralization = metadata.get("fit_neutralization", model.neutralization)
         model._fit_factor_neutralization_lambda = metadata.get(
             "fit_factor_neutralization_lambda",
