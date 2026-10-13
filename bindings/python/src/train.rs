@@ -379,6 +379,14 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                 need_dense_values,
                 continuous_binning_max_bins,
             )?;
+            // Mirror the training matrix: linear leaves evaluate raw feature values,
+            // but with `need_dense_values` the prepared matrix holds bin indices.
+            // Without this the in-training validation curve (and so early stopping
+            // and the auto-rounds holdout) scores linear leaves on bin indices.
+            if is_linear_leaf {
+                prepared_validation.dataset.matrix =
+                    DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
+            }
 
             if !categorical_specs.is_empty() {
                 if validation_categorical_values_list.len() != categorical_specs.len() {
