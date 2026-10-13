@@ -7,7 +7,8 @@
   ([`data/fit_speed_v3/hash_battery.py`](data/fit_speed_v3/hash_battery.py)).
   No OpenML data was used; the OpenML suites are held out for final
   confirmation.
-- Base: `main` at `8667813` (after PRs #154 and #156). Candidate: this branch.
+- Base: `main` at `8667813` (after PRs #154 and #156) for timing; hashes
+  re-checked against `22232d8` (after #157). Candidate: this branch.
 - Environment: Linux x86_64 container (4 cores), Python 3.13,
   `OPENBLAS_NUM_THREADS=1`. Main and branch runs are interleaved and the
   median of 5 is reported.
@@ -21,7 +22,7 @@ constraints, native and target-encoded categoricals, linear leaves, DRO,
 MorphBoost, GOSS, DART, quantile, Poisson, feature bundling) hashes the same
 artifact bytes and predictions at 1 and 4 threads, and at 60,000 rows. The
 battery is sensitive to real changes: it flags the two linear-leaf configs
-that #156 changed.
+that #156 changed and the four binary and quantile configs that #157 changed.
 
 Fit time at learning rate 0.05, depth 6:
 
