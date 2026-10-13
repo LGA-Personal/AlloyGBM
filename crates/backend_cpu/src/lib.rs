@@ -1076,6 +1076,16 @@ impl CpuBackend {
                         for slot in g_arr.iter_mut().skip(chunk_len) {
                             *slot = f32::NEG_INFINITY;
                         }
+                        // A lane can only win by materially exceeding the
+                        // running best, which needs `gain > best_gain`. When no
+                        // lane clears that, the edge filter (which only lowers
+                        // gains) and the argmax below cannot change anything.
+                        // `f32::max` skips NaN lanes, which never win either.
+                        let chunk_max = g_arr.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        if chunk_max <= best_gain {
+                            chunk_start = chunk_end;
+                            continue;
+                        }
                         // Skip "edge" thresholds where left covers all non-missing bins.
                         // Replicates the scalar check:
                         //   if threshold_bin + 1 >= edge_limit && nm_total_count == left_count { skip }
@@ -1992,19 +2002,31 @@ impl CpuBackend {
         left_capacity: usize,
         mut goes_left: impl FnMut(u32) -> bool,
     ) -> (Vec<u32>, Vec<u32>) {
-        let mut left_rows = Vec::with_capacity(left_capacity);
+        // Branch-free: every row is written to both the left buffer and the
+        // in-place right prefix, and only the matching side's length
+        // advances. A split sends rows left or right close to at random, so
+        // a branch per row mispredicts often; the extra store is cheaper.
+        // The right write never passes the read position, so reading
+        // `rows[read_index]` still sees the original row.
+        let mut left_rows = vec![0_u32; rows.len()];
+        let mut left_len = 0;
         let mut right_len = 0;
 
         for read_index in 0..rows.len() {
             let row = rows[read_index];
-            if goes_left(row) {
-                left_rows.push(row);
-            } else {
-                rows[right_len] = row;
-                right_len += 1;
-            }
+            let left = goes_left(row);
+            left_rows[left_len] = row;
+            rows[right_len] = row;
+            left_len += usize::from(left);
+            right_len += usize::from(!left);
         }
         rows.truncate(right_len);
+        left_rows.truncate(left_len);
+        // Give back the buffer's unused half rather than holding twice the
+        // left child's rows while it waits to be split.
+        if left_rows.capacity() > left_capacity.max(left_len) {
+            left_rows.shrink_to(left_capacity.max(left_len));
+        }
 
         (left_rows, rows)
     }
