@@ -2142,3 +2142,33 @@ fn subtract_child_in_place_rejects_layout_mismatch_atomically() {
     assert_eq!(parent, original);
     assert_eq!(parent.node_id, 4);
 }
+
+#[test]
+fn compact_layout_cache_does_not_affect_matrix_equality() {
+    let bins = vec![0_u8, 1, 1, 0, 2, 1];
+    let left = BinnedMatrix::new(3, 2, 254, bins.clone()).expect("matrix");
+    let right = BinnedMatrix::new(3, 2, 254, bins).expect("matrix");
+    assert!(left.compact_histogram_layout().is_some());
+    assert_eq!(left, right);
+    assert_eq!(left.clone(), right);
+}
+
+#[test]
+fn filtering_a_compact_bundle_recomputes_its_widest_feature() {
+    // Feature 7 has 4 slots, feature 9 has 2.
+    let bundle = HistogramBundle::from_soa_compact(
+        0,
+        vec![7, 9],
+        vec![0, 4, 6],
+        254,
+        vec![0.0; 6],
+        vec![0.0; 6],
+        None,
+        vec![0; 6],
+    )
+    .expect("bundle");
+    assert_eq!(bundle.bin_count(), 4);
+    assert_eq!(bundle.filtered(|feature| feature == 9).bin_count(), 2);
+    assert_eq!(bundle.filtered(|_| false).bin_count(), 0);
+    assert_eq!(bundle.filtered(|_| true).bin_count(), 4);
+}

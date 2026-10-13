@@ -511,7 +511,17 @@ impl HistogramBundle {
                 .iter()
                 .map(|&index| self.feature_indices[index])
                 .collect(),
-            bin_count: self.bin_count,
+            // A compact bundle's width is its widest remaining feature, which
+            // may be narrower than the source's once features are dropped.
+            bin_count: if self.is_compact() {
+                offsets
+                    .windows(2)
+                    .map(|pair| pair[1] - pair[0])
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                self.bin_count
+            },
             offsets,
             compact_edge_limit: self.compact_edge_limit,
             grad_sums: vec![0.0; flat_len],

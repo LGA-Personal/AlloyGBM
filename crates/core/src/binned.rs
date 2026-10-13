@@ -79,6 +79,21 @@ pub enum BinnedLayout {
     Dual,
 }
 
+/// Lazily computed [`CompactHistogramLayout`], derived from the bins alone.
+///
+/// It is a cache, not part of the matrix's value: two matrices with the same
+/// bins compare equal whether or not either has computed its layout yet.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CompactLayoutCache(OnceLock<Option<CompactHistogramLayout>>);
+
+impl PartialEq for CompactLayoutCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CompactLayoutCache {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinnedMatrix {
     pub row_count: usize,
@@ -97,7 +112,7 @@ pub struct BinnedMatrix {
     pub(crate) bins_col_adaptive: BinStorage,
     /// Lazily computed compact histogram layout; see
     /// [`BinnedMatrix::compact_histogram_layout`]. Cleared by every mutation.
-    pub(crate) compact_layout: OnceLock<Option<CompactHistogramLayout>>,
+    pub(crate) compact_layout: CompactLayoutCache,
 }
 
 /// Per-feature histogram sizes for the compact histogram layout.
@@ -148,7 +163,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive,
             bins_col_adaptive: BinStorage::U8(bins_col),
-            compact_layout: OnceLock::new(),
+            compact_layout: CompactLayoutCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -171,7 +186,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive: BinStorage::U8(Vec::new()),
             bins_col_adaptive: BinStorage::U8(bins_col),
-            compact_layout: OnceLock::new(),
+            compact_layout: CompactLayoutCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -219,7 +234,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive,
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
-            compact_layout: OnceLock::new(),
+            compact_layout: CompactLayoutCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -243,7 +258,7 @@ impl BinnedMatrix {
             feature_bundle_map: None,
             bins_adaptive: BinStorage::U16(Vec::new()),
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
-            compact_layout: OnceLock::new(),
+            compact_layout: CompactLayoutCache::default(),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -362,7 +377,7 @@ impl BinnedMatrix {
             self.bins_adaptive.set(row_idx, value);
         }
         self.bins_col_adaptive.set(col_idx, value);
-        self.compact_layout = OnceLock::new();
+        self.compact_layout = CompactLayoutCache::default();
         if value != self.nan_bin_index {
             self.storage_max_bin = self.storage_max_bin.max(value);
         }
@@ -376,6 +391,7 @@ impl BinnedMatrix {
     /// Computed once (one pass over the column-major bins) and cached.
     pub fn compact_histogram_layout(&self) -> Option<&CompactHistogramLayout> {
         self.compact_layout
+            .0
             .get_or_init(|| self.compute_compact_histogram_layout())
             .as_ref()
     }
@@ -524,7 +540,7 @@ impl BinnedMatrix {
                 BinStorage::U16(Vec::new())
             },
             bins_col_adaptive,
-            compact_layout: OnceLock::new(),
+            compact_layout: CompactLayoutCache::default(),
         };
         validate_binned_matrix(&bundled)?;
         Ok(bundled)
