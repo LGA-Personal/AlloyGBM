@@ -171,10 +171,14 @@ impl CpuBackend {
         node_gradients: &[GradientPair],
         row_indices: &[u32],
         scratch: &mut [BinAccumulator],
+        slot_cap: usize,
     ) {
         for (&row_index, &gradient) in row_indices.iter().zip(node_gradients) {
             let bin_index: usize = column[row_index as usize].into();
-            Self::accumulate_slot::<INCLUDE_GRAD_SQ>(&mut scratch[bin_index], gradient);
+            Self::accumulate_slot::<INCLUDE_GRAD_SQ>(
+                &mut scratch[bin_index.min(slot_cap)],
+                gradient,
+            );
         }
     }
 
@@ -192,7 +196,10 @@ impl CpuBackend {
         let row_count = binned_matrix.row_count;
         let use_col_major = binned_matrix.has_col_major();
         for feature_index in start_feature..end_feature {
-            let base = (feature_index - start_feature) * arena.bin_count;
+            let local_feature = feature_index - start_feature;
+            let base = arena.offsets[local_feature];
+            let feature_bins = arena.offsets[local_feature + 1] - base;
+            let slot_cap = arena.slot_caps[local_feature];
 
             if use_col_major {
                 // Column-major: sequential bin reads — cache-friendly.
@@ -207,8 +214,12 @@ impl CpuBackend {
                 // Bit-identical to accumulating in place: the arena's slice
                 // for this feature is zero on entry and written exactly once,
                 // and rows are summed in the same order either way.
+                //
+                // A compact feature clamps each bin to its missing slot, so
+                // the matrix-wide missing bin lands in the feature's last
+                // slot; data bins are below the cap and keep their index.
                 let col_base = feature_index * row_count;
-                arena.scratch.fill(BinAccumulator::default());
+                arena.scratch[..feature_bins].fill(BinAccumulator::default());
                 // Dispatch on the storage width once per column rather than
                 // once per row.
                 match binned_matrix.col_bins(feature_index) {
@@ -217,6 +228,7 @@ impl CpuBackend {
                         node_gradients,
                         &node.row_indices,
                         &mut arena.scratch,
+                        slot_cap,
                     ),
                     Some(BinColumn::U16(column)) => {
                         Self::accumulate_column::<u16, INCLUDE_GRAD_SQ>(
@@ -224,6 +236,7 @@ impl CpuBackend {
                             node_gradients,
                             &node.row_indices,
                             &mut arena.scratch,
+                            slot_cap,
                         )
                     }
                     None => {
@@ -231,13 +244,13 @@ impl CpuBackend {
                             let bin_index =
                                 binned_matrix.col_bin(col_base + row_index as usize) as usize;
                             Self::accumulate_slot::<INCLUDE_GRAD_SQ>(
-                                &mut arena.scratch[bin_index],
+                                &mut arena.scratch[bin_index.min(slot_cap)],
                                 node_gradients[position],
                             );
                         }
                     }
                 }
-                for bin_index in 0..arena.bin_count {
+                for bin_index in 0..feature_bins {
                     let slot = arena.scratch[bin_index];
                     let target = base + bin_index;
                     arena.grad_sums[target] += slot.grad;
@@ -254,7 +267,7 @@ impl CpuBackend {
                     let bin_index = binned_matrix.row_bin(cell_index) as usize;
                     Self::accumulate_bin::<INCLUDE_GRAD_SQ>(
                         arena,
-                        base + bin_index,
+                        base + bin_index.min(slot_cap),
                         node_gradients[position],
                     );
                 }
@@ -279,7 +292,7 @@ impl CpuBackend {
             let gradient = gradients[row_index];
             for local_feature_index in 0..tile_feature_count {
                 let bin_index = binned_matrix.row_bin(row_base + local_feature_index) as usize;
-                let flat_index = local_feature_index * arena.bin_count + bin_index;
+                let flat_index = arena.slot(local_feature_index, bin_index);
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
                 arena.grad_sq_sums.as_mut().expect("DRO arena")[flat_index] +=
@@ -363,7 +376,15 @@ impl CpuBackend {
         let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
         THREAD_ARENA.with(|cell| {
             let mut arena = cell.borrow_mut();
-            arena.resize_for_tile(tile_feature_count, bin_count, include_grad_sq);
+            match binned_matrix.compact_histogram_layout() {
+                Some(layout) => arena.resize_for_compact_tile(
+                    layout,
+                    start_feature,
+                    end_feature,
+                    include_grad_sq,
+                ),
+                None => arena.resize_for_tile(tile_feature_count, bin_count, include_grad_sq),
+            }
             let use_per_feature = matches!(
                 Self::select_histogram_kernel_path(
                     node.row_indices.len(),
@@ -462,7 +483,7 @@ impl CpuBackend {
                             binned_matrix.nan_bin_index,
                             binned_matrix.missing_bin(),
                         );
-                        let target = local_feature * arena.bin_count + usize::from(bin);
+                        let target = arena.slot(local_feature, usize::from(bin));
                         arena.grad_sums[target] += gradient.grad;
                         arena.hess_sums[target] += gradient.hess;
                         if include_grad_sq {
@@ -616,16 +637,20 @@ impl CpuBackend {
             let row_base7 = row7 * feature_count + start_feature;
 
             for local_feature_index in 0..tile_feature_count {
-                let base = local_feature_index * arena.bin_count;
+                let base = arena.offsets[local_feature_index];
+                let cap = arena.slot_caps[local_feature_index];
+                let bin_at = |row_base: usize| -> usize {
+                    (binned_matrix.row_bin(row_base + local_feature_index) as usize).min(cap)
+                };
 
-                let idx0 = base + binned_matrix.row_bin(row_base0 + local_feature_index) as usize;
-                let idx1 = base + binned_matrix.row_bin(row_base1 + local_feature_index) as usize;
-                let idx2 = base + binned_matrix.row_bin(row_base2 + local_feature_index) as usize;
-                let idx3 = base + binned_matrix.row_bin(row_base3 + local_feature_index) as usize;
-                let idx4 = base + binned_matrix.row_bin(row_base4 + local_feature_index) as usize;
-                let idx5 = base + binned_matrix.row_bin(row_base5 + local_feature_index) as usize;
-                let idx6 = base + binned_matrix.row_bin(row_base6 + local_feature_index) as usize;
-                let idx7 = base + binned_matrix.row_bin(row_base7 + local_feature_index) as usize;
+                let idx0 = base + bin_at(row_base0);
+                let idx1 = base + bin_at(row_base1);
+                let idx2 = base + bin_at(row_base2);
+                let idx3 = base + bin_at(row_base3);
+                let idx4 = base + bin_at(row_base4);
+                let idx5 = base + bin_at(row_base5);
+                let idx6 = base + bin_at(row_base6);
+                let idx7 = base + bin_at(row_base7);
 
                 arena.grad_sums[idx0] += gradient0.grad;
                 arena.hess_sums[idx0] += gradient0.hess;
@@ -700,7 +725,7 @@ impl CpuBackend {
             let gradient = node_gradients[position + offset];
             for local_feature_index in 0..tile_feature_count {
                 let bin_index = binned_matrix.row_bin(row_base + local_feature_index) as usize;
-                let flat_index = local_feature_index * arena.bin_count + bin_index;
+                let flat_index = arena.slot(local_feature_index, bin_index);
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
                 if INCLUDE_GRAD_SQ {
@@ -766,7 +791,7 @@ impl CpuBackend {
         let counts = feature_histogram.counts();
 
         // Extract missing-value stats if the histogram covers the NaN bin.
-        let missing_bin_idx = options.missing_bin_index;
+        let missing_bin_idx = feature_histogram.missing_index(options.missing_bin_index);
         let (missing_grad, missing_hess, missing_count) =
             if missing_bin_idx < feature_histogram.len() {
                 (
@@ -783,6 +808,7 @@ impl CpuBackend {
         if scan_limit == 0 {
             return None;
         }
+        let edge_limit = feature_histogram.edge_scan_limit(scan_limit);
 
         with_compact_split_scan_scratch(
             scan_limit,
@@ -1001,11 +1027,11 @@ impl CpuBackend {
                         }
                         // Skip "edge" thresholds where left covers all non-missing bins.
                         // Replicates the scalar check:
-                        //   if threshold_bin + 1 >= scan_limit && nm_total_count == left_count { skip }
+                        //   if threshold_bin + 1 >= edge_limit && nm_total_count == left_count { skip }
                         for (j, slot) in g_arr.iter_mut().take(chunk_len).enumerate() {
                             let threshold_bin = candidate_bins[chunk_start + j] as usize;
                             let left_count = cum_left_count[chunk_start + j];
-                            if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
+                            if threshold_bin + 1 >= edge_limit && nm_total_count == left_count {
                                 *slot = f32::NEG_INFINITY;
                             }
                         }
@@ -1142,7 +1168,7 @@ impl CpuBackend {
         }
 
         // Extract missing-value stats if the histogram covers the NaN bin.
-        let missing_bin_idx = options.missing_bin_index;
+        let missing_bin_idx = feature_histogram.missing_index(options.missing_bin_index);
         let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
             if missing_bin_idx < feature_histogram.len() {
                 let mb = feature_histogram.bin(missing_bin_idx).expect("bounded bin");
@@ -1187,11 +1213,12 @@ impl CpuBackend {
         };
 
         if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_deref_mut()) {
+            // Rows carry the matrix-wide missing bin, whatever the layout.
             scratch.prepare_numeric_prefix(
                 ctx,
                 feature_histogram.feature_index() as usize,
                 feature_histogram.len().min(missing_bin_idx),
-                missing_bin_idx,
+                options.missing_bin_index,
             );
         }
         let mut best_candidate: Option<SplitCandidate> = None;
@@ -1203,6 +1230,7 @@ impl CpuBackend {
 
         // Scan only non-missing bins (0..min(num_bins-1, MISSING_BIN-1)).
         let scan_limit = feature_histogram.len().min(missing_bin_idx);
+        let edge_limit = feature_histogram.edge_scan_limit(scan_limit);
         for (threshold_bin, bin) in feature_histogram.bins().enumerate().take(scan_limit) {
             left_grad += bin.grad_sum;
             left_hess += bin.hess_sum;
@@ -1214,7 +1242,7 @@ impl CpuBackend {
 
             // Skip if this isn't a valid split point (need at least the
             // next non-missing bin on the right).
-            if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
+            if threshold_bin + 1 >= edge_limit && nm_total_count == left_count {
                 continue;
             }
 
@@ -1497,7 +1525,7 @@ impl CpuBackend {
         }
 
         // Extract missing-value stats.
-        let missing_bin_idx = options.missing_bin_index;
+        let missing_bin_idx = feature_histogram.missing_index(options.missing_bin_index);
         let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
             if missing_bin_idx < feature_histogram.len() {
                 let mb = feature_histogram.bin(missing_bin_idx).expect("bounded bin");
@@ -1597,7 +1625,7 @@ impl CpuBackend {
                 ctx,
                 feature_histogram.feature_index() as usize,
                 &sorted_category_bins,
-                missing_bin_idx,
+                options.missing_bin_index,
             );
         }
 

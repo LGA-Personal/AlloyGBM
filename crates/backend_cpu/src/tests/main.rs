@@ -716,7 +716,9 @@ fn build_histograms_aggregates_bins() {
     assert!(!histograms.has_grad_sq_sums());
     let feature0 = histograms.feature(0).expect("first feature");
     assert_eq!(feature0.feature_index(), 0);
-    assert_eq!(feature0.len(), 4);
+    // Four data bins plus the compact layout's (empty) missing slot.
+    assert_eq!(feature0.len(), 5);
+    assert_eq!(feature0.bin(4).expect("missing slot").count, 0);
     assert_eq!(feature0.bin(0).expect("bin").count, 1);
     assert_eq!(feature0.bin(1).expect("bin").count, 1);
     assert_eq!(feature0.bin(2).expect("bin").count, 1);
@@ -820,7 +822,305 @@ fn bundled_histograms_preserve_logical_missing_bins_on_unbundled_features() {
     )
     .expect("bundled histograms");
 
-    assert_eq!(actual, expected);
+    // The unbundled matrix uses the compact layout and the bundled one the
+    // uniform layout, so compare bin contents rather than storage.
+    assert!(expected.is_compact());
+    assert!(!actual.is_compact());
+    assert_same_histogram_contents(&expected, &actual, usize::from(MISSING_BIN_U8));
+}
+
+/// Assert two bundles hold the same per-feature bins, whatever their layouts:
+/// every data bin and the missing bin match, and bins one layout omits are
+/// zero in the other.
+fn assert_same_histogram_contents(
+    left: &HistogramBundle,
+    right: &HistogramBundle,
+    uniform_missing_bin: usize,
+) {
+    assert_eq!(left.feature_indices(), right.feature_indices());
+    assert_eq!(left.has_grad_sq_sums(), right.has_grad_sq_sums());
+    for (left, right) in left.features().zip(right.features()) {
+        let left_missing = left.missing_index(uniform_missing_bin);
+        let right_missing = right.missing_index(uniform_missing_bin);
+        let zero = HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        // A missing bin past the histogram's end reads as empty.
+        assert_eq!(
+            left.bin(left_missing).unwrap_or_else(|| zero.clone()),
+            right.bin(right_missing).unwrap_or_else(|| zero.clone())
+        );
+        let data_bins = left_missing
+            .min(left.len())
+            .max(right_missing.min(right.len()));
+        for bin in 0..data_bins {
+            let read = |view: HistogramFeatureView<'_>, missing: usize| {
+                if bin < missing.min(view.len()) {
+                    view.bin(bin).expect("bounded bin")
+                } else {
+                    zero.clone()
+                }
+            };
+            assert_eq!(
+                read(left, left_missing),
+                read(right, right_missing),
+                "feature {} bin {bin}",
+                left.feature_index()
+            );
+        }
+    }
+}
+
+/// A uniform-layout copy of a bundle: every feature padded to `bin_count`
+/// bins with its missing bin at `missing_bin`. A missing bin past
+/// `bin_count` is not stored, so the compact missing slot must be empty.
+fn uniform_copy(bundle: &HistogramBundle, bin_count: usize, missing_bin: usize) -> HistogramBundle {
+    let mut uniform = HistogramBundle::new_zeroed_with_grad_sq(
+        bundle.feature_indices(),
+        bin_count,
+        bundle.has_grad_sq_sums(),
+    );
+    uniform.node_id = bundle.node_id;
+    for (index, view) in bundle.features().enumerate() {
+        let missing = view.missing_index(missing_bin);
+        for bin in 0..view.len() {
+            let target = if bin == missing { missing_bin } else { bin };
+            if target >= bin_count {
+                assert_eq!(view.bin(bin).expect("bounded bin").count, 0);
+                continue;
+            }
+            uniform
+                .set_bin(index, target, view.bin(bin).expect("bounded bin"))
+                .expect("uniform bin in range");
+        }
+    }
+    uniform
+}
+
+#[test]
+fn compact_layout_sizes_each_feature_to_its_bins() {
+    // Feature 0 uses bins 0..=2 plus missing, feature 1 a single bin, and
+    // feature 2 spans the full u8 range.
+    let rows = 300;
+    let mut bins = Vec::with_capacity(rows * 3);
+    for row in 0..rows {
+        bins.push(if row % 7 == 0 {
+            MISSING_BIN_U8
+        } else {
+            (row % 3) as u8
+        });
+        bins.push(0);
+        bins.push((row % 255) as u8);
+    }
+    let matrix = BinnedMatrix::new(rows, 3, u16::from(MISSING_BIN_U8), bins).expect("matrix");
+    let layout = matrix.compact_histogram_layout().expect("compact layout");
+    assert_eq!(layout.data_bins, vec![3, 1, 255]);
+    assert_eq!(layout.edge_limit, usize::from(MISSING_BIN_U8));
+
+    let gradients = (0..rows)
+        .map(|row| GradientPair::new((row as f32 * 0.37).sin(), 1.0 + (row % 5) as f32 * 0.1))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("gradients");
+    let node = NodeSlice::new(0, (0..rows as u32).collect()).expect("node");
+    let compact = CpuBackend
+        .build_histograms(
+            &matrix,
+            &gradients,
+            &node,
+            &[FeatureTile::new(0, 3).expect("tile")],
+        )
+        .expect("histograms");
+    assert!(compact.is_compact());
+    let lengths: Vec<usize> = compact.features().map(|view| view.len()).collect();
+    assert_eq!(lengths, vec![4, 2, 256]);
+    assert_eq!(
+        compact
+            .feature(0)
+            .expect("feature")
+            .bin(3)
+            .expect("missing")
+            .count,
+        43
+    );
+}
+
+#[test]
+fn compact_and_uniform_layouts_choose_identical_splits() {
+    // `max_bin` 255 keeps the missing bin inside the uniform histogram;
+    // `max_bin` 254 (what the Python bridge builds) puts it past the end,
+    // which is only valid without missing rows.
+    for (max_bin, with_missing) in [(MISSING_BIN_U8, true), (MISSING_BIN_U8 - 1, false)] {
+        let bins = compact_case_bins(with_missing, MISSING_BIN_U8.into(), None);
+        let matrix = BinnedMatrix::new(
+            COMPACT_CASE_ROWS,
+            4,
+            u16::from(max_bin),
+            bins.into_iter().map(|bin| bin as u8).collect(),
+        )
+        .expect("matrix");
+        compact_and_uniform_layouts_choose_identical_splits_case(
+            &matrix,
+            usize::from(max_bin) + 1,
+            usize::from(MISSING_BIN_U8),
+        );
+    }
+}
+
+#[test]
+fn compact_and_uniform_u16_layouts_choose_identical_splits() {
+    // A fifth, 1,000-bin feature needs u16 storage. As with u8 `max_bin` 255,
+    // the missing bin is the uniform histogram's last slot.
+    let max_bin = 1_000_u16;
+    let missing_bin = max_bin;
+    let bins = compact_case_bins(true, missing_bin, Some(1_000));
+    let matrix = BinnedMatrix::new_u16(COMPACT_CASE_ROWS, 5, max_bin, missing_bin, bins)
+        .expect("u16 matrix");
+    compact_and_uniform_layouts_choose_identical_splits_case(
+        &matrix,
+        usize::from(max_bin) + 1,
+        usize::from(missing_bin),
+    );
+}
+
+const COMPACT_CASE_ROWS: usize = 400;
+
+/// Row-major bins: binary with missing values, ternary, a 40-bin feature, a
+/// single-valued feature and, optionally, a feature with `wide` bins.
+fn compact_case_bins(with_missing: bool, missing_bin: u16, wide: Option<usize>) -> Vec<u16> {
+    let mut bins = Vec::new();
+    for row in 0..COMPACT_CASE_ROWS {
+        bins.push(if with_missing && row % 11 == 0 {
+            missing_bin
+        } else {
+            (row % 2) as u16
+        });
+        bins.push((row % 3) as u16);
+        bins.push(((row * 7) % 40) as u16);
+        bins.push(0);
+        if let Some(wide) = wide {
+            bins.push(((row * 13) % wide) as u16);
+        }
+    }
+    bins
+}
+
+fn compact_and_uniform_layouts_choose_identical_splits_case(
+    matrix: &BinnedMatrix,
+    uniform_bins: usize,
+    missing_bin: usize,
+) {
+    let rows = matrix.row_count;
+    let feature_count = matrix.feature_count;
+    let gradients = (0..rows)
+        .map(|row| {
+            let signal = if row % 2 == 0 { 1.0 } else { -0.5 } + ((row * 7) % 40) as f32 * 0.01;
+            GradientPair::new(signal + (row as f32 * 0.13).cos() * 0.2, 1.0)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("gradients");
+    let node = NodeSlice::new(0, (0..rows as u32).collect()).expect("node");
+    let tiles = [FeatureTile::new(0, feature_count as u32).expect("tile")];
+    for include_grad_sq in [false, true] {
+        let compact = CpuBackend::build_histograms_internal(
+            matrix,
+            &gradients,
+            &node,
+            &tiles,
+            false,
+            include_grad_sq,
+        )
+        .expect("histograms");
+        assert!(compact.is_compact());
+        // Tiles built separately, serially or in parallel, append to the
+        // same bundle as one tile.
+        let split_tiles = [
+            FeatureTile::new(0, 2).expect("tile"),
+            FeatureTile::new(2, feature_count as u32).expect("tile"),
+        ];
+        for parallel in [false, true] {
+            let appended = CpuBackend::build_histograms_internal(
+                matrix,
+                &gradients,
+                &node,
+                &split_tiles,
+                parallel,
+                include_grad_sq,
+            )
+            .expect("tiled histograms");
+            assert_eq!(appended, compact);
+        }
+        let uniform = uniform_copy(&compact, uniform_bins, missing_bin);
+        assert_same_histogram_contents(&compact, &uniform, missing_bin);
+        let dro_configs: &[Option<alloygbm_core::DroConfig>] = if include_grad_sq {
+            &[
+                None,
+                Some(alloygbm_core::DroConfig {
+                    radius: 0.2,
+                    ..alloygbm_core::DroConfig::default()
+                }),
+            ]
+        } else {
+            &[None]
+        };
+        for (min_rows_per_leaf, &dro_config) in [1, 20]
+            .into_iter()
+            .flat_map(|rows| dro_configs.iter().map(move |dro| (rows, dro)))
+        {
+            let options = SplitSelectionOptions {
+                min_rows_per_leaf,
+                missing_bin_index: missing_bin,
+                dro_config,
+                ..SplitSelectionOptions::default()
+            };
+            assert_eq!(
+                CpuBackend
+                    .best_split_with_options(&compact, options, &[], &[])
+                    .expect("split"),
+                CpuBackend
+                    .best_split_with_options(&uniform, options, &[], &[])
+                    .expect("split"),
+            );
+            let categorical = [CategoricalFeatureInfo {
+                feature_index: 1,
+                num_categories: 3,
+            }];
+            assert_eq!(
+                CpuBackend
+                    .best_split_with_options(&compact, options, &[], &categorical)
+                    .expect("split"),
+                CpuBackend
+                    .best_split_with_options(&uniform, options, &[], &categorical)
+                    .expect("split"),
+            );
+            if dro_config.is_none() {
+                let cfg = MorphConfig {
+                    morph_warmup_iters: 0,
+                    ..MorphConfig::default()
+                };
+                let morph = MorphContext {
+                    iteration: 10,
+                    total_iterations: 100,
+                    grad_mean: 0.0,
+                    grad_std: 1.0,
+                    config: cfg,
+                    precomputed: MorphPrecomputed::for_iteration(10, 100, &cfg),
+                };
+                for categorical in [&[][..], &categorical[..]] {
+                    assert_eq!(
+                        CpuBackend
+                            .best_split_morph(&compact, options, &[], categorical, &morph)
+                            .expect("morph split"),
+                        CpuBackend
+                            .best_split_morph(&uniform, options, &[], categorical, &morph)
+                            .expect("morph split"),
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -843,7 +1143,7 @@ fn squared_gradient_column_is_allocated_only_when_requested() {
     assert_eq!(standard.feature(0).expect("feature").grad_sq_sums(), None);
     assert_eq!(
         dro.feature(0).expect("feature").grad_sq_sums(),
-        Some(&[4.0, 1.0, 1.0, 4.0][..])
+        Some(&[4.0, 1.0, 1.0, 4.0, 0.0][..])
     );
 }
 

@@ -191,7 +191,7 @@ pub(crate) fn apply_single_categorical_target_encoding(
     };
 
     let mut encoded_binned_matrix = binned_matrix.clone();
-    encoded_binned_matrix.max_bin = encoded_binned_matrix.max_bin.max(encoded_max_bin);
+    encoded_binned_matrix.set_max_bin(encoded_binned_matrix.max_bin.max(encoded_max_bin));
     for (row_index, &encoded_bin) in encoded_bins.iter().enumerate() {
         encoded_binned_matrix.set_bin(row_index, spec.feature_index, u16::from(encoded_bin));
     }

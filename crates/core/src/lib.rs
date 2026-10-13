@@ -44,7 +44,8 @@ pub use artifact_format::{
     validate_categorical_state_payload_v1,
 };
 pub use binned::{
-    BinColumn, BinStorage, BinnedLayout, BinnedMatrix, MISSING_BIN_U8, MISSING_BIN_U16,
+    BinColumn, BinStorage, BinnedLayout, BinnedMatrix, CompactHistogramLayout, MISSING_BIN_U8,
+    MISSING_BIN_U16,
 };
 pub use config::{
     BoostingMode, DartNormalize, DartSampleType, Device, LeafModelKind, LeafSolverKind,
