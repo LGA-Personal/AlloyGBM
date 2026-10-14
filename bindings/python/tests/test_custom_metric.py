@@ -106,6 +106,32 @@ class TestRegressorCustomMetric(unittest.TestCase):
         model.fit(X, y, eval_set=(X_val, y_val), eval_metric=_custom_rmse)
         self.assertLess(model.n_estimators_, 500)
 
+    def test_custom_metric_early_stopping_reports_its_own_best_round(self):
+        """best_iteration_ is the custom metric's best round, not the RMSE one."""
+        X, y = _regression_data(n=200)
+        X_val, y_val = _regression_data(n=100, seed=7)
+        calls = []
+
+        def peaks_at_round_five(y_true, y_pred):
+            # Ignores the predictions: best at round 5 while RMSE keeps falling.
+            calls.append(len(y_pred))
+            evaluated = sum(1 for n in calls if n == len(y_val))
+            return ("peak", -abs(evaluated - 5.0), True)
+
+        model = GBMRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            early_stopping_rounds=10,
+            seed=1,
+            deterministic=True,
+        )
+        model.fit(X, y, eval_set=(X_val, y_val), eval_metric=peaks_at_round_five)
+        self.assertEqual(model.stop_reason_, "CustomMetricPlateau")
+        self.assertEqual(model.rounds_completed_, 5)
+        self.assertEqual(model.best_iteration_, 4)  # zero-based, like XGBoost
+        mse = model.evals_result_["validation"]["mse"]
+        self.assertAlmostEqual(model.best_score_, mse[4], places=5)
+
     def test_custom_metric_higher_is_better(self):
         """Metric with higher_is_better=True (e.g. R²)."""
         X, y = _regression_data(n=200)

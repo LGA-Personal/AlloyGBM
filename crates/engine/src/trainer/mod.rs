@@ -3551,6 +3551,20 @@ impl Trainer {
         let final_loss = current_loss;
         profile.report(profile_snapshot.as_ref());
 
+        // A custom metric picks the best round (and drives early stopping),
+        // so report that round and the validation loss at it, not the round
+        // where the built-in loss happened to bottom out.
+        if custom_metric_callback.is_some() {
+            best_validation_round = best_custom_metric_round;
+            best_validation_loss = best_custom_metric_round.and_then(|round| {
+                if round == 0 {
+                    initial_validation_loss
+                } else {
+                    validation_loss_per_completed_round.get(round - 1).copied()
+                }
+            });
+        }
+
         Ok(IterationRunSummary {
             model,
             rounds_requested: controls.rounds,
