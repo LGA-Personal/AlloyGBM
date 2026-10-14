@@ -12,7 +12,8 @@ files (only the requested eras and columns are loaded):
     [ train chunk ] gap [ validation chunk ] gap [ test chunk ]
 
 * train      - fits every library
-* validation - early stopping (RMSE), shared by every library
+* validation - early stopping on mean per-era correlation (``--stop-metric``),
+               shared by every library
 * test       - held-out scoring: RMSE plus Numerai's per-era correlation
 
 Chunks are contiguous runs of eras, never share an era, and are separated
@@ -349,25 +350,88 @@ def load_chunk(eras: list[str], timeline: list[EraInfo], sources: dict[str, Path
 # ---------------------------------------------------------------------------
 # Fit / predict
 # ---------------------------------------------------------------------------
+class PerEraCorr:
+    """Mean per-era Pearson correlation of predictions with the target.
+
+    The early-stopping metric. On Numerai, validation RMSE bottoms out after
+    a few dozen trees because the signal is tiny next to the noise, while
+    per-era correlation keeps improving for thousands of trees, so RMSE
+    stops every library long before it has learned anything. Pearson on raw
+    predictions (not Numerai's rank-gaussianised corr) keeps the per-round
+    cost to a few vectorised passes; the two track each other closely.
+    """
+
+    def __init__(self, y: np.ndarray, eras: np.ndarray) -> None:
+        _, self.codes = np.unique(eras, return_inverse=True)
+        self.counts = np.bincount(self.codes).astype(np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        self.yc = y - (np.bincount(self.codes, y) / self.counts)[self.codes]
+        self.y_ss = np.bincount(self.codes, self.yc * self.yc)
+
+    def __call__(self, preds: np.ndarray) -> float:
+        p = np.asarray(preds, dtype=np.float64).reshape(-1)
+        if p.size != self.codes.size:
+            # Not the validation chunk: CatBoost also scores the train set and
+            # Alloy probes the callable with a tiny array before training.
+            return 0.0
+        pc = p - (np.bincount(self.codes, p) / self.counts)[self.codes]
+        cov = np.bincount(self.codes, pc * self.yc)
+        denom = np.sqrt(np.bincount(self.codes, pc * pc) * self.y_ss)
+        corr = np.divide(cov, denom, out=np.zeros_like(cov), where=denom > 0)
+        return float(corr.mean())
+
+
+class _CatBoostEraCorr:
+    """CatBoost custom eval metric wrapper (higher is better)."""
+
+    def __init__(self, metric: PerEraCorr) -> None:
+        self.metric = metric
+
+    def is_max_optimal(self) -> bool:
+        return True
+
+    def evaluate(self, approxes, target, weight):
+        return self.metric(np.asarray(approxes[0])), 1.0
+
+    def get_final_error(self, error, weight):
+        return error
+
+
 def fit_arm(arm: str, params: dict, train: Chunk, valid: Chunk, *,
-            early_stopping: int, log_period: int):
+            early_stopping: int, log_period: int, stop_metric: str = "corr"):
+    """Fit with early stopping on ``valid``: per-era corr (default) or RMSE."""
+    corr = PerEraCorr(valid.y, valid.eras) if stop_metric == "corr" else None
     if arm == "alloygbm":
         from alloygbm import GBMRegressor
 
         model = GBMRegressor(**params)
-        model.fit(train.X, train.y, eval_set=(valid.X, valid.y))
+        kwargs = {}
+        if corr is not None:
+            kwargs["eval_metric"] = lambda y_true, y_pred: ("era_corr", corr(y_pred), True)
+        model.fit(train.X, train.y, eval_set=(valid.X, valid.y), **kwargs)
     elif arm == "lightgbm":
         import lightgbm as lgb
 
+        eval_metric = "rmse"
+        if corr is not None:
+            # Built-in metrics off, so early stopping watches only era_corr.
+            params = {**params, "metric": "None"}
+            eval_metric = lambda y_true, y_pred: ("era_corr", corr(y_pred), True)  # noqa: E731
         model = lgb.LGBMRegressor(**params)
         callbacks = [lgb.early_stopping(early_stopping, verbose=False)]
         if log_period > 0:
             callbacks.append(lgb.log_evaluation(log_period))
-        model.fit(train.X, train.y, eval_set=[(valid.X, valid.y)], eval_metric="rmse",
+        model.fit(train.X, train.y, eval_set=[(valid.X, valid.y)], eval_metric=eval_metric,
                   callbacks=callbacks)
     elif arm == "xgboost":
         import xgboost as xgb
 
+        if corr is not None:
+            # XGBoost minimises a callable metric during early stopping.
+            def neg_era_corr(y_true, y_pred):
+                return -corr(y_pred)
+
+            params = {**params, "eval_metric": neg_era_corr}
         model = xgb.XGBRegressor(**params)
         model.fit(train.X, train.y, eval_set=[(valid.X, valid.y)],
                   verbose=log_period if log_period > 0 else False)
@@ -376,6 +440,8 @@ def fit_arm(arm: str, params: dict, train: Chunk, valid: Chunk, *,
 
         if log_period > 0:
             params = {**params, "verbose": log_period}
+        if corr is not None:
+            params = {**params, "eval_metric": _CatBoostEraCorr(corr)}
         model = cb.CatBoostRegressor(**params)
         model.fit(train.X, train.y, eval_set=(valid.X, valid.y))
     else:
@@ -461,7 +527,7 @@ def run_arm(arm: str, profile: Profile, args: argparse.Namespace,
     t0 = time.perf_counter()
     try:
         model = fit_arm(arm, params, train, valid, early_stopping=profile.early_stopping,
-                        log_period=args.log_period)
+                        log_period=args.log_period, stop_metric=args.stop_metric)
     except Exception as exc:  # keep the other arms running
         logger.exception("%s failed", arm)
         return ArmRecord(arm, profile.name, params, unmapped, None,
@@ -515,7 +581,8 @@ def markdown_report(records: list[ArmRecord], plan: ChunkPlan, sizes: dict,
                      f"| {sizes[name]:,} |")
     lines += [
         "",
-        f"Chunks are separated by {plan.gap} embargoed eras. Early stopping on validation RMSE.",
+        f"Chunks are separated by {plan.gap} embargoed eras. Early stopping on validation "
+        f"{'mean per-era correlation' if args.stop_metric == 'corr' else 'RMSE'}.",
         "",
         "| Arm | Test RMSE | Per-era corr | Sharpe | Positive eras | numerai_corr | Trees | "
         "Fit (s) | s / tree | Unmapped |",
@@ -580,8 +647,13 @@ def main() -> None:
                         help="1 matches the other libraries' per-tree row sampling")
     parser.add_argument("--log-period", type=int, default=500,
                         help="peer libraries print validation RMSE every N trees (0: quiet)")
+    parser.add_argument("--stop-metric", default="corr", choices=["corr", "rmse"],
+                        help="early-stopping metric on the validation chunk: mean per-era "
+                             "correlation (default) or RMSE, which stops after a few dozen "
+                             "trees on Numerai")
     parser.add_argument("--output-dir", default=None)
     args = parser.parse_args()
+    args.resolved_arms = list(args.arms)
     profile = PROFILES[args.profile]
 
     ensure_numerai_data(keys=DATA_KEYS)

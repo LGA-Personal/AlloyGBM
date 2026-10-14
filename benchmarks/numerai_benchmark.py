@@ -795,7 +795,8 @@ def _log_alloygbm_build_info() -> None:
             ["git", "log", "-1", "--format=%cI", "HEAD"],
             cwd=str(repo_root), stderr=_subprocess.DEVNULL,
         ).decode().strip()
-        commit_time = _dt.datetime.fromisoformat(commit_iso).replace(tzinfo=None)
+        # Local wall time, to compare with the extension's local-time mtime.
+        commit_time = _dt.datetime.fromisoformat(commit_iso).astimezone().replace(tzinfo=None)
     except Exception as exc:
         logger.warning("could not read git HEAD: %s", exc)
         return

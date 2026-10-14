@@ -102,6 +102,25 @@ class ParquetChunkTests(unittest.TestCase):
         self.assertTrue(np.isfinite(chunk.y).all())
 
 
+class PerEraCorrTests(unittest.TestCase):
+    def test_matches_a_per_era_pearson_loop(self) -> None:
+        rng = np.random.default_rng(1)
+        eras = np.repeat(["0003", "0001", "0002"], 50)
+        y = rng.random(150)
+        preds = y + rng.normal(0, 1, 150)
+        expected = np.mean([np.corrcoef(preds[eras == e], y[eras == e])[0, 1]
+                            for e in ["0001", "0002", "0003"]])
+        self.assertAlmostEqual(SCALE.PerEraCorr(y, eras)(preds), expected, places=10)
+
+    def test_constant_predictions_score_zero(self) -> None:
+        eras = np.repeat(["a", "b"], 10)
+        self.assertEqual(SCALE.PerEraCorr(np.arange(20.0), eras)(np.ones(20)), 0.0)
+
+    def test_other_lengths_score_zero(self) -> None:
+        eras = np.repeat(["a", "b"], 10)
+        self.assertEqual(SCALE.PerEraCorr(np.arange(20.0), eras)(np.arange(2.0)), 0.0)
+
+
 class LibraryParamsTests(unittest.TestCase):
     def test_deep_profile_maps_onto_every_library(self) -> None:
         profile = SCALE.PROFILES["deep"]
