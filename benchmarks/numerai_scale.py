@@ -452,9 +452,10 @@ def fit_arm(arm: str, params: dict, train: Chunk, valid: Chunk, *,
 def trees_used(model, arm: str) -> int | None:
     try:
         if arm == "alloygbm":
-            best = getattr(model, "best_iteration_", None)
-            done = getattr(model, "rounds_completed_", None)
-            return int(best) + 1 if best is not None else (int(done) if done is not None else None)
+            # Early stopping truncates the model, so rounds_completed_ is the
+            # kept tree count. best_iteration_ tracks validation RMSE even
+            # when a custom eval_metric drove the stop.
+            return int(model.rounds_completed_)
         if arm == "lightgbm":
             best = getattr(model, "best_iteration_", None)
             return int(best) if best else int(model.booster_.current_iteration())
