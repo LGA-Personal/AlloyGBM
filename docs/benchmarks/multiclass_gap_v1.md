@@ -102,5 +102,5 @@ Largest gains: vowel (0.56 / 0.65), MiceProtein (0.58, early stopping), mfeat-fa
 defaults). No regression is significant; the largest is car (1.33 / 1.84, a small,
 low-cardinality task with large seed noise, log SE 0.27 / 0.40). Remaining CatBoost losses
 under early stopping: MiceProtein 1.83, vowel 1.40, texture 1.35, mfeat-pixel 1.23,
-balance-scale 1.16, zernike 1.11. Fit time rises because row subsampling and noise slow
-early stopping's convergence (more rounds).
+balance-scale 1.16, zernike 1.11. Multiclass fit time rises in both regimes (cause not yet
+profiled).
