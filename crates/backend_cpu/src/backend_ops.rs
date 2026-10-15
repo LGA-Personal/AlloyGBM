@@ -5,8 +5,8 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
-    HistogramExecution, LinearContext, MorphContext, PreparedLinearSplit, SplitSelectionOptions,
-    SplitShortlist,
+    HistogramExecution, LinearContext, MorphContext, PreparedLinearSplit, SplitNoise,
+    SplitSelectionOptions, SplitShortlist,
 };
 
 use crate::CpuBackend;
@@ -103,6 +103,7 @@ impl BackendOps for CpuBackend {
             &[],
             &[],
             None,
+            None,
         ))
     }
 
@@ -118,6 +119,7 @@ impl BackendOps for CpuBackend {
             options,
             feature_weights,
             categorical_features,
+            None,
             None,
         ))
     }
@@ -218,6 +220,34 @@ impl BackendOps for CpuBackend {
                     feature_weights,
                     categorical_features,
                     factor_context,
+                    None,
+                )
+            },
+        ))
+    }
+
+    fn best_split_with_noise(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        factor_context: Option<&FactorSplitContext<'_>>,
+        noise: Option<SplitNoise>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        if let Some(ctx) = factor_context {
+            validate_factor_split_context(ctx)?;
+        }
+        Ok(alloygbm_engine::time_tree_stage(
+            alloygbm_engine::TreeStage::SplitFind,
+            || {
+                Self::best_split_with_options_internal(
+                    histograms,
+                    options,
+                    feature_weights,
+                    categorical_features,
+                    factor_context,
+                    noise,
                 )
             },
         ))
@@ -259,6 +289,7 @@ impl BackendOps for CpuBackend {
                 options,
                 feature_weights,
                 categorical_features,
+                None,
                 None,
             ));
         }

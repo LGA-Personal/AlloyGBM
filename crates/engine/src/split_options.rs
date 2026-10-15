@@ -16,6 +16,46 @@ pub struct PreparedLinearSplit {
     pub right_leaf: LinearLeaf,
 }
 
+/// Random noise on split selection (CatBoost's `random_strength`).
+///
+/// When choosing a node's split, each feature's best candidate competes on
+/// `weighted_gain * (1 + strength * z)`, where `z` is a deterministic,
+/// roughly standard-normal draw keyed by the seed, the node and the feature.
+/// Features whose true gains are close then win in turn across trees instead
+/// of one feature always edging out the others, which decorrelates the
+/// trees much like row and column sampling. The chosen candidate keeps its
+/// true gain, so `min_split_gain` and leaf values are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitNoise {
+    pub strength: f32,
+    pub seed: u64,
+}
+
+impl SplitNoise {
+    /// `Some` only for a positive, finite strength.
+    pub fn new(strength: f32, seed: u64) -> Option<Self> {
+        (strength.is_finite() && strength > 0.0).then_some(Self { strength, seed })
+    }
+
+    /// Non-negative multiplier for `feature_index`'s gain at `node_id`.
+    pub fn gain_multiplier(&self, node_id: u32, feature_index: u32) -> f32 {
+        let mut state = self.seed
+            ^ u64::from(node_id).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ u64::from(feature_index).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        // Irwin-Hall: the sum of four U(-0.5, 0.5) draws has variance 1/3.
+        let mut sum = 0.0_f32;
+        for _ in 0..4 {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            sum += (z >> 40) as f32 / (1_u64 << 24) as f32 - 0.5;
+        }
+        (1.0 + self.strength * sum * 3.0_f32.sqrt()).max(0.0)
+    }
+}
+
 /// Return the gain used to compare candidates across features without
 /// changing the unweighted gain persisted in the candidate.
 pub fn feature_weighted_gain(candidate: &SplitCandidate, feature_weights: &[f32]) -> f32 {

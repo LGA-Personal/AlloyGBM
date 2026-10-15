@@ -120,6 +120,12 @@ pub struct IterationControls {
     /// built (binary log loss only; see `refine_binary_newton_leaf_values`).
     /// `0` keeps the builder's single step.
     pub auto_leaf_newton_steps: usize,
+    /// Strength of the random split-score noise (see [`crate::SplitNoise`]);
+    /// set by the auto policy for multiclass softmax. `0.0` disables it.
+    pub split_noise_strength: f32,
+    /// Seed for the split-score noise. The trainer derives it from the fit's
+    /// sampling seed (and, for multiclass, the class).
+    pub split_noise_seed: u64,
     /// Relative validation tolerance for early stopping; see
     /// `TrainParams::early_stopping_relative_tolerance`. `0.0` disables it.
     pub relative_validation_improvement: f64,
@@ -477,6 +483,8 @@ impl IterationControls {
             auto_lambda_l2: 0.0,
             auto_min_child_hessian: 0.0,
             auto_leaf_newton_steps: 0,
+            split_noise_strength: 0.0,
+            split_noise_seed: 0,
             relative_validation_improvement: 0.0,
         })
     }

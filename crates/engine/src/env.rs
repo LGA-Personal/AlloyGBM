@@ -32,6 +32,17 @@ pub(crate) fn experiment_binary_leaf_newton_steps() -> Option<usize> {
         .and_then(|value| value.trim().parse::<usize>().ok())
 }
 
+pub(crate) const SPLIT_NOISE_STRENGTH_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_NOISE_STRENGTH";
+
+/// Split-score noise strength overriding the auto policy's choice, for any
+/// objective (`0` turns it off). `None` when the variable is unset or invalid.
+pub(crate) fn experiment_split_noise_strength() -> Option<f32> {
+    std::env::var(SPLIT_NOISE_STRENGTH_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
 pub(crate) fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
     Ok(SplitSelectionOptions {
         l2_lambda: parse_nonnegative_env_f32(SPLIT_L2_ENV_VAR)?,

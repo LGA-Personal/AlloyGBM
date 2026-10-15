@@ -3240,6 +3240,7 @@ fn split_scan_nested_rayon_multi_worker_selection_matches_sequential_scalar_orac
             &[],
             &[],
             None,
+            None,
         );
         sender
             .send((
@@ -4041,7 +4042,14 @@ fn dro_simd_nested_rayon_calls_keep_thread_local_scratch_isolated() {
         .build()
         .expect("DRO nested split test pool");
     let actual = pool.install(|| {
-        CpuBackend::best_split_with_options_internal(&nested_histograms, options, &[], &[], None)
+        CpuBackend::best_split_with_options_internal(
+            &nested_histograms,
+            options,
+            &[],
+            &[],
+            None,
+            None,
+        )
     });
     assert_dro_split_candidates_match(expected.as_ref(), actual.as_ref());
 }
@@ -4190,6 +4198,7 @@ fn dro_categorical_production_dispatch_retains_scalar_fallback() {
         options,
         &[],
         &categorical_features,
+        None,
         None,
     );
 
@@ -4469,4 +4478,82 @@ fn dominant_bin_histograms_match_direct_sums() {
             }
         }
     }
+}
+
+#[test]
+fn split_noise_lets_close_features_take_turns_but_keeps_true_gains() {
+    use alloygbm_engine::SplitNoise;
+
+    // Two features with the same two-bin shape; feature 0's split is
+    // slightly stronger.
+    let feature = |feature_index: u32, edge: f32| FeatureHistogram {
+        feature_index,
+        bins: vec![
+            HistogramBin {
+                grad_sum: -edge,
+                hess_sum: 10.0,
+                grad_sq_sum: edge * edge,
+                count: 10,
+            },
+            HistogramBin {
+                grad_sum: edge,
+                hess_sum: 10.0,
+                grad_sq_sum: edge * edge,
+                count: 10,
+            },
+        ],
+    };
+    let options = SplitSelectionOptions {
+        missing_bin_index: 255,
+        ..SplitSelectionOptions::default()
+    };
+    let mut wins = [0_usize; 2];
+    for node_id in 0..200_u32 {
+        let histograms = HistogramBundle::from_feature_histograms(
+            node_id,
+            vec![feature(0, 5.0), feature(1, 4.9)],
+            true,
+        )
+        .expect("valid bundle");
+        let plain = CpuBackend::best_split_with_options_internal(
+            &histograms,
+            options,
+            &[],
+            &[],
+            None,
+            None,
+        )
+        .expect("split");
+        assert_eq!(plain.feature_index, 0);
+        let noisy = CpuBackend::best_split_with_options_internal(
+            &histograms,
+            options,
+            &[],
+            &[],
+            None,
+            SplitNoise::new(0.5, 42),
+        )
+        .expect("split");
+        wins[noisy.feature_index as usize] += 1;
+        // The winner reports its own, un-noised gain.
+        let reference = CpuBackend::best_split_with_options_internal(
+            &HistogramBundle::from_feature_histograms(
+                node_id,
+                vec![feature(
+                    noisy.feature_index,
+                    if noisy.feature_index == 0 { 5.0 } else { 4.9 },
+                )],
+                true,
+            )
+            .expect("valid bundle"),
+            options,
+            &[],
+            &[],
+            None,
+            None,
+        )
+        .expect("split");
+        assert_eq!(noisy.gain, reference.gain);
+    }
+    assert!(wins[0] > 50 && wins[1] > 50, "wins {wins:?}");
 }
