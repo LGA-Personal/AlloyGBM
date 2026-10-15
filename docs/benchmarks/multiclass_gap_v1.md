@@ -81,7 +81,26 @@ Strengths from 0.5 to 2 are all at CatBoost parity on the dev suite. 1.0 matches
 CatBoost's default. The noise adds no histogram or scan work: it only changes how a node
 compares the per-feature best candidates.
 
-## Not yet measured
+## OpenML CC18 confirmation (held-out test set)
 
-- OpenML CC18 multiclass confirmation (held-out test set). To be run on the Mac with PR head
-  vs main, defaults and `early_stopping` regimes.
+All 33 CC18 multiclass tasks, 3 official folds, 3 seeds, 10 threads, on the same Mac as the
+main 629f69f run. Only the Alloy arm was re-run; peer numbers are main's records for the
+same cells. No errors.
+
+| Multiclass, 33 tasks | `early_stopping`: main → PR | `defaults`: main → PR |
+|---|---:|---:|
+| Loss vs best peer (geomean) | 1.125 → **1.018** | 0.998 → **0.941** |
+| Alloy / CatBoost log loss (geomean) | 1.092 → **0.988** | 0.945 → **0.891** |
+| W/T/L vs CatBoost | 3/13/17 → **5/19/9** | 8/18/7 → **10/21/2** |
+| W/T/L vs LightGBM | 12/16/5 → 17/14/2 | 22/10/1 → 25/8/0 |
+| Best or tied | 15 → **23** | 26 → **31** |
+| Fit time vs fastest peer | 0.35x → 0.53x | 3.24x → 4.03x |
+
+PR vs main, paired (gate passed in both regimes): `early_stopping` geomean 0.905, 30 better /
+3 worse (Wilcoxon p = 3e-6); `defaults` geomean 0.943, 25 better / 8 worse (p = 2e-4).
+Largest gains: vowel (0.56 / 0.65), MiceProtein (0.58, early stopping), mfeat-factors (0.76,
+defaults). No regression is significant; the largest is car (1.33 / 1.84, a small,
+low-cardinality task with large seed noise, log SE 0.27 / 0.40). Remaining CatBoost losses
+under early stopping: MiceProtein 1.83, vowel 1.40, texture 1.35, mfeat-pixel 1.23,
+balance-scale 1.16, zernike 1.11. Fit time rises because row subsampling and noise slow
+early stopping's convergence (more rounds).
