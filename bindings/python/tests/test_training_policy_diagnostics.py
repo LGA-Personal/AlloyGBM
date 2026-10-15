@@ -582,3 +582,34 @@ def test_wrapper_load_rejects_round_cap_above_request(tmp_path) -> None:
     restored = GBMRegressor.load_model(str(path))
 
     assert restored.resolved_training_policy_ is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"training_mode": "morph"},
+        {"leaf_model": "linear", "pl_split_candidates": 4},
+    ],
+)
+def test_split_noise_reports_zero_where_the_split_search_ignores_it(
+    kwargs: dict[str, object],
+) -> None:
+    X, y = make_dense_fixture(rows=200, features=5, classes=None)
+    model = GBMRegressor(
+        n_estimators=3, training_policy="manual", random_strength=1.0, seed=7, **kwargs
+    ).fit(X, y)
+
+    assert model.resolved_training_policy_["split_noise_strength"] == 0.0
+
+
+@pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+def test_legacy_pickle_state_defaults_random_strength(estimator_type) -> None:
+    state = estimator_type(random_strength=0.5).__getstate__()
+    state.pop("random_strength")
+
+    restored = estimator_type.__new__(estimator_type)
+    restored.__setstate__(state)
+
+    assert restored.random_strength is None
+    assert restored.get_params()["random_strength"] is None
+    assert "random_strength=None" in repr(restored)

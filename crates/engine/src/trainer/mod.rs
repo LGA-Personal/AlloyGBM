@@ -163,19 +163,38 @@ pub(crate) fn dense_projection_stump_counts(stumps: &[TrainedStump]) -> EngineRe
 
 /// Apply the user's `split_noise_strength` and then the experiment override to
 /// the policy's split-noise strength, and key the noise to this fit's sampling
-/// seed, so it varies with `seed` like row and column sampling do.
+/// seed, so it varies with `seed` like row and column sampling do. Fits whose
+/// split search never consults the noise get strength 0, so the resolved
+/// policy reports what was actually used.
 fn resolve_split_noise(
     controls: &mut IterationControls,
-    requested_strength: Option<f32>,
+    params: &TrainParams,
     sampling_seed_base: u64,
 ) {
-    if let Some(strength) = requested_strength {
+    if let Some(strength) = params.split_noise_strength {
         controls.split_noise_strength = strength;
     }
     if let Some(strength) = crate::env::experiment_split_noise_strength() {
         controls.split_noise_strength = strength;
     }
+    if split_search_bypasses_noise(params) {
+        controls.split_noise_strength = 0.0;
+    }
     controls.split_noise_seed = mixed_hash(sampling_seed_base ^ 0x9E6C_63D0_676A_9A99);
+}
+
+/// MorphBoost scores splits with its own gain, and the piecewise-linear
+/// shortlist rescores candidates itself (unless a factor split penalty sends
+/// it back to the standard selector); neither applies split-score noise.
+fn split_search_bypasses_noise(params: &TrainParams) -> bool {
+    let factor_split_penalty = params.neutralization_config.is_some_and(|config| {
+        config.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+            && config.split_penalty != 0.0
+    });
+    params.morph_config.is_some()
+        || (params.leaf_model == LeafModelKind::Linear
+            && params.pl_split_candidates > 0
+            && !factor_split_penalty)
 }
 
 /// Rebuilds the per-class DART slice map from persisted multiclass stumps.
@@ -1114,11 +1133,7 @@ impl Trainer {
 
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
         let mut controls = controls;
-        resolve_split_noise(
-            &mut controls,
-            self.params.split_noise_strength,
-            sampling_seed_base,
-        );
+        resolve_split_noise(&mut controls, &self.params, sampling_seed_base);
         let split_resolution = split_selection_options_with_controls(
             &self.params,
             None,
@@ -2458,11 +2473,7 @@ impl Trainer {
             None
         };
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
-        resolve_split_noise(
-            &mut controls,
-            self.params.split_noise_strength,
-            sampling_seed_base,
-        );
+        resolve_split_noise(&mut controls, &self.params, sampling_seed_base);
         let split_resolution = split_selection_options_with_controls(
             &self.params,
             execution.policy_mode,
