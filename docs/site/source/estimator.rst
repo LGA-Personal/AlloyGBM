@@ -37,6 +37,14 @@ Core parameters
   binary ``GBMClassifier``, and ``GBMRanker``. Multiclass ``GBMClassifier`` and
   ``MultiLabelGBMRanker(multi_label_mode="joint")`` reject a value below ``1.0``
   rather than silently ignoring it.
+- ``random_strength: float | None = None`` -- split-score noise strength, like
+  CatBoost's ``random_strength``: each feature's best split candidate competes
+  on its gain times ``max(0, 1 + random_strength * z)`` with ``z`` a
+  deterministic unit normal, and the chosen split keeps its true gain. ``None``
+  keeps the training policy's choice (1.0 for auto multiclass softmax,
+  otherwise off), ``0.0`` turns it off, and a positive value applies it under
+  either policy. Not applied to MorphBoost, piecewise-linear shortlists or
+  ``MultiLabelGBMRanker(multi_label_mode="joint")``.
 - ``quantile_alpha: float = 0.5``
   - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 
@@ -158,7 +166,8 @@ leaf regularization off. Passing ``0.0`` is the same as the default; use
 
 After fitting, ``resolved_training_policy_`` reports the requested policy
 mode, requested and effective round counts, effective leaf/split thresholds,
-effective row/column sampling, and the effective leaf L2. It is a diagnostic
+effective row/column sampling, the effective leaf L2, and the split-score
+noise strength (``split_noise_strength``). It is a diagnostic
 dictionary, not a constructor parameter or model-artifact field. It can be
 ``None`` only for an older or mocked native summary, older saved wrapper
 metadata, or an unfitted or reset estimator.

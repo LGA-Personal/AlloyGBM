@@ -17,6 +17,25 @@ fn validates_default_train_params() {
 }
 
 #[test]
+fn split_noise_strength_accepts_none_and_non_negative_finite_values() {
+    for strength in [None, Some(0.0), Some(1.0), Some(5.0)] {
+        let params = TrainParams {
+            split_noise_strength: strength,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&params).is_ok(), "{strength:?}");
+    }
+    for strength in [-0.5, f32::NAN, f32::INFINITY] {
+        let params = TrainParams {
+            split_noise_strength: Some(strength),
+            ..TrainParams::default()
+        };
+        let error = validate_train_params(&params).expect_err("invalid strength must fail");
+        assert!(error.to_string().contains("split_noise_strength"));
+    }
+}
+
+#[test]
 fn pl_split_candidates_defaults_to_compatibility_mode() {
     assert_eq!(TrainParams::default().pl_split_candidates, 0);
 }

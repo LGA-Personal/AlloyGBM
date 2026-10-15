@@ -10980,6 +10980,7 @@ fn relative_validation_improvement_rejects_out_of_range_tolerance() {
 fn train_params_reject_out_of_range_relative_tolerance() {
     let params = TrainParams {
         early_stopping_relative_tolerance: 1.5,
+        split_noise_strength: None,
         ..TrainParams::default()
     };
     assert!(Trainer::new(params).is_err());

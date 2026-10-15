@@ -80,6 +80,8 @@ class _PersistenceMixin:
         self.__dict__.update(state)
         if not hasattr(self, "n_jobs"):
             self.n_jobs = None
+        if not hasattr(self, "random_strength"):
+            self.random_strength = None
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
         if self._is_fitted and not hasattr(self, "feature_bundling_diagnostics_"):

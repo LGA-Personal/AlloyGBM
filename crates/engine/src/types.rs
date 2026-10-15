@@ -374,6 +374,8 @@ pub struct ResolvedTrainingPolicy {
     pub col_subsample: f32,
     pub auto_split_l2_applied: bool,
     pub effective_split_l2: f32,
+    /// Split-score noise strength the fit used (0 when off).
+    pub split_noise_strength: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

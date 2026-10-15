@@ -51,6 +51,14 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if let Some(strength) = params.split_noise_strength
+        && !(strength.is_finite() && strength >= 0.0)
+    {
+        return Err(CoreError::InvalidConfig(
+            "split_noise_strength must be finite and >= 0.0 when set".to_string(),
+        ));
+    }
+
     if let Some(rounds) = params.early_stopping_rounds
         && rounds == 0
     {
