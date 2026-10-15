@@ -40,11 +40,20 @@ pub(crate) const AUTO_ROW_SUBSAMPLE_BINARY: f32 = 0.8;
 /// predictions undershoots a log-loss leaf's regularized optimum; most of
 /// the gain comes from the first extra steps.
 pub(crate) const AUTO_LEAF_NEWTON_STEPS_BINARY: usize = 2;
-/// Auto-policy L2 for multiclass softmax. Per-class Hessians are smaller
-/// than binary ones, so a Hessian floor blocks too many splits there; leaf
-/// L2 gives the same protection and measurably helps every multiclass
-/// fixture in the default-quality suite.
-pub(crate) const AUTO_LAMBDA_L2_MULTICLASS: f32 = 1.0;
+/// Auto-policy L2 for multiclass softmax (CatBoost's `l2_leaf_reg`
+/// default). Per-class Hessians are smaller than binary ones, so a Hessian
+/// floor blocks too many splits there; leaf L2 gives the same protection.
+/// On the multiclass dev suite (`benchmarks/multiclass_dev_suite.py`) 3
+/// beat the earlier 1.0. See docs/benchmarks/multiclass_gap_v1.md.
+pub(crate) const AUTO_LAMBDA_L2_MULTICLASS: f32 = 3.0;
+/// Auto-policy row subsample for multiclass softmax at every size (the
+/// generic auto rule only subsamples from 2,048 rows up).
+pub(crate) const AUTO_ROW_SUBSAMPLE_MULTICLASS: f32 = 0.8;
+/// Auto-policy split-score noise for multiclass softmax (CatBoost's
+/// `random_strength`; see `SplitNoise`). Turning CatBoost's noise off was
+/// the largest single loss in an ablation of its multiclass defaults, and
+/// adding it to Alloy closed most of the remaining gap on the dev suite.
+pub(crate) const AUTO_SPLIT_NOISE_MULTICLASS: f32 = 1.0;
 
 /// `(lambda_l2, min_child_hessian)` the auto policy proposes for `family`.
 ///

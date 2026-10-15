@@ -5,7 +5,7 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext, MorphContext,
-    SplitSelectionOptions,
+    SplitNoise, SplitSelectionOptions,
 };
 use rayon::prelude::*;
 use std::cell::RefCell;
@@ -2205,6 +2205,7 @@ impl CpuBackend {
         feature_weights: &[f32],
         categorical_features: &[CategoricalFeatureInfo],
         factor_context: Option<&FactorSplitContext<'_>>,
+        noise: Option<SplitNoise>,
     ) -> Option<SplitCandidate> {
         let find_best = |fh: HistogramFeatureView<'_>| -> Option<SplitCandidate> {
             let fi = fh.feature_index() as usize;
@@ -2235,6 +2236,24 @@ impl CpuBackend {
         //
         // Parallelism for this phase comes from the level's node-level
         // `par_iter` and, for histogram construction, from feature tiles.
+        if let Some(noise) = noise {
+            // Same candidates, compared on their noisy weighted gains. The
+            // strict `>` keeps the first feature on ties, like the reduce
+            // below.
+            let mut best: Option<(f32, SplitCandidate)> = None;
+            for candidate in histograms
+                .features()
+                .filter_map(find_best)
+                .filter(|candidate| feature_weight_allows_split(candidate, feature_weights))
+            {
+                let noisy = apply_feature_weight(&candidate, feature_weights)
+                    * noise.gain_multiplier(histograms.node_id, candidate.feature_index);
+                if best.as_ref().is_none_or(|(gain, _)| noisy > *gain) {
+                    best = Some((noisy, candidate));
+                }
+            }
+            return best.map(|(_, candidate)| candidate);
+        }
         {
             histograms
                 .features()

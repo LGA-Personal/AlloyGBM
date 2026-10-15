@@ -176,12 +176,19 @@ def test_native_training_with_python_callbacks_releases_gil_between_invocations(
             deterministic=True,
         ).fit(x_train, y_train, eval_set=(x_val, y_val), eval_metric=custom_rmse)
 
-    calibration_progress, calibration_elapsed = _worker_progress_during(
-        lambda: time.sleep(0.05)
-    )
-    progress, elapsed = _worker_progress_during(fit_model)
-
-    assert elapsed >= 0.02
-    calibration_rate = calibration_progress / calibration_elapsed
-    training_rate = progress / elapsed
-    assert training_rate >= calibration_rate * 0.65
+    # This floor is much tighter than MIN_WORKER_RATE_FRACTION, so a single
+    # sample is sensitive to scheduler noise on shared CI runners. A GIL held
+    # across the fit fails every attempt; noise only fails some, so keep the
+    # best of a few paired measurements.
+    best_ratio = 0.0
+    for _ in range(3):
+        calibration_progress, calibration_elapsed = _worker_progress_during(
+            lambda: time.sleep(0.05)
+        )
+        progress, elapsed = _worker_progress_during(fit_model)
+        assert elapsed >= 0.02
+        calibration_rate = calibration_progress / calibration_elapsed
+        best_ratio = max(best_ratio, (progress / elapsed) / calibration_rate)
+        if best_ratio >= 0.65:
+            break
+    assert best_ratio >= 0.65

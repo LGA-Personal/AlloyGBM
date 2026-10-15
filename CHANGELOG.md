@@ -39,6 +39,18 @@
 
 ### Changed
 
+- **Multiclass auto policy: leaf L2 3, row subsample 0.8 and split-score
+  noise.** Under `training_policy="auto"`, multiclass softmax now uses leaf L2
+  3 (was 1), row subsample 0.8 at every size (was none below 2,048 rows), and
+  new random split-score noise of strength 1. The noise works like CatBoost's
+  `random_strength`: each feature's best candidate competes on a randomly
+  perturbed gain, so close features take turns across trees, while the
+  chosen split keeps its true gain. On a 38-dataset PMLB multiclass dev suite
+  (matched depth 6, lr 0.05, early stopping) loss vs CatBoost went from 1.095
+  to 0.991. Manual policy and other objectives are unchanged.
+  `ALLOYGBM_EXPERIMENT_SPLIT_NOISE_STRENGTH` overrides the strength. See
+  `docs/benchmarks/multiclass_gap_v1.md`.
+
 - **Better binary classification on small data.** Under
   `training_policy="auto"`, binary classifiers now use leaf `lambda_l2 = 3.0`
   with a minimum child Hessian of 0.1 (was 1.0 and no L2), row subsample 0.8

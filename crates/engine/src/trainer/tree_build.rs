@@ -21,7 +21,7 @@ use crate::error::{EngineError, EngineResult};
 use crate::morph_state::MorphTreeContext;
 use crate::round::apply_partition_leaf_updates;
 use crate::split_options::{
-    CategoricalFeatureInfo, FactorSplitContext, LinearContext, PreparedLinearSplit,
+    CategoricalFeatureInfo, FactorSplitContext, LinearContext, PreparedLinearSplit, SplitNoise,
     SplitSelectionOptions, feature_weighted_gain,
 };
 use crate::trainer::interaction::InteractionConstraintIndex;
@@ -245,6 +245,12 @@ pub(crate) fn encode_bins_from_encoded_values(
 /// variant based on whether a [`MorphTreeContext`] is supplied. Centralizes
 /// the choice so all call sites in `build_tree_level_wise` /
 /// `build_tree_leaf_wise` stay consistent.
+/// The split-score noise `controls` ask for, if any.
+fn split_noise(controls: &IterationControls) -> Option<SplitNoise> {
+    SplitNoise::new(controls.split_noise_strength, controls.split_noise_seed)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn find_best_split_dispatch<B: BackendOps>(
     backend: &B,
     histograms: &HistogramBundle,
@@ -253,6 +259,7 @@ pub(crate) fn find_best_split_dispatch<B: BackendOps>(
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<&MorphTreeContext<'_>>,
     factor_context: Option<&crate::split_options::FactorSplitContext<'_>>,
+    noise: Option<SplitNoise>,
 ) -> EngineResult<Option<SplitCandidate>> {
     if let Some(m) = morph {
         let ctx = m
@@ -267,12 +274,13 @@ pub(crate) fn find_best_split_dispatch<B: BackendOps>(
             factor_context,
         )
     } else {
-        backend.best_split_with_factor_context(
+        backend.best_split_with_noise(
             histograms,
             options,
             feature_weights,
             categorical_features,
             factor_context,
+            noise,
         )
     }
 }
@@ -315,6 +323,7 @@ fn select_node_split<B: BackendOps>(
     parent_leaf_value: f32,
     parent_linear_leaf: Option<&LinearLeaf>,
     max_abs_leaf_value: f32,
+    noise: Option<SplitNoise>,
 ) -> EngineResult<Option<SelectedNodeSplit>> {
     let legacy_path = params.leaf_model != LeafModelKind::Linear
         || params.pl_split_candidates == 0
@@ -330,6 +339,7 @@ fn select_node_split<B: BackendOps>(
             categorical_features,
             morph,
             factor_context,
+            noise,
         )
         .map(|split| {
             split.map(|split| SelectedNodeSplit {
@@ -512,6 +522,7 @@ fn propose_level_node<B: BackendOps>(
         parent_leaf_value,
         parent_linear_leaf.as_ref(),
         context.controls.max_abs_leaf_value,
+        split_noise(context.controls),
     )?
     else {
         return Ok(LevelNodeOutcome::no_split(local_node_id));
@@ -1226,6 +1237,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         0.0,
         None,
         controls.max_abs_leaf_value,
+        split_noise(controls),
     )?;
 
     let Some(SelectedNodeSplit {
@@ -1687,6 +1699,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 smaller_parent_val,
                 smaller_parent_ll.as_ref(),
                 controls.max_abs_leaf_value,
+                split_noise(controls),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1742,6 +1755,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 larger_parent_val,
                 larger_parent_ll.as_ref(),
                 controls.max_abs_leaf_value,
+                split_noise(controls),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -1846,6 +1860,12 @@ pub(crate) fn validate_iteration_controls(controls: IterationControls) -> Engine
         return Err(EngineError::InvalidConfig(
             "row_subsample must be in (0.0, 1.0]".to_string(),
         ));
+    }
+    if !controls.split_noise_strength.is_finite() || controls.split_noise_strength < 0.0 {
+        return Err(EngineError::InvalidConfig(format!(
+            "split_noise_strength must be finite and >= 0, got {}",
+            controls.split_noise_strength
+        )));
     }
     if !(0.0..=1.0).contains(&controls.col_subsample) || controls.col_subsample == 0.0 {
         return Err(EngineError::InvalidConfig(
@@ -2039,6 +2059,7 @@ mod linear_leaf_path_tests {
             0.0,
             None,
             f32::INFINITY,
+            None,
         )
         .expect("selector succeeds")
         .expect("selector returns a split")

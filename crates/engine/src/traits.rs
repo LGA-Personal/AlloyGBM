@@ -6,7 +6,7 @@ use alloygbm_core::{
 use crate::error::{EngineError, EngineResult};
 use crate::split_options::{
     CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, PreparedLinearSplit,
-    SplitSelectionOptions, SplitShortlist,
+    SplitNoise, SplitSelectionOptions, SplitShortlist,
 };
 use crate::types::ObjectiveFamily;
 
@@ -93,6 +93,26 @@ pub trait BackendOps: Sync {
             ));
         }
         self.best_split_with_options(histograms, options, feature_weights, categorical_features)
+    }
+    /// [`Self::best_split_with_factor_context`] with random split-score
+    /// noise across features (see [`SplitNoise`]). The default
+    /// implementation ignores the noise.
+    fn best_split_with_noise(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        factor_context: Option<&FactorSplitContext<'_>>,
+        _noise: Option<SplitNoise>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split_with_factor_context(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            factor_context,
+        )
     }
     /// Morph-mode split selection. Default implementation delegates to
     /// `best_split_with_options` (i.e. ignores morph context), so backends that

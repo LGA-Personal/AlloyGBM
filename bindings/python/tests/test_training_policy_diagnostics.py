@@ -107,7 +107,7 @@ def test_binary_classifier_assigns_resolved_policy() -> None:
 
 
 def test_multiclass_auto_policy_reports_classifier_l2() -> None:
-    # Auto mode gives multiclass softmax leaf L2 = 1 (objective-aware policy);
+    # Auto mode gives multiclass softmax leaf L2 = 3 (objective-aware policy);
     # the regression-only small-wide L2 rule does not apply to classifiers.
     X, _ = make_dense_fixture(rows=128, features=32, classes=6)
     y = np.asarray(([0, 5] * 62) + [1, 2, 3, 4], dtype="int32")
@@ -118,7 +118,7 @@ def test_multiclass_auto_policy_reports_classifier_l2() -> None:
     assert policy is not None
     assert policy["requested_mode"] == "auto"
     assert policy["auto_split_l2_applied"] is True
-    assert policy["effective_split_l2"] == pytest.approx(1.0)
+    assert policy["effective_split_l2"] == pytest.approx(3.0)
 
     manual = GBMClassifier(n_estimators=3, training_policy="manual", seed=7).fit(X, y)
     assert manual.resolved_training_policy_["auto_split_l2_applied"] is False

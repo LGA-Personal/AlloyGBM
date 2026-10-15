@@ -46,7 +46,7 @@ pub(crate) use factor::FactorProjector;
 mod split_options;
 pub use split_options::{
     CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, PreparedLinearSplit,
-    SplitSelectionOptions, SplitShortlist, feature_weighted_gain,
+    SplitNoise, SplitSelectionOptions, SplitShortlist, feature_weighted_gain,
 };
 
 mod traits;

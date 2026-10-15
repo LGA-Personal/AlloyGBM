@@ -4391,7 +4391,7 @@ fn multiclass_auto_policy_applies_classifier_l2_not_small_wide_l2() {
     // Classifier leaves get the auto L2, but not the regression-only
     // small-wide value, and multiclass gets no round cap.
     assert!(summary.resolved_training_policy.auto_split_l2_applied);
-    assert_eq!(summary.resolved_training_policy.effective_split_l2, 1.0);
+    assert_eq!(summary.resolved_training_policy.effective_split_l2, 3.0);
     assert_eq!(summary.resolved_training_policy.effective_round_cap, 300);
 }
 
@@ -4411,7 +4411,7 @@ fn auto_leaf_regularization_is_objective_aware() {
         (controls.auto_lambda_l2, controls.auto_min_child_hessian)
     };
     assert_eq!(auto(ObjectiveFamily::BinaryClassification), (3.0, 0.1));
-    assert_eq!(auto(ObjectiveFamily::MulticlassClassification), (1.0, 0.0));
+    assert_eq!(auto(ObjectiveFamily::MulticlassClassification), (3.0, 0.0));
     assert_eq!(auto(ObjectiveFamily::Regression), (0.0, 0.0));
     assert_eq!(auto(ObjectiveFamily::Ranking), (0.0, 0.0));
 
@@ -4428,6 +4428,62 @@ fn auto_leaf_regularization_is_objective_aware() {
         (manual.auto_lambda_l2, manual.auto_min_child_hessian),
         (0.0, 0.0)
     );
+}
+
+#[test]
+fn multiclass_auto_policy_adds_split_noise_and_row_subsample_at_every_size() {
+    for rows in [200, 4_096] {
+        let (dataset, matrix) = policy_fixture(rows, 16, 1.0);
+        let controls = |family| {
+            trainer()
+                .iteration_controls_for_objective_family(
+                    &dataset,
+                    &matrix,
+                    50,
+                    TrainingPolicyMode::Auto,
+                    family,
+                )
+                .expect("auto controls should resolve")
+        };
+        let multiclass = controls(ObjectiveFamily::MulticlassClassification);
+        assert!(multiclass.split_noise_strength > 0.0);
+        assert_eq!(multiclass.row_subsample, 0.8);
+        for family in [
+            ObjectiveFamily::BinaryClassification,
+            ObjectiveFamily::Regression,
+            ObjectiveFamily::Ranking,
+        ] {
+            assert_eq!(controls(family).split_noise_strength, 0.0);
+        }
+        let manual = trainer()
+            .iteration_controls_for_objective_family(
+                &dataset,
+                &matrix,
+                50,
+                TrainingPolicyMode::Manual,
+                ObjectiveFamily::MulticlassClassification,
+            )
+            .expect("manual controls should resolve");
+        assert_eq!(manual.split_noise_strength, 0.0);
+        assert_eq!(manual.row_subsample, 1.0);
+    }
+}
+
+#[test]
+fn split_noise_multiplier_is_deterministic_non_negative_and_centered() {
+    assert!(SplitNoise::new(0.0, 1).is_none());
+    assert!(SplitNoise::new(f32::NAN, 1).is_none());
+    let noise = SplitNoise::new(0.5, 7).expect("positive strength");
+    assert_eq!(noise.gain_multiplier(3, 4), noise.gain_multiplier(3, 4));
+    let other_seed = SplitNoise::new(0.5, 8).expect("positive strength");
+    let draws: Vec<f32> = (0..2_000).map(|f| noise.gain_multiplier(11, f)).collect();
+    assert!(draws.iter().all(|&m| m >= 0.0));
+    assert!((0..2_000).any(|f| noise.gain_multiplier(11, f) != other_seed.gain_multiplier(11, f)));
+    let mean = draws.iter().sum::<f32>() / draws.len() as f32;
+    let var = draws.iter().map(|m| (m - mean).powi(2)).sum::<f32>() / draws.len() as f32;
+    assert!((mean - 1.0).abs() < 0.05, "mean {mean}");
+    // strength 0.5 on a unit-variance draw gives a standard deviation near 0.5.
+    assert!((var.sqrt() - 0.5).abs() < 0.05, "std {}", var.sqrt());
 }
 
 #[test]

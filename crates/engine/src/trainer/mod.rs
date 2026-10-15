@@ -14,9 +14,9 @@ use monotone::{
     validate_monotone_forest,
 };
 pub(crate) use policy::{
-    AUTO_LEAF_NEWTON_STEPS_BINARY, AUTO_ROW_SUBSAMPLE_BINARY, AUTO_SPLIT_L2_NOISY_SMALL_WIDE,
-    auto_leaf_regularization, is_small_wide, resolve_training_policy,
-    split_selection_options_with_controls,
+    AUTO_LEAF_NEWTON_STEPS_BINARY, AUTO_ROW_SUBSAMPLE_BINARY, AUTO_ROW_SUBSAMPLE_MULTICLASS,
+    AUTO_SPLIT_L2_NOISY_SMALL_WIDE, AUTO_SPLIT_NOISE_MULTICLASS, auto_leaf_regularization,
+    is_small_wide, resolve_training_policy, split_selection_options_with_controls,
 };
 #[cfg(test)]
 pub(crate) use policy::{
@@ -159,6 +159,16 @@ pub(crate) fn dense_projection_stump_counts(stumps: &[TrainedStump]) -> EngineRe
     }
 
     Ok(counts)
+}
+
+/// Apply the experiment override to the split-noise strength and key the
+/// noise to this fit's sampling seed, so it varies with `seed` like row and
+/// column sampling do.
+fn resolve_split_noise(controls: &mut IterationControls, sampling_seed_base: u64) {
+    if let Some(strength) = crate::env::experiment_split_noise_strength() {
+        controls.split_noise_strength = strength;
+    }
+    controls.split_noise_seed = mixed_hash(sampling_seed_base ^ 0x9E6C_63D0_676A_9A99);
 }
 
 /// Rebuilds the per-class DART slice map from persisted multiclass stumps.
@@ -1096,6 +1106,8 @@ impl Trainer {
         }
 
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
+        let mut controls = controls;
+        resolve_split_noise(&mut controls, sampling_seed_base);
         let split_resolution = split_selection_options_with_controls(
             &self.params,
             None,
@@ -1514,6 +1526,11 @@ impl Trainer {
                         class_original_gradient_norms[class_k],
                         sampled_row_count,
                         sampled_feature_count,
+                    );
+                    // Each class tree draws its own split noise.
+                    let mut controls = controls;
+                    controls.split_noise_seed = mixed_hash(
+                        controls.split_noise_seed ^ (class_k as u64).wrapping_add(1),
                     );
                 let morph_tree_ctx: Option<MorphTreeContext<'_>> =
                     morph_state.as_ref().map(|ms| MorphTreeContext {
@@ -2216,6 +2233,12 @@ impl Trainer {
                 controls.row_subsample = AUTO_ROW_SUBSAMPLE_BINARY;
             }
         }
+        if family == ObjectiveFamily::MulticlassClassification {
+            controls.split_noise_strength = AUTO_SPLIT_NOISE_MULTICLASS;
+            if self.params.row_subsample == 1.0 {
+                controls.row_subsample = AUTO_ROW_SUBSAMPLE_MULTICLASS;
+            }
+        }
         let feature_count = binned_matrix.feature_count;
         if row_count < 1_024 {
             // Small, wide data: cap very long requests and, for regression,
@@ -2274,7 +2297,10 @@ impl Trainer {
 
         if self.params.row_subsample == 1.0
             && row_count >= 2_048
-            && family != ObjectiveFamily::BinaryClassification
+            && !matches!(
+                family,
+                ObjectiveFamily::BinaryClassification | ObjectiveFamily::MulticlassClassification
+            )
         {
             controls.row_subsample = if row_count >= 16_384 { 0.8 } else { 0.9 };
         }
@@ -2299,7 +2325,7 @@ impl Trainer {
         objective: &O,
         mut execution: IterationExecutionContext<'_>,
     ) -> EngineResult<IterationRunSummary> {
-        let controls = execution.controls;
+        let mut controls = execution.controls;
         let validation = execution.validation;
         validate_iteration_controls(controls)?;
         if controls.early_stopping_rounds.is_some() && validation.is_none() {
@@ -2421,6 +2447,7 @@ impl Trainer {
             None
         };
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
+        resolve_split_noise(&mut controls, sampling_seed_base);
         let split_resolution = split_selection_options_with_controls(
             &self.params,
             execution.policy_mode,
