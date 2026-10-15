@@ -151,6 +151,14 @@
 
 ### Added
 
+- **`random_strength` on every single-output estimator and multiclass
+  `GBMClassifier`.** It sets the split-score noise strength (CatBoost's
+  `random_strength`) under either training policy: `None` (default) keeps the
+  policy's choice (1.0 for auto multiclass, otherwise off), `0.0` turns it off,
+  and a positive value turns it on for any objective. Not supported by
+  `MultiLabelGBMRanker(multi_label_mode="joint")`. `resolved_training_policy_`
+  now also reports `split_noise_strength`. Saved wrapper metadata from before
+  this change still loads, with `split_noise_strength=None`.
 - `benchmarks/default_quality.py`: every library at its own defaults, multi-seed,
   normalized loss, and a paired gate (`compare --gate`) for default changes.
   It also has an `alloy-fixed` arm (the old 100 rounds at 0.1), a
