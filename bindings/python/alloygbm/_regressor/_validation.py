@@ -28,6 +28,7 @@ def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | No
         "col_subsample": float(native.col_subsample),
         "auto_split_l2_applied": bool(native.auto_split_l2_applied),
         "effective_split_l2": float(native.effective_split_l2),
+        "split_noise_strength": float(native.split_noise_strength),
     }
 
 
@@ -44,17 +45,35 @@ _RESOLVED_TRAINING_POLICY_METADATA_KEYS = frozenset(
         "effective_split_l2",
     }
 )
+# Added after the contract above shipped; metadata written before it lacks the
+# key and loads with ``split_noise_strength=None`` (not recorded).
+_OPTIONAL_RESOLVED_TRAINING_POLICY_METADATA_KEYS = frozenset({"split_noise_strength"})
 
 
 def _resolved_training_policy_from_metadata(
     value: object,
 ) -> dict[str, object] | None:
     """Return a normalized policy only for the exact JSON metadata contract."""
-    if (
-        type(value) is not dict
-        or set(value) != _RESOLVED_TRAINING_POLICY_METADATA_KEYS
+    if type(value) is not dict:
+        return None
+    keys = set(value)
+    if not (
+        _RESOLVED_TRAINING_POLICY_METADATA_KEYS
+        <= keys
+        <= _RESOLVED_TRAINING_POLICY_METADATA_KEYS
+        | _OPTIONAL_RESOLVED_TRAINING_POLICY_METADATA_KEYS
     ):
         return None
+    split_noise_strength = value.get("split_noise_strength")
+    if split_noise_strength is not None:
+        if type(split_noise_strength) not in {int, float}:
+            return None
+        try:
+            split_noise_strength = float(split_noise_strength)
+        except OverflowError:
+            return None
+        if not math.isfinite(split_noise_strength) or split_noise_strength < 0.0:
+            return None
     requested_mode = value["requested_mode"]
     requested_rounds = value["requested_rounds"]
     effective_round_cap = value["effective_round_cap"]
@@ -122,6 +141,7 @@ def _resolved_training_policy_from_metadata(
         "col_subsample": col_subsample,
         "auto_split_l2_applied": auto_split_l2_applied,
         "effective_split_l2": effective_split_l2,
+        "split_noise_strength": split_noise_strength,
     }
 
 

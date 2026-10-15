@@ -30,6 +30,21 @@ from ._base import (
 )
 
 
+def _validate_random_strength(value: object) -> float | None:
+    message = "random_strength must be None or a finite float >= 0"
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(message)
+    try:
+        strength = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if not math.isfinite(strength) or strength < 0.0:
+        raise ValueError(message)
+    return strength
+
+
 def _validate_n_jobs(value: object) -> int | None:
     if value is None:
         return None
@@ -130,6 +145,7 @@ class _GBMEstimatorCore(
         poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
+        random_strength: float | None = None,
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -519,6 +535,7 @@ class _GBMEstimatorCore(
         self.poisson_max_delta_step = float(poisson_max_delta_step)
         self.quantile_alpha = float(quantile_alpha)
         self.n_jobs = _validate_n_jobs(n_jobs)
+        self.random_strength = _validate_random_strength(random_strength)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -603,6 +620,7 @@ class _GBMEstimatorCore(
         poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
+        random_strength: float | None = None,
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -668,6 +686,7 @@ class _GBMEstimatorCore(
         self.poisson_max_delta_step = poisson_max_delta_step
         self.quantile_alpha = quantile_alpha
         self.n_jobs = n_jobs
+        self.random_strength = random_strength
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -750,7 +769,8 @@ class _GBMEstimatorCore(
             f"dart_skip_drop={self.dart_skip_drop}, "
             f"poisson_max_delta_step={self.poisson_max_delta_step}, "
             f"quantile_alpha={self.quantile_alpha}, "
-            f"n_jobs={self.n_jobs}"
+            f"n_jobs={self.n_jobs}, "
+            f"random_strength={self.random_strength}"
             ")"
         )
 
@@ -822,6 +842,7 @@ class _GBMEstimatorCore(
             "poisson_max_delta_step": self.poisson_max_delta_step,
             "quantile_alpha": self.quantile_alpha,
             "n_jobs": self.n_jobs,
+            "random_strength": self.random_strength,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -891,6 +912,7 @@ class _GBMEstimatorCore(
             "poisson_max_delta_step",
             "quantile_alpha",
             "n_jobs",
+            "random_strength",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -976,6 +998,9 @@ class _GBMEstimatorCore(
 
         if "n_jobs" in params:
             self.n_jobs = _validate_n_jobs(params["n_jobs"])
+
+        if "random_strength" in params:
+            self.random_strength = _validate_random_strength(params["random_strength"])
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1725,6 +1750,16 @@ class _GBMEstimatorCore(
             return {}
         return {"early_stopping_relative_tolerance": float(tolerance)}
 
+    def _split_noise_kwargs(self) -> dict:
+        """Native kwargs for an explicit ``random_strength``.
+
+        Empty when it is ``None``, so the training policy decides and the
+        native trainer is called exactly as before.
+        """
+        if self.random_strength is None:
+            return {}
+        return {"split_noise_strength": float(self.random_strength)}
+
     def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
         if self.learning_rate != _auto_rounds.AUTO:
             return float(self.learning_rate)
@@ -2423,6 +2458,7 @@ class _GBMEstimatorCore(
                     ),
                     n_jobs=self.n_jobs,
                     **self._early_stopping_relative_kwargs(),
+                    **self._split_noise_kwargs(),
                     **ranking_sigma_kwargs,
                 )
                 return self._finalize_training_result(
@@ -2588,6 +2624,7 @@ class _GBMEstimatorCore(
                 ),
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
+                **self._split_noise_kwargs(),
                 **ranking_sigma_kwargs,
             )
         else:
@@ -2703,6 +2740,7 @@ class _GBMEstimatorCore(
                 ),
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
+                **self._split_noise_kwargs(),
                 **ranking_sigma_kwargs,
             )
 
@@ -2921,6 +2959,11 @@ class _GBMEstimatorCore(
         if self.feature_bundling != "off":
             raise RuntimeError(
                 "feature_bundling='exact' requires a native alloygbm build "
+                "with training summary support"
+            )
+        if self.random_strength is not None:
+            raise RuntimeError(
+                "random_strength requires a native alloygbm build "
                 "with training summary support"
             )
         if eval_set is not None:

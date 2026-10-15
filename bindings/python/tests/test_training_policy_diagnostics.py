@@ -23,6 +23,7 @@ POLICY_KEYS = {
     "col_subsample",
     "auto_split_l2_applied",
     "effective_split_l2",
+    "split_noise_strength",
 }
 
 
@@ -37,6 +38,7 @@ def valid_policy_metadata() -> dict[str, object]:
         "col_subsample": 0.5,
         "auto_split_l2_applied": False,
         "effective_split_l2": 2.0,
+        "split_noise_strength": 1.0,
     }
 
 
@@ -123,6 +125,73 @@ def test_multiclass_auto_policy_reports_classifier_l2() -> None:
     manual = GBMClassifier(n_estimators=3, training_policy="manual", seed=7).fit(X, y)
     assert manual.resolved_training_policy_["auto_split_l2_applied"] is False
     assert manual.resolved_training_policy_["effective_split_l2"] == pytest.approx(0.0)
+
+
+def test_policy_reports_split_noise_strength() -> None:
+    X, y = make_dense_fixture(rows=160, features=5, classes=3)
+
+    auto = GBMClassifier(n_estimators=3, training_policy="auto", seed=7).fit(X, y)
+    manual = GBMClassifier(n_estimators=3, training_policy="manual", seed=7).fit(X, y)
+    binary = GBMClassifier(n_estimators=3, training_policy="auto", seed=7).fit(
+        X, (y > 0).astype("int32")
+    )
+
+    assert auto.resolved_training_policy_["split_noise_strength"] == pytest.approx(1.0)
+    assert manual.resolved_training_policy_["split_noise_strength"] == 0.0
+    assert binary.resolved_training_policy_["split_noise_strength"] == 0.0
+
+
+@pytest.mark.parametrize("policy", ["auto", "manual"])
+def test_random_strength_overrides_the_policy(policy: str) -> None:
+    X, y = make_dense_fixture(rows=160, features=5, classes=3)
+
+    off = GBMClassifier(
+        n_estimators=3, training_policy=policy, random_strength=0.0, seed=7
+    ).fit(X, y)
+    on = GBMClassifier(
+        n_estimators=3, training_policy=policy, random_strength=0.5, seed=7
+    ).fit(X, y)
+    regressor = GBMRegressor(
+        n_estimators=3, training_policy=policy, random_strength=2.0, seed=7
+    ).fit(X, y.astype("float32"))
+
+    assert off.resolved_training_policy_["split_noise_strength"] == 0.0
+    assert on.resolved_training_policy_["split_noise_strength"] == pytest.approx(0.5)
+    assert regressor.resolved_training_policy_["split_noise_strength"] == pytest.approx(
+        2.0
+    )
+
+
+def test_random_strength_changes_splits_deterministically() -> None:
+    X, y = make_dense_fixture(rows=400, features=8, classes=None)
+    base = GBMRegressor(n_estimators=10, training_policy="manual", seed=7)
+    noisy = GBMRegressor(
+        n_estimators=10, training_policy="manual", random_strength=1.0, seed=7
+    )
+
+    plain = base.fit(X, y).predict(X)
+    first = noisy.fit(X, y).predict(X)
+    second = noisy.fit(X, y).predict(X)
+
+    np.testing.assert_array_equal(first, second)
+    assert not np.array_equal(plain, first)
+
+
+@pytest.mark.parametrize("value", [-0.1, float("nan"), float("inf"), True, "high"])
+def test_random_strength_rejects_invalid_values(value: object) -> None:
+    X, y = make_dense_fixture(rows=64, features=3, classes=3)
+    model = GBMClassifier(n_estimators=2).set_params(random_strength=value)
+
+    with pytest.raises(ValueError, match="random_strength"):
+        model.fit(X, y)
+
+
+def test_random_strength_is_a_public_param() -> None:
+    model = GBMClassifier(random_strength=0.25)
+
+    assert model.get_params()["random_strength"] == 0.25
+    assert "random_strength=0.25" in repr(model)
+    assert model.set_params(random_strength=None).random_strength is None
 
 
 def test_auto_ranker_has_no_implicit_split_gain_floor() -> None:
@@ -282,6 +351,24 @@ def test_policy_metadata_normalizer_rejects_non_boolean_provenance(
 ) -> None:
     metadata = valid_policy_metadata()
     metadata["auto_split_l2_applied"] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+def test_policy_metadata_without_split_noise_strength_still_loads() -> None:
+    metadata = valid_policy_metadata()
+    metadata.pop("split_noise_strength")
+
+    policy = _resolved_training_policy_from_metadata(metadata)
+
+    assert policy is not None
+    assert policy["split_noise_strength"] is None
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), "1.0", True])
+def test_policy_metadata_rejects_invalid_split_noise_strength(value: object) -> None:
+    metadata = valid_policy_metadata()
+    metadata["split_noise_strength"] = value
 
     assert _resolved_training_policy_from_metadata(metadata) is None
 
