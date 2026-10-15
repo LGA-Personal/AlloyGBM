@@ -1473,7 +1473,8 @@ pub(crate) fn train_regression_artifact_dense(
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
     n_jobs=None::<FitThreadCount>,
-    early_stopping_relative_tolerance=0.0
+    early_stopping_relative_tolerance=0.0,
+    split_noise_strength=None::<f32>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1559,6 +1560,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     lambdarank_normalize: bool,
     n_jobs: Option<FitThreadCount>,
     early_stopping_relative_tolerance: f64,
+    split_noise_strength: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -1626,6 +1628,7 @@ pub(crate) fn train_regression_artifact_with_summary(
         colsample_bynode,
     );
     params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
+    params.split_noise_strength = split_noise_strength;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -1856,7 +1859,8 @@ mod tests {
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
     n_jobs=None::<FitThreadCount>,
-    early_stopping_relative_tolerance=0.0
+    early_stopping_relative_tolerance=0.0,
+    split_noise_strength=None::<f32>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -1945,6 +1949,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     lambdarank_normalize: bool,
     n_jobs: Option<FitThreadCount>,
     early_stopping_relative_tolerance: f64,
+    split_noise_strength: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -2012,6 +2017,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         colsample_bynode,
     );
     params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
+    params.split_noise_strength = split_noise_strength;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -2184,7 +2190,8 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
     n_jobs=None::<FitThreadCount>,
-    early_stopping_relative_tolerance=0.0
+    early_stopping_relative_tolerance=0.0,
+    split_noise_strength=None::<f32>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -2273,6 +2280,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     lambdarank_normalize: bool,
     n_jobs: Option<FitThreadCount>,
     early_stopping_relative_tolerance: f64,
+    split_noise_strength: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let values = dense_input_to_f32_vec(values_bytes)?;
@@ -2346,6 +2354,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         colsample_bynode,
     );
     params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
+    params.split_noise_strength = split_noise_strength;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,

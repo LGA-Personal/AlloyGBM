@@ -243,6 +243,16 @@ pub struct TrainParams {
     /// `f64` so a caller replaying the same rule on the reported curve in
     /// double precision makes identical decisions.
     pub early_stopping_relative_tolerance: f64,
+    /// Split-score noise strength (CatBoost's `random_strength`). When a node
+    /// picks its split, each feature's best candidate competes on its gain
+    /// times `max(0, 1 + strength * z)` with `z` a deterministic unit normal;
+    /// the chosen split keeps its true gain. `None` (default) lets the
+    /// training policy decide (auto: 1.0 for multiclass softmax, else 0);
+    /// `Some(s)` uses `s` under either policy, and `Some(0.0)` turns it off.
+    /// Applies to the single-output and multiclass trainers on the standard
+    /// split path, not to MorphBoost, piecewise-linear shortlists or the joint
+    /// multi-output trainer.
+    pub split_noise_strength: Option<f32>,
 }
 
 impl Default for TrainParams {
@@ -279,6 +289,7 @@ impl Default for TrainParams {
             colsample_bynode: 1.0,
             joint_dro_robust_split_gain: false,
             early_stopping_relative_tolerance: 0.0,
+            split_noise_strength: None,
         }
     }
 }

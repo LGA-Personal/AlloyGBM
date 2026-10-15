@@ -180,6 +180,7 @@ pub(crate) fn resolve_training_policy(
         col_subsample: controls.col_subsample,
         auto_split_l2_applied: split_resolution.auto_split_l2_applied,
         effective_split_l2: split_resolution.options.l2_lambda,
+        split_noise_strength: controls.split_noise_strength,
     }
 }
 

@@ -105,6 +105,8 @@ pub(crate) struct NativeResolvedTrainingPolicy {
     auto_split_l2_applied: bool,
     #[pyo3(get)]
     effective_split_l2: f32,
+    #[pyo3(get)]
+    split_noise_strength: f32,
 }
 
 impl From<&ResolvedTrainingPolicy> for NativeResolvedTrainingPolicy {
@@ -122,6 +124,7 @@ impl From<&ResolvedTrainingPolicy> for NativeResolvedTrainingPolicy {
             col_subsample: value.col_subsample,
             auto_split_l2_applied: value.auto_split_l2_applied,
             effective_split_l2: value.effective_split_l2,
+            split_noise_strength: value.split_noise_strength,
         }
     }
 }

@@ -161,10 +161,17 @@ pub(crate) fn dense_projection_stump_counts(stumps: &[TrainedStump]) -> EngineRe
     Ok(counts)
 }
 
-/// Apply the experiment override to the split-noise strength and key the
-/// noise to this fit's sampling seed, so it varies with `seed` like row and
-/// column sampling do.
-fn resolve_split_noise(controls: &mut IterationControls, sampling_seed_base: u64) {
+/// Apply the user's `split_noise_strength` and then the experiment override to
+/// the policy's split-noise strength, and key the noise to this fit's sampling
+/// seed, so it varies with `seed` like row and column sampling do.
+fn resolve_split_noise(
+    controls: &mut IterationControls,
+    requested_strength: Option<f32>,
+    sampling_seed_base: u64,
+) {
+    if let Some(strength) = requested_strength {
+        controls.split_noise_strength = strength;
+    }
     if let Some(strength) = crate::env::experiment_split_noise_strength() {
         controls.split_noise_strength = strength;
     }
@@ -1107,7 +1114,11 @@ impl Trainer {
 
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
         let mut controls = controls;
-        resolve_split_noise(&mut controls, sampling_seed_base);
+        resolve_split_noise(
+            &mut controls,
+            self.params.split_noise_strength,
+            sampling_seed_base,
+        );
         let split_resolution = split_selection_options_with_controls(
             &self.params,
             None,
@@ -2447,7 +2458,11 @@ impl Trainer {
             None
         };
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
-        resolve_split_noise(&mut controls, sampling_seed_base);
+        resolve_split_noise(
+            &mut controls,
+            self.params.split_noise_strength,
+            sampling_seed_base,
+        );
         let split_resolution = split_selection_options_with_controls(
             &self.params,
             execution.policy_mode,

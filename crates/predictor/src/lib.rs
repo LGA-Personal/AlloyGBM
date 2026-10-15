@@ -2064,6 +2064,7 @@ mod tests {
             colsample_bynode: 1.0,
             joint_dro_robust_split_gain: false,
             early_stopping_relative_tolerance: 0.0,
+            split_noise_strength: None,
         }
     }
 
