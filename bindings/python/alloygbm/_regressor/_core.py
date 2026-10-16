@@ -2072,7 +2072,13 @@ class _GBMEstimatorCore(
         if sample_weight is not None:
             validated_sample_weights = self._validate_sample_weight(sample_weight, row_count)
             obj = self._objective_name()
-            if obj in ("rank_pairwise", "rank_ndcg", "rank_xendcg", "yetirank"):
+            if obj in (
+                "rank_pairwise",
+                "rank_ndcg",
+                "rank_xendcg",
+                "rank_ndcg_smoothed",
+                "yetirank",
+            ):
                 import warnings
 
                 warnings.warn(

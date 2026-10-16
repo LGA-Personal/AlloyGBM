@@ -35,9 +35,9 @@ use alloygbm_engine::{
     EngineError, GammaObjective, IterationRunSummary, LambdaMARTObjective,
     MultiClassIterationRunSummary, MultiClassSoftmaxObjective, MultiClassTrainedModel,
     MultiClassWarmStartState, ObjectiveFamily, PairwiseRankingObjective, PerRoundMetricCallback,
-    PoissonObjective, QuantileObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel,
-    Trainer, TrainingPolicyMode, TweedieObjective, WarmStartState, XeNDCGObjective,
-    YetiRankObjective,
+    PoissonObjective, QuantileObjective, QueryRMSEObjective, SmoothedNdcgObjective,
+    SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode, TweedieObjective,
+    WarmStartState, XeNDCGObjective, YETIRANK_DEFAULT_PERMUTATIONS, YetiRankObjective,
 };
 use numpy::{PyArray2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
@@ -587,9 +587,8 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     let objective_family = match objective {
         "binary_crossentropy" => ObjectiveFamily::BinaryClassification,
         "multiclass_softmax" => ObjectiveFamily::MulticlassClassification,
-        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
-            ObjectiveFamily::Ranking
-        }
+        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "rank_ndcg_smoothed"
+        | "yetirank" => ObjectiveFamily::Ranking,
         _ => ObjectiveFamily::Regression,
     };
 
@@ -670,7 +669,8 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
             let obj = TweedieObjective::new(tweedie_variance_power)?;
             run_training!(&obj)
         }
-        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
+        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "rank_ndcg_smoothed"
+        | "yetirank" => {
             let group_id = prepared.dataset.group_id.as_ref().ok_or_else(|| {
                 EngineError::ContractViolation(format!(
                     "objective '{objective}' requires group_id to be provided"
@@ -714,9 +714,25 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                     }
                     run_training!(&obj)
                 }
+                "rank_ndcg_smoothed" => {
+                    let mut obj = SmoothedNdcgObjective::new_with_sigma(
+                        group_id,
+                        10,
+                        user_seed,
+                        ranking_sigma,
+                    )?;
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
                 "yetirank" => {
-                    let mut obj =
-                        YetiRankObjective::new_with_sigma(group_id, 10, user_seed, ranking_sigma)?;
+                    let mut obj = YetiRankObjective::new_with_sigma(
+                        group_id,
+                        YETIRANK_DEFAULT_PERMUTATIONS,
+                        user_seed,
+                        ranking_sigma,
+                    )?;
                     if let Some(vg) = val_group_id {
                         obj = obj.with_validation_group(vg);
                     }
@@ -868,7 +884,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
             return Err(EngineError::InvalidConfig(format!(
                 "unknown objective '{other}', expected one of: squared_error, \
                  binary_crossentropy, multiclass_softmax, custom, queryrmse, rank_pairwise, \
-                 rank_ndcg, rank_xendcg, yetirank, poisson, gamma, tweedie"
+                 rank_ndcg, rank_xendcg, rank_ndcg_smoothed, yetirank, poisson, gamma, tweedie"
             )));
         }
     };

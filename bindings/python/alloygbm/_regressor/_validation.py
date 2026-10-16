@@ -342,7 +342,13 @@ class _ValidationMixin:
         """Map an objective name to its natural loss metric name."""
         if objective == "binary_crossentropy":
             return "logloss"
-        if objective in ("rank_pairwise", "rank_ndcg", "rank_xendcg", "yetirank"):
+        if objective in (
+            "rank_pairwise",
+            "rank_ndcg",
+            "rank_xendcg",
+            "rank_ndcg_smoothed",
+            "yetirank",
+        ):
             return "ndcg"
         if objective == "queryrmse":
             return "queryrmse"
