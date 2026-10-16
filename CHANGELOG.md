@@ -151,6 +151,18 @@
 
 ### Added
 
+- **`multiclass_strategy="vector_leaves"` and `multiclass_hessian` on
+  `GBMClassifier` (opt-in; defaults unchanged).** Vector leaves grow one tree
+  per round for multiclass softmax, scoring splits on the sum of per-class
+  Newton gains and storing one Newton step per class in each leaf; the tree is
+  saved as K per-class trees with one shared structure, so prediction, SHAP
+  and saved models are unchanged. `multiclass_hessian="full"` solves vector
+  leaves with the full softmax Hessian (at most 16 classes);
+  `"abs_residual"` uses `|p - y|` as the Hessian. On the 38 PMLB multiclass
+  datasets (matched regime, 5-fold × 2) vector leaves are 2.1% behind
+  per-class trees on log loss (4 wins, 12 losses; full Hessian 1.8%, 6/10)
+  at about twice the fit time, winning on the wider, many-class sets
+  (movement_libras −9%, mnist −14%, krkopt −2%).
 - **`random_strength` on every single-output estimator and multiclass
   `GBMClassifier`.** It sets the split-score noise strength (CatBoost's
   `random_strength`) under either training policy: `None` (default) keeps the
