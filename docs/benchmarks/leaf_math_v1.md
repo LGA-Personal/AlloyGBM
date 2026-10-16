@@ -58,9 +58,37 @@ in the project's shared folder. Each table was produced with
   grn_form="per_row"` converges to about 0.1. `grn_form="per_leaf"` only gets
   to 88 at strength 1.0.
 
+## Full dev suite, default objectives
+
+GRN at strength 1.0 against the default objective on all 68 dev tasks (same
+setup, baseline `alloy` at defaults):
+
+| Arm | Slice | Cells | Loss | W/T/L | Time |
+|---|---|---:|---:|---:|---:|
+| GRN 1.0 | all | 68 | 1.139 | 4/53/11 | 1.61x |
+| GRN 1.0 | binary | 26 | 0.994 | 3/23/0 | 1.09x |
+| GRN 1.0 | multiclass | 9 | 2.055 | 0/3/6 | 2.81x |
+| GRN 1.0 | regression | 33 | 1.079 | 1/27/5 | 1.87x |
+| GRN 1.0, leaf | all | 68 | 1.003 | 4/60/4 | 1.08x |
+| GRN 1.0, leaf | binary | 26 | 0.999 | 1/25/0 | 1.06x |
+| GRN 1.0, leaf | multiclass | 9 | 0.996 | 1/7/1 | 1.03x |
+| GRN 1.0, leaf | regression | 33 | 1.007 | 2/28/3 | 1.11x |
+
+- The per-row form hurts multiclass badly (shuttle 26x, KDDCup99 13x) and a
+  few regression tasks (tecator 2.8x, house_prices_nominal 2.6x). On
+  near-separable classification most row Hessians `p(1-p)` are tiny, so a
+  `λ` set by the gradient norm dominates them and every step shrinks until
+  the round budget runs out. Its best cells are small binary gains
+  (Amazon employee access 0.92x, APSFailure 0.93x).
+- The per-leaf form is a tie everywhere (worst cell house_prices_nominal
+  1.32x, best Buzz-in-social-media 0.91x).
+- So GRN is not a general default for any form. It belongs on losses whose
+  Hessian can vanish for large residuals, like the Charbonnier case above.
+
 ## Recommendation
 
 Take `glm_hessian="bounded"` to the held-out OpenML run (the CTR23 tasks with
 non-negative targets) as a candidate default for the log-link objectives.
 Keep GRN opt-in: it is for custom losses whose Hessian can vanish, and
-`grn_form="per_row"` is the form that works.
+`grn_form="per_row"` is the form that works there. Do not turn it on for
+classification objectives, where the per-row form underfits.
