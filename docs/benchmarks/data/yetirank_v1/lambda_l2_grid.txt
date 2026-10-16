@@ -1,0 +1,117 @@
+yetirank 3.0 0 0.4767
+yetirank 3.0 1 0.486
+yetirank 3.0 2 0.4823
+yetirank 10.0 0 0.4865
+yetirank 10.0 1 0.4874
+yetirank 10.0 2 0.4939
+yetirank 30.0 0 0.4923
+yetirank 30.0 1 0.4962
+yetirank 30.0 2 0.495
+yetirank 100.0 0 0.4977
+yetirank 100.0 1 0.4971
+yetirank 100.0 2 0.4969
+lightgbm_rank_example yetirank 0.0 0 0.7474
+lightgbm_rank_example yetirank 0.0 1 0.7562
+lightgbm_rank_example yetirank 0.0 2 0.7664
+lightgbm_rank_example yetirank 10.0 0 0.7561
+lightgbm_rank_example yetirank 10.0 1 0.7613
+lightgbm_rank_example yetirank 10.0 2 0.7549
+lightgbm_rank_example yetirank 100.0 0 0.747
+lightgbm_rank_example yetirank 100.0 1 0.7502
+lightgbm_rank_example yetirank 100.0 2 0.7513
+lightgbm_rank_example rank:ndcg_smoothed 0.0 0 0.7466
+lightgbm_rank_example rank:ndcg_smoothed 0.0 1 0.7553
+lightgbm_rank_example rank:ndcg_smoothed 0.0 2 0.7371
+lightgbm_rank_example rank:ndcg_smoothed 10.0 0 0.7626
+lightgbm_rank_example rank:ndcg_smoothed 10.0 1 0.761
+lightgbm_rank_example rank:ndcg_smoothed 10.0 2 0.7533
+lightgbm_rank_example rank:ndcg_smoothed 100.0 0 0.75
+lightgbm_rank_example rank:ndcg_smoothed 100.0 1 0.7568
+lightgbm_rank_example rank:ndcg_smoothed 100.0 2 0.7537
+lightgbm_rank_example rank:ndcg 0.0 0 0.7486
+lightgbm_rank_example rank:ndcg 0.0 1 0.7745
+lightgbm_rank_example rank:ndcg 0.0 2 0.7535
+lightgbm_rank_example rank:ndcg 10.0 0 0.7385
+lightgbm_rank_example rank:ndcg 10.0 1 0.7414
+lightgbm_rank_example rank:ndcg 10.0 2 0.7546
+lightgbm_rank_example rank:ndcg 100.0 0 0.7583
+lightgbm_rank_example rank:ndcg 100.0 1 0.7525
+lightgbm_rank_example rank:ndcg 100.0 2 0.7543
+catboost_querywise yetirank 0.0 0 0.6669
+catboost_querywise yetirank 0.0 1 0.678
+catboost_querywise yetirank 0.0 2 0.6731
+catboost_querywise yetirank 10.0 0 0.69
+catboost_querywise yetirank 10.0 1 0.6913
+catboost_querywise yetirank 10.0 2 0.6862
+catboost_querywise yetirank 100.0 0 0.6731
+catboost_querywise yetirank 100.0 1 0.6692
+catboost_querywise yetirank 100.0 2 0.6768
+catboost_querywise rank:ndcg_smoothed 0.0 0 0.6784
+catboost_querywise rank:ndcg_smoothed 0.0 1 0.6811
+catboost_querywise rank:ndcg_smoothed 0.0 2 0.6705
+catboost_querywise rank:ndcg_smoothed 10.0 0 0.6659
+catboost_querywise rank:ndcg_smoothed 10.0 1 0.6806
+catboost_querywise rank:ndcg_smoothed 10.0 2 0.662
+catboost_querywise rank:ndcg_smoothed 100.0 0 0.6648
+catboost_querywise rank:ndcg_smoothed 100.0 1 0.6701
+catboost_querywise rank:ndcg_smoothed 100.0 2 0.6556
+catboost_querywise rank:ndcg 0.0 0 0.6466
+catboost_querywise rank:ndcg 0.0 1 0.6669
+catboost_querywise rank:ndcg 0.0 2 0.658
+catboost_querywise rank:ndcg 10.0 0 0.6586
+catboost_querywise rank:ndcg 10.0 1 0.662
+catboost_querywise rank:ndcg 10.0 2 0.6592
+catboost_querywise rank:ndcg 100.0 0 0.6427
+catboost_querywise rank:ndcg 100.0 1 0.6402
+catboost_querywise rank:ndcg 100.0 2 0.6452
+synthetic_ranking yetirank 0.0 0 0.998
+synthetic_ranking yetirank 0.0 1 0.999
+synthetic_ranking yetirank 0.0 2 0.9991
+synthetic_ranking yetirank 10.0 0 0.9992
+synthetic_ranking yetirank 10.0 1 0.9992
+synthetic_ranking yetirank 10.0 2 0.9992
+synthetic_ranking yetirank 100.0 0 0.9992
+synthetic_ranking yetirank 100.0 1 0.9992
+synthetic_ranking yetirank 100.0 2 0.9992
+synthetic_ranking rank:ndcg_smoothed 0.0 0 0.9972
+synthetic_ranking rank:ndcg_smoothed 0.0 1 0.9971
+synthetic_ranking rank:ndcg_smoothed 0.0 2 0.998
+synthetic_ranking rank:ndcg_smoothed 10.0 0 0.9983
+synthetic_ranking rank:ndcg_smoothed 10.0 1 0.9983
+synthetic_ranking rank:ndcg_smoothed 10.0 2 0.9975
+synthetic_ranking rank:ndcg_smoothed 100.0 0 0.9956
+synthetic_ranking rank:ndcg_smoothed 100.0 1 0.9944
+synthetic_ranking rank:ndcg_smoothed 100.0 2 0.9957
+synthetic_ranking rank:ndcg 0.0 0 0.9973
+synthetic_ranking rank:ndcg 0.0 1 0.9972
+synthetic_ranking rank:ndcg 0.0 2 0.9982
+synthetic_ranking rank:ndcg 10.0 0 0.9983
+synthetic_ranking rank:ndcg 10.0 1 0.9983
+synthetic_ranking rank:ndcg 10.0 2 1.0
+synthetic_ranking rank:ndcg 100.0 0 0.9974
+synthetic_ranking rank:ndcg 100.0 1 0.9966
+synthetic_ranking rank:ndcg 100.0 2 0.9966
+mslr_web1k_subset yetirank 300.0 0 0.4949
+mslr_web1k_subset yetirank 300.0 1 0.488
+mslr_web1k_subset yetirank 300.0 2 0.4901
+mslr_web1k_subset yetirank 1000.0 0 0.4758
+mslr_web1k_subset yetirank 1000.0 1 0.4718
+mslr_web1k_subset yetirank 1000.0 2 0.4696
+mslr_web1k_subset rank:ndcg 10.0 0 0.4906
+mslr_web1k_subset rank:ndcg 10.0 1 0.4863
+mslr_web1k_subset rank:ndcg 10.0 2 0.4905
+mslr_web1k_subset rank:ndcg 100.0 0 0.4936
+mslr_web1k_subset rank:ndcg 100.0 1 0.4961
+mslr_web1k_subset rank:ndcg 100.0 2 0.5007
+mslr_web1k_subset rank:ndcg_smoothed 10.0 0 0.4892
+mslr_web1k_subset rank:ndcg_smoothed 10.0 1 0.4966
+mslr_web1k_subset rank:ndcg_smoothed 10.0 2 0.4951
+mslr_web1k_subset rank:ndcg_smoothed 100.0 0 0.4964
+mslr_web1k_subset rank:ndcg_smoothed 100.0 1 0.5
+mslr_web1k_subset rank:ndcg_smoothed 100.0 2 0.4953
+yetirank 0.1 0 0.4891
+yetirank 0.1 1 0.4769
+yetirank 1.0 0 0.4789
+yetirank 1.0 1 0.4843
+yetirank 10.0 0 0.4865
+yetirank 10.0 1 0.4874
