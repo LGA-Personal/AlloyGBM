@@ -45,6 +45,35 @@ def _validate_random_strength(value: object) -> float | None:
     return strength
 
 
+_GLM_HESSIANS = ("exact", "bounded")
+_GRN_FORMS = ("per_leaf", "per_row")
+
+
+def _validate_glm_hessian(value: object) -> str:
+    if value not in _GLM_HESSIANS:
+        raise ValueError(f"glm_hessian must be one of {_GLM_HESSIANS}, got {value!r}")
+    return str(value)
+
+
+def _validate_grn_strength(value: object) -> float:
+    message = "grn_strength must be a finite float >= 0"
+    if isinstance(value, bool):
+        raise ValueError(message)
+    try:
+        strength = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if not math.isfinite(strength) or strength < 0.0:
+        raise ValueError(message)
+    return strength
+
+
+def _validate_grn_form(value: object) -> str:
+    if value not in _GRN_FORMS:
+        raise ValueError(f"grn_form must be one of {_GRN_FORMS}, got {value!r}")
+    return str(value)
+
+
 def _validate_n_jobs(value: object) -> int | None:
     if value is None:
         return None
@@ -146,6 +175,9 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
+        glm_hessian: str = "exact",
+        grn_strength: float = 0.0,
+        grn_form: str = "per_leaf",
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -536,6 +568,9 @@ class _GBMEstimatorCore(
         self.quantile_alpha = float(quantile_alpha)
         self.n_jobs = _validate_n_jobs(n_jobs)
         self.random_strength = _validate_random_strength(random_strength)
+        self.glm_hessian = _validate_glm_hessian(glm_hessian)
+        self.grn_strength = _validate_grn_strength(grn_strength)
+        self.grn_form = _validate_grn_form(grn_form)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -621,6 +656,9 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
+        glm_hessian: str = "exact",
+        grn_strength: float = 0.0,
+        grn_form: str = "per_leaf",
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -687,6 +725,9 @@ class _GBMEstimatorCore(
         self.quantile_alpha = quantile_alpha
         self.n_jobs = n_jobs
         self.random_strength = random_strength
+        self.glm_hessian = glm_hessian
+        self.grn_strength = grn_strength
+        self.grn_form = grn_form
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -770,7 +811,10 @@ class _GBMEstimatorCore(
             f"poisson_max_delta_step={self.poisson_max_delta_step}, "
             f"quantile_alpha={self.quantile_alpha}, "
             f"n_jobs={self.n_jobs}, "
-            f"random_strength={self.random_strength}"
+            f"random_strength={self.random_strength}, "
+            f"glm_hessian='{self.glm_hessian}', "
+            f"grn_strength={self.grn_strength}, "
+            f"grn_form='{self.grn_form}'"
             ")"
         )
 
@@ -843,6 +887,9 @@ class _GBMEstimatorCore(
             "quantile_alpha": self.quantile_alpha,
             "n_jobs": self.n_jobs,
             "random_strength": self.random_strength,
+            "glm_hessian": self.glm_hessian,
+            "grn_strength": self.grn_strength,
+            "grn_form": self.grn_form,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -913,6 +960,9 @@ class _GBMEstimatorCore(
             "quantile_alpha",
             "n_jobs",
             "random_strength",
+            "glm_hessian",
+            "grn_strength",
+            "grn_form",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1001,6 +1051,15 @@ class _GBMEstimatorCore(
 
         if "random_strength" in params:
             self.random_strength = _validate_random_strength(params["random_strength"])
+
+        if "glm_hessian" in params:
+            self.glm_hessian = _validate_glm_hessian(params["glm_hessian"])
+
+        if "grn_strength" in params:
+            self.grn_strength = _validate_grn_strength(params["grn_strength"])
+
+        if "grn_form" in params:
+            self.grn_form = _validate_grn_form(params["grn_form"])
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1760,6 +1819,20 @@ class _GBMEstimatorCore(
             return {}
         return {"split_noise_strength": float(self.random_strength)}
 
+    def _leaf_math_kwargs(self) -> dict:
+        """Native kwargs for the opt-in ``glm_hessian`` and GRN parameters.
+
+        Only non-default values are passed, so default fits call the native
+        trainer exactly as before.
+        """
+        kwargs: dict = {}
+        if self.glm_hessian != "exact":
+            kwargs["glm_hessian"] = self.glm_hessian
+        if self.grn_strength > 0.0:
+            kwargs["grn_strength"] = float(self.grn_strength)
+            kwargs["grn_form"] = self.grn_form
+        return kwargs
+
     def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
         if self.learning_rate != _auto_rounds.AUTO:
             return float(self.learning_rate)
@@ -2459,6 +2532,7 @@ class _GBMEstimatorCore(
                     n_jobs=self.n_jobs,
                     **self._early_stopping_relative_kwargs(),
                     **self._split_noise_kwargs(),
+                    **self._leaf_math_kwargs(),
                     **ranking_sigma_kwargs,
                 )
                 return self._finalize_training_result(
@@ -2625,6 +2699,7 @@ class _GBMEstimatorCore(
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
+                **self._leaf_math_kwargs(),
                 **ranking_sigma_kwargs,
             )
         else:
@@ -2741,6 +2816,7 @@ class _GBMEstimatorCore(
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
+                **self._leaf_math_kwargs(),
                 **ranking_sigma_kwargs,
             )
 
@@ -2964,6 +3040,11 @@ class _GBMEstimatorCore(
         if self.random_strength is not None:
             raise RuntimeError(
                 "random_strength requires a native alloygbm build "
+                "with training summary support"
+            )
+        if self._leaf_math_kwargs():
+            raise RuntimeError(
+                "glm_hessian and grn_strength require a native alloygbm build "
                 "with training summary support"
             )
         if eval_set is not None:

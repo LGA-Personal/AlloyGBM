@@ -402,6 +402,7 @@ def _diagnostics_to_dicts(diagnostics):
             "neutralization_effectiveness": _opt(d.neutralization_effectiveness),
             "n_active_rows": int(d.n_active_rows),
             "n_active_features": int(d.n_active_features),
+            "grn_lambda": _opt(getattr(d, "grn_lambda", None)),
         }
         for d in diagnostics
     ]

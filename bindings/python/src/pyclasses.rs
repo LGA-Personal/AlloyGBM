@@ -198,6 +198,8 @@ pub(crate) struct NativeIterationDiagnostics {
     n_active_rows: usize,
     #[pyo3(get)]
     n_active_features: usize,
+    #[pyo3(get)]
+    grn_lambda: Option<f32>,
 }
 
 impl From<&IterationDiagnostics> for NativeIterationDiagnostics {
@@ -211,6 +213,7 @@ impl From<&IterationDiagnostics> for NativeIterationDiagnostics {
             neutralization_effectiveness: value.neutralization_effectiveness,
             n_active_rows: value.n_active_rows,
             n_active_features: value.n_active_features,
+            grn_lambda: value.grn_lambda,
         }
     }
 }
