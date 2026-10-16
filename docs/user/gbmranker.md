@@ -41,7 +41,12 @@ print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 - `"rank:ndcg"` -- LambdaMART with NDCG weighting (default)
 - `"rank:xendcg"` -- Cross-entropy approximation to NDCG
 - `"queryrmse"` -- Query-grouped RMSE
-- `"yetirank"` -- YetiRank (stochastic NDCG-weighted pairwise)
+- `"yetirank"` -- YetiRank (Gulin et al.; the CatBoost formulation): pairwise
+  logistic loss over documents that are neighbours in a Logistic-noise-perturbed
+  ranking, weighted by label gap and a 0.85 position decay, 10 noisy rankings
+  per query per round
+- `"rank:ndcg_smoothed"` -- LambdaMART NDCG on uniform-noise-smoothed scores.
+  This was `"yetirank"` in v1.0.0 and earlier; use it to reproduce those models
 
 As of v0.12.8, `GBMRanker` also accepts the regression objectives inherited from
 `GBMRegressor` via `ranking_objective=`:
@@ -61,8 +66,8 @@ These do not use the query `group` for their gradient (it is still required by
 - `ranking_objective: str = "rank:ndcg"`
   - The ranking loss function. Must be one of the supported objectives above.
 - `ranking_sigma: float = 1.0`
-  - Sigmoid sharpness for `"rank:pairwise"`, `"rank:ndcg"`, and `"yetirank"`.
-    Higher values make pairwise score margins steeper. Must be finite and
+  - Sigmoid sharpness for `"rank:pairwise"`, `"rank:ndcg"`,
+    `"rank:ndcg_smoothed"`, and `"yetirank"`. Higher values make pairwise score margins steeper. Must be finite and
     greater than zero.
 - `lambdarank_truncation_level: int | None = 30`
   - For `"rank:ndcg"`, score only LambdaMART pairs where at least one document
@@ -205,7 +210,7 @@ group = [3, 2, 4]
 
 ## Current Scope
 
-- 5 ranking objectives implemented natively in Rust, plus the 4 inherited
+- 6 ranking objectives implemented natively in Rust, plus the 4 inherited
   regression objectives (`poisson`, `gamma`, `tweedie`, `quantile`) as of v0.12.8
 - Single-label per `GBMRanker`. For multi-output ranking
   (`y` shaped `(n_rows, n_labels)`, `predict` returns the same shape) use

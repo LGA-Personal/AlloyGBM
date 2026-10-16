@@ -83,7 +83,7 @@ Learning-to-rank
    print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 
 Supported ranking objectives: ``rank:pairwise``, ``rank:ndcg``,
-``rank:xendcg``, ``queryrmse``, ``yetirank``.
+``rank:xendcg``, ``queryrmse``, ``yetirank``, ``rank:ndcg_smoothed``.
 
 Multi-output ranking
 --------------------

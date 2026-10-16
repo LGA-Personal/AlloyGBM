@@ -53,7 +53,7 @@ AlloyGBM/
         binary.rs               # BinaryCrossEntropyObjective + sigmoid
         glm.rs                  # PoissonObjective, GammaObjective, TweedieObjective + glm_clamp_exp
         quantile.rs             # QuantileObjective + weighted_quantile + resolve_boundaries_for_len
-        ranking.rs              # QueryRMSE, Pairwise, LambdaMART, XeNDCG, YetiRank + NDCG helpers
+        ranking.rs              # QueryRMSE, Pairwise, LambdaMART, XeNDCG, SmoothedNdcg, YetiRank + NDCG helpers
         multiclass.rs           # MultiClassSoftmaxObjective
       trainer/
         mod.rs                  # Trainer struct + giant impl block (the heart of training)
@@ -131,7 +131,7 @@ AlloyGBM/
         _shap.py                # _ShapMixin: shap_values, shap_interaction_values, feature_importances, _shap_binning_kwargs
         _persistence.py         # _PersistenceMixin: __getstate__/__setstate__, save/load_model, save_artifact, artifact_bytes, native predictor-handle, _reset_fitted_state
       classifier.py           # GBMClassifier (binary cross-entropy, predict_proba, ClassifierMixin)
-      ranker.py               # GBMRanker (5 ranking objectives, group-sorted training)
+      ranker.py               # GBMRanker (6 ranking objectives, group-sorted training)
       multi_label_ranker.py   # MultiLabelGBMRanker (multi_label_mode="independent": K per-label GBMRankers; "joint" v0.10.1+: shared trees via fit_joint_multi_output)
       evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py           # Purged time-series and panel cross-validation splits
@@ -175,7 +175,7 @@ maturin develop --release      # Build and install Python extension
 
 > **Note (v0.12.0 / v0.12.1 / v0.12.2 / v0.12.3):** Many historical entries below reference `crates/engine/src/lib.rs`, `crates/core/src/lib.rs`, `crates/backend_cpu/src/lib.rs`, `crates/shap/src/lib.rs`, `crates/engine/src/joint.rs`, `bindings/python/src/lib.rs`, or `bindings/python/alloygbm/regressor.py` as the location of specific functions and types. The v0.12.0 (engine), v0.12.1 (core + backend_cpu), v0.12.2 (SHAP crate + engine joint trainer), and v0.12.3 (PyO3 bridge + `GBMRegressor` estimator) refactors moved nearly all of these into focused sibling modules — see the Project Structure section above for the new layouts. The narrative descriptions of *what* each subsystem does remain accurate; only the file paths in older entries are out of date. Use `grep -rn "symbol_name" crates/<crate>/src/ bindings/python/` to find the current location.
 
-- **ObjectiveOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations live in `engine/src/objectives/`: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank, **Poisson, Gamma, Tweedie** (v0.11.0), **Quantile** (v0.11.1).
+- **ObjectiveOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations live in `engine/src/objectives/`: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, SmoothedNdcg (`rank:ndcg_smoothed`), YetiRank (the published CatBoost formulation; the v1.0.0 `yetirank` is now SmoothedNdcg), **Poisson, Gamma, Tweedie** (v0.11.0), **Quantile** (v0.11.1).
 - **BackendOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Abstraction over hardware. Only `CpuBackend` exists.
 - **Training policy**: Auto mode with dataset-aware heuristics for `min_split_gain`, `min_rows_per_leaf`, regularization. Manual mode uses raw user params.
 - **Tree growth**: Level-wise (default) or leaf-wise (best-first) via `tree_growth` parameter.

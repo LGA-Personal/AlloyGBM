@@ -82,7 +82,7 @@ print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 parameter accepts per-row group identifiers; data is sorted by group internally.
 
 Supported ranking objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`,
-`queryrmse`, `yetirank`.
+`queryrmse`, `yetirank`, `rank:ndcg_smoothed`.
 
 ## Multi-Output Ranking
 

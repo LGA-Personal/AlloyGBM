@@ -44,7 +44,13 @@ Ranking objectives
 - ``"rank:ndcg"`` -- LambdaMART with NDCG weighting (default)
 - ``"rank:xendcg"`` -- Cross-entropy approximation to NDCG
 - ``"queryrmse"`` -- Query-grouped RMSE
-- ``"yetirank"`` -- YetiRank (stochastic NDCG-weighted pairwise)
+- ``"yetirank"`` -- YetiRank (Gulin et al.; the CatBoost formulation):
+  pairwise logistic loss over documents that are neighbours in a
+  Logistic-noise-perturbed ranking, weighted by label gap and a 0.85 position
+  decay, 10 noisy rankings per query per round
+- ``"rank:ndcg_smoothed"`` -- LambdaMART NDCG on uniform-noise-smoothed
+  scores. This was ``"yetirank"`` in v1.0.0 and earlier; use it to reproduce
+  those models
 
 As of v0.12.8, ``GBMRanker`` also accepts the regression objectives inherited
 from ``GBMRegressor`` via ``ranking_objective=``: ``"poisson"``, ``"gamma"``,
@@ -56,7 +62,8 @@ Parameters
 
 - ``ranking_objective: str = "rank:ndcg"`` -- the ranking loss function
 - ``ranking_sigma: float = 1.0`` -- sigmoid sharpness for
-  ``"rank:pairwise"``, ``"rank:ndcg"``, and ``"yetirank"``; must be finite
+  ``"rank:pairwise"``, ``"rank:ndcg"``, ``"rank:ndcg_smoothed"``, and
+  ``"yetirank"``; must be finite
   and greater than zero
 - ``lambdarank_truncation_level: int | None = 30`` -- for ``"rank:ndcg"``,
   restrict LambdaMART gradients to pairs where at least one document is
@@ -146,7 +153,7 @@ Early stopping
 Current scope
 -------------
 
-- 5 ranking objectives implemented natively in Rust, plus the 4 inherited
+- 6 ranking objectives implemented natively in Rust, plus the 4 inherited
   regression objectives (``poisson``, ``gamma``, ``tweedie``, ``quantile``) as of v0.12.8
 - Single-label per ``GBMRanker``. For multi-output ranking, see
   :class:`~alloygbm.MultiLabelGBMRanker` (also covered in :doc:`estimator`).
