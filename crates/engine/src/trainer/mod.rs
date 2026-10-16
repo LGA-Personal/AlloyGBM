@@ -2896,6 +2896,10 @@ impl Trainer {
                     lambda,
                 );
             }
+            let grn_row_hess_offset = match grn_lambda {
+                Some(lambda) if self.params.grn_form == GrnForm::PerRow => lambda,
+                _ => 0.0,
+            };
             let RoundRowSelection {
                 selected: root_row_indices,
                 excluded: excluded_row_indices,
@@ -3105,6 +3109,7 @@ impl Trainer {
                         &active_dataset.targets,
                         active_dataset.sample_weights.as_deref(),
                         round_split_options.l2_lambda,
+                        grn_row_hess_offset,
                         self.params.learning_rate,
                         binary_leaf_newton_steps,
                         controls.max_abs_leaf_value,
