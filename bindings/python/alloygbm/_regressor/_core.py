@@ -45,6 +45,28 @@ def _validate_random_strength(value: object) -> float | None:
     return strength
 
 
+_MULTICLASS_STRATEGIES = ("per_class_trees", "vector_leaves")
+
+
+_MULTICLASS_HESSIANS = ("diagonal", "full", "abs_residual")
+
+
+def _validate_multiclass_hessian(value: object) -> str:
+    if not isinstance(value, str) or value not in _MULTICLASS_HESSIANS:
+        raise ValueError(
+            "multiclass_hessian must be 'diagonal', 'full' or 'abs_residual'"
+        )
+    return value
+
+
+def _validate_multiclass_strategy(value: object) -> str:
+    if not isinstance(value, str) or value not in _MULTICLASS_STRATEGIES:
+        raise ValueError(
+            "multiclass_strategy must be 'per_class_trees' or 'vector_leaves'"
+        )
+    return value
+
+
 def _validate_n_jobs(value: object) -> int | None:
     if value is None:
         return None
@@ -146,6 +168,8 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
+        multiclass_strategy: str = "per_class_trees",
+        multiclass_hessian: str = "diagonal",
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -536,6 +560,8 @@ class _GBMEstimatorCore(
         self.quantile_alpha = float(quantile_alpha)
         self.n_jobs = _validate_n_jobs(n_jobs)
         self.random_strength = _validate_random_strength(random_strength)
+        self.multiclass_strategy = _validate_multiclass_strategy(multiclass_strategy)
+        self.multiclass_hessian = _validate_multiclass_hessian(multiclass_hessian)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -621,6 +647,8 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
+        multiclass_strategy: str = "per_class_trees",
+        multiclass_hessian: str = "diagonal",
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -687,6 +715,8 @@ class _GBMEstimatorCore(
         self.quantile_alpha = quantile_alpha
         self.n_jobs = n_jobs
         self.random_strength = random_strength
+        self.multiclass_strategy = multiclass_strategy
+        self.multiclass_hessian = multiclass_hessian
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -770,7 +800,9 @@ class _GBMEstimatorCore(
             f"poisson_max_delta_step={self.poisson_max_delta_step}, "
             f"quantile_alpha={self.quantile_alpha}, "
             f"n_jobs={self.n_jobs}, "
-            f"random_strength={self.random_strength}"
+            f"random_strength={self.random_strength}, "
+            f"multiclass_strategy='{self.multiclass_strategy}', "
+            f"multiclass_hessian='{self.multiclass_hessian}'"
             ")"
         )
 
@@ -843,6 +875,8 @@ class _GBMEstimatorCore(
             "quantile_alpha": self.quantile_alpha,
             "n_jobs": self.n_jobs,
             "random_strength": self.random_strength,
+            "multiclass_strategy": self.multiclass_strategy,
+            "multiclass_hessian": self.multiclass_hessian,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -913,6 +947,8 @@ class _GBMEstimatorCore(
             "quantile_alpha",
             "n_jobs",
             "random_strength",
+            "multiclass_strategy",
+            "multiclass_hessian",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1001,6 +1037,15 @@ class _GBMEstimatorCore(
 
         if "random_strength" in params:
             self.random_strength = _validate_random_strength(params["random_strength"])
+
+        if "multiclass_strategy" in params:
+            self.multiclass_strategy = _validate_multiclass_strategy(
+                params["multiclass_strategy"]
+            )
+        if "multiclass_hessian" in params:
+            self.multiclass_hessian = _validate_multiclass_hessian(
+                params["multiclass_hessian"]
+            )
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1760,6 +1805,20 @@ class _GBMEstimatorCore(
             return {}
         return {"split_noise_strength": float(self.random_strength)}
 
+    def _multiclass_strategy_kwargs(self) -> dict:
+        """Native kwargs for a non-default ``multiclass_strategy`` or
+        ``multiclass_hessian``.
+
+        Empty for the defaults, so the native trainer is called exactly as
+        before.
+        """
+        kwargs = {}
+        if self.multiclass_strategy != "per_class_trees":
+            kwargs["multiclass_strategy"] = self.multiclass_strategy
+        if self.multiclass_hessian != "diagonal":
+            kwargs["multiclass_hessian"] = self.multiclass_hessian
+        return kwargs
+
     def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
         if self.learning_rate != _auto_rounds.AUTO:
             return float(self.learning_rate)
@@ -2459,6 +2518,7 @@ class _GBMEstimatorCore(
                     n_jobs=self.n_jobs,
                     **self._early_stopping_relative_kwargs(),
                     **self._split_noise_kwargs(),
+                    **self._multiclass_strategy_kwargs(),
                     **ranking_sigma_kwargs,
                 )
                 return self._finalize_training_result(
@@ -2625,6 +2685,7 @@ class _GBMEstimatorCore(
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
+                **self._multiclass_strategy_kwargs(),
                 **ranking_sigma_kwargs,
             )
         else:
@@ -2741,6 +2802,7 @@ class _GBMEstimatorCore(
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
+                **self._multiclass_strategy_kwargs(),
                 **ranking_sigma_kwargs,
             )
 
@@ -2964,6 +3026,11 @@ class _GBMEstimatorCore(
         if self.random_strength is not None:
             raise RuntimeError(
                 "random_strength requires a native alloygbm build "
+                "with training summary support"
+            )
+        if self._multiclass_strategy_kwargs():
+            raise RuntimeError(
+                "multiclass_strategy and multiclass_hessian require a native alloygbm build "
                 "with training summary support"
             )
         if eval_set is not None:

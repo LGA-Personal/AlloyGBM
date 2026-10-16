@@ -1,7 +1,7 @@
 use alloygbm_core::{
     BoostingMode, DartNormalize, DartSampleType, DroConfig, DroMetric, FactorExposureMatrix,
     FactorNeutralizationConfig, LeafModelKind, LeafSolverKind, LrSchedule, MorphConfig,
-    NeutralizationKind, TrainParams, TreeGrowth,
+    MulticlassHessian, MulticlassStrategy, NeutralizationKind, TrainParams, TreeGrowth,
 };
 use alloygbm_engine::{EngineError, TrainingPolicyMode};
 use alloygbm_shap::{BinningContext, ShapError};
@@ -24,6 +24,27 @@ pub(crate) fn parse_tree_growth(value: &str) -> Result<TreeGrowth, EngineError> 
         "leaf" => Ok(TreeGrowth::Leaf),
         other => Err(EngineError::InvalidConfig(format!(
             "tree_growth must be 'level' or 'leaf', received '{other}'"
+        ))),
+    }
+}
+
+pub(crate) fn parse_multiclass_hessian(value: &str) -> Result<MulticlassHessian, EngineError> {
+    match value {
+        "diagonal" => Ok(MulticlassHessian::Diagonal),
+        "full" => Ok(MulticlassHessian::Full),
+        "abs_residual" => Ok(MulticlassHessian::AbsResidual),
+        other => Err(EngineError::InvalidConfig(format!(
+            "multiclass_hessian must be 'diagonal', 'full' or 'abs_residual', received '{other}'"
+        ))),
+    }
+}
+
+pub(crate) fn parse_multiclass_strategy(value: &str) -> Result<MulticlassStrategy, EngineError> {
+    match value {
+        "per_class_trees" => Ok(MulticlassStrategy::PerClassTrees),
+        "vector_leaves" => Ok(MulticlassStrategy::VectorLeaves),
+        other => Err(EngineError::InvalidConfig(format!(
+            "multiclass_strategy must be 'per_class_trees' or 'vector_leaves', received '{other}'"
         ))),
     }
 }
@@ -165,6 +186,8 @@ pub(crate) fn build_train_params(
         joint_dro_robust_split_gain: false,
         early_stopping_relative_tolerance: 0.0,
         split_noise_strength: None,
+        multiclass_strategy: alloygbm_core::MulticlassStrategy::PerClassTrees,
+        multiclass_hessian: alloygbm_core::MulticlassHessian::Diagonal,
     }
 }
 

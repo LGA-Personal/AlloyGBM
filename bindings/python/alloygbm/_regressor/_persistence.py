@@ -82,6 +82,10 @@ class _PersistenceMixin:
             self.n_jobs = None
         if not hasattr(self, "random_strength"):
             self.random_strength = None
+        if not hasattr(self, "multiclass_strategy"):
+            self.multiclass_strategy = "per_class_trees"
+        if not hasattr(self, "multiclass_hessian"):
+            self.multiclass_hessian = "diagonal"
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
         if self._is_fitted and not hasattr(self, "feature_bundling_diagnostics_"):
