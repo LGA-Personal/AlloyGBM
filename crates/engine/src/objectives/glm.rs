@@ -458,3 +458,123 @@ impl ObjectiveOps for TweedieObjective {
         Ok((total / weight_sum) as f32)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_glm_hessians_match_closed_forms() {
+        use alloygbm_core::GlmHessian::Bounded;
+        let predictions = vec![-1.0_f32, 0.0, 0.5, 2.0];
+        let targets = vec![3.0_f32, 0.5, 1.0, 2.0];
+        let weights = vec![1.0_f32, 2.0, 0.5, 1.5];
+        let poisson = PoissonObjective::new(0.7)
+            .with_glm_hessian(Bounded)
+            .compute_gradients(&predictions, &targets, Some(&weights))
+            .expect("poisson");
+        let gamma = GammaObjective::default()
+            .with_glm_hessian(Bounded)
+            .compute_gradients(&predictions, &targets, Some(&weights))
+            .expect("gamma");
+        let p = 1.4_f32;
+        let tweedie = TweedieObjective::new(p)
+            .expect("tweedie")
+            .with_glm_hessian(Bounded)
+            .compute_gradients(&predictions, &targets, Some(&weights))
+            .expect("tweedie");
+        for i in 0..predictions.len() {
+            let (mu, y, w) = (predictions[i].exp(), targets[i], weights[i]);
+            // max_delta_step is ignored under the bounded Hessian.
+            assert!((poisson[i].hess - w * (2.0 * mu + y) / 3.0).abs() < 1e-5);
+            assert!((poisson[i].grad - w * (mu - y)).abs() < 1e-5);
+            assert!((gamma[i].hess - w * (2.0 * y / mu + 1.0) / 3.0).abs() < 1e-5);
+            assert!((gamma[i].grad - w * (1.0 - y / mu)).abs() < 1e-5);
+            let a = y * mu.powf(1.0 - p);
+            let b = mu.powf(2.0 - p);
+            assert!((tweedie[i].hess - w * (p * a + (3.0 - p) * b) / 3.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn bounded_tweedie_hessian_interpolates_poisson_and_gamma() {
+        use alloygbm_core::GlmHessian::Bounded;
+        let predictions = vec![-0.5_f32, 0.3, 1.2];
+        let targets = vec![2.0_f32, 0.7, 4.0];
+        let hess = |grads: Vec<GradientPair>| grads.iter().map(|g| g.hess).collect::<Vec<_>>();
+        let poisson = hess(
+            PoissonObjective::default()
+                .with_glm_hessian(Bounded)
+                .compute_gradients(&predictions, &targets, None)
+                .unwrap(),
+        );
+        let gamma = hess(
+            GammaObjective::default()
+                .with_glm_hessian(Bounded)
+                .compute_gradients(&predictions, &targets, None)
+                .unwrap(),
+        );
+        let near = |p: f32| {
+            hess(
+                TweedieObjective::new(p)
+                    .unwrap()
+                    .with_glm_hessian(Bounded)
+                    .compute_gradients(&predictions, &targets, None)
+                    .unwrap(),
+            )
+        };
+        for (t, want) in near(1.0001).iter().zip(&poisson) {
+            assert!((t - want).abs() < 1e-3 * want.max(1.0), "{t} vs {want}");
+        }
+        for (t, want) in near(1.9999).iter().zip(&gamma) {
+            assert!((t - want).abs() < 1e-3 * want.max(1.0), "{t} vs {want}");
+        }
+    }
+
+    /// One Newton step on a constant (intercept) model: `-Σg / Σh`.
+    fn intercept_newton_step<O: ObjectiveOps>(objective: &O, eta: f32, targets: &[f32]) -> f32 {
+        let predictions = vec![eta; targets.len()];
+        let grads = objective
+            .compute_gradients(&predictions, targets, None)
+            .unwrap();
+        let g: f32 = grads.iter().map(|p| p.grad).sum();
+        let h: f32 = grads.iter().map(|p| p.hess).sum();
+        -g / h
+    }
+
+    #[test]
+    fn bounded_glm_hessians_cap_the_intercept_step() {
+        use alloygbm_core::GlmHessian::{Bounded, Exact};
+        // Mean targets far above and far below the current mean, where the exact
+        // Hessian's step runs away and the bounded step saturates.
+        let high = vec![1.0e4_f32; 8];
+        let low = vec![1.0e-4_f32; 8];
+        let poisson = PoissonObjective::new(0.0);
+        let bounded_poisson = poisson.with_glm_hessian(Bounded);
+        assert!(intercept_newton_step(&poisson, 0.0, &high) > 100.0);
+        let up = intercept_newton_step(&bounded_poisson, 0.0, &high);
+        let down = intercept_newton_step(&bounded_poisson, 0.0, &low);
+        assert!(up > 2.9 && up < 3.0, "{up}");
+        assert!(down < -1.4 && down > -1.5, "{down}");
+
+        let gamma = GammaObjective::default().with_glm_hessian(Exact);
+        let bounded_gamma = GammaObjective::default().with_glm_hessian(Bounded);
+        // Exact Gamma Newton step 1 - mu/y explodes when y is tiny.
+        assert!(intercept_newton_step(&gamma, 0.0, &low) < -100.0);
+        let up = intercept_newton_step(&bounded_gamma, 0.0, &high);
+        let down = intercept_newton_step(&bounded_gamma, 0.0, &low);
+        assert!(up > 1.49 && up < 1.5, "{up}");
+        assert!(down < -2.9 && down > -3.0, "{down}");
+    }
+
+    #[test]
+    fn glm_hessian_parse_round_trips() {
+        use alloygbm_core::{GlmHessian, GrnForm};
+        assert_eq!(GlmHessian::parse("exact").unwrap(), GlmHessian::Exact);
+        assert_eq!(GlmHessian::parse("bounded").unwrap(), GlmHessian::Bounded);
+        assert!(GlmHessian::parse("halley").is_err());
+        assert_eq!(GrnForm::parse("per_leaf").unwrap(), GrnForm::PerLeaf);
+        assert_eq!(GrnForm::parse("per_row").unwrap(), GrnForm::PerRow);
+        assert!(GrnForm::parse("per_tree").is_err());
+    }
+}

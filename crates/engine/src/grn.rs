@@ -37,8 +37,9 @@ pub(crate) fn grn_round_lambda<'a>(
     if strength <= 0.0 {
         return None;
     }
-    let lambda = f64::from(strength) * grn_gradient_norm(buffers, row_count).sqrt();
-    Some(lambda as f32)
+    let lambda = (f64::from(strength) * grn_gradient_norm(buffers, row_count).sqrt()) as f32;
+    // A diverging custom objective must not poison every Hessian with NaN.
+    lambda.is_finite().then_some(lambda)
 }
 
 /// Add `lambda` to every row's Hessian, scaled by the row's sample weight
@@ -86,6 +87,12 @@ mod tests {
         assert_eq!(grn_round_lambda(0.0, [&a[..]], 1), None);
         let lambda = grn_round_lambda(2.0, [&a[..]], 1).unwrap();
         assert!((lambda - 2.0 * 3.0_f32.sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_finite_lambda_is_off() {
+        let a = [pair(1.0e30, 1.0)];
+        assert_eq!(grn_round_lambda(f32::MAX, [&a[..]], 1), None);
     }
 
     #[test]
