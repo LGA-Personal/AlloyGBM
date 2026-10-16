@@ -1,4 +1,4 @@
-use alloygbm_core::GradientPair;
+use alloygbm_core::{GlmHessian, GradientPair};
 
 use crate::error::{EngineError, EngineResult};
 use crate::traits::ObjectiveOps;
@@ -58,23 +58,43 @@ fn glm_weighted_target_sum(
 /// The Newton hessian is inflated by `exp(max_delta_step)` (LightGBM's
 /// `poisson_max_delta_step` stabilizer) to damp updates on sparse or skewed
 /// count data.  `max_delta_step` defaults to 0.7.
+///
+/// With [`GlmHessian::Bounded`] the hessian is `w·(2μ + y)/3` instead and
+/// `max_delta_step` is ignored: an intercept-style leaf step becomes
+/// `3(Y − M)/(2M + Y)` (`Y = Σy`, `M = Σμ`), which lies in `(−3/2, 3)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PoissonObjective {
     max_delta_step: f32,
+    hessian: GlmHessian,
 }
 
 impl Default for PoissonObjective {
     fn default() -> Self {
-        Self {
-            max_delta_step: DEFAULT_POISSON_MAX_DELTA_STEP,
-        }
+        Self::new(DEFAULT_POISSON_MAX_DELTA_STEP)
     }
 }
 
 impl PoissonObjective {
     pub fn new(max_delta_step: f32) -> Self {
-        Self { max_delta_step }
+        Self {
+            max_delta_step,
+            hessian: GlmHessian::Exact,
+        }
     }
+
+    pub fn with_glm_hessian(mut self, hessian: GlmHessian) -> Self {
+        self.hessian = hessian;
+        self
+    }
+}
+
+/// Bounded-step pseudo-Hessian shared by the three log-link objectives
+/// (dmlc/xgboost#12538): `(ρ·a + (3 − ρ)·b)/3` with `a = y·μ^(1−ρ)` and
+/// `b = μ^(2−ρ)`, for variance power `ρ ∈ [1, 2]`.  `ρ = 1` gives Poisson's
+/// `(y + 2μ)/3`; `ρ = 2` gives Gamma's `(2y/μ + 1)/3`.  Unweighted.
+#[inline]
+fn bounded_log_link_hessian(rho: f32, y: f32, mu_1mp: f32, mu_2mp: f32) -> f32 {
+    (rho * y * mu_1mp + (3.0 - rho) * mu_2mp) / 3.0
 }
 
 fn poisson_compute_gradients(
@@ -82,6 +102,7 @@ fn poisson_compute_gradients(
     targets: &[f32],
     sample_weights: Option<&[f32]>,
     max_delta_step: f32,
+    hessian: GlmHessian,
 ) -> EngineResult<Vec<GradientPair>> {
     if predictions.len() != targets.len() {
         return Err(EngineError::ContractViolation(format!(
@@ -101,7 +122,10 @@ fn poisson_compute_gradients(
         }
         let mu = glm_clamp_exp(predictions[index]);
         let grad = (mu - targets[index]) * weight;
-        let hess = mu.max(1e-7) * hessian_scale * weight;
+        let hess = match hessian {
+            GlmHessian::Exact => mu.max(1e-7) * hessian_scale,
+            GlmHessian::Bounded => bounded_log_link_hessian(1.0, targets[index], 1.0, mu).max(1e-7),
+        } * weight;
         gradients.push(GradientPair::new(grad, hess)?);
     }
     Ok(gradients)
@@ -145,7 +169,13 @@ impl ObjectiveOps for PoissonObjective {
         targets: &[f32],
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>> {
-        poisson_compute_gradients(predictions, targets, sample_weights, self.max_delta_step)
+        poisson_compute_gradients(
+            predictions,
+            targets,
+            sample_weights,
+            self.max_delta_step,
+            self.hessian,
+        )
     }
 
     fn loss(
@@ -180,8 +210,20 @@ impl ObjectiveOps for PoissonObjective {
 
 /// Gamma regression objective with log-link: `μ = exp(η)`, `y ~ Gamma(μ, φ)`.
 /// Targets must be strictly positive.  Predictions are in log-mean (η) space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GammaObjective;
+///
+/// The exact hessian is `w·y/μ`; with [`GlmHessian::Bounded`] it is
+/// `w·(2y/μ + 1)/3`, which keeps an intercept-style leaf step in `(−3, 3/2)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GammaObjective {
+    hessian: GlmHessian,
+}
+
+impl GammaObjective {
+    pub fn with_glm_hessian(mut self, hessian: GlmHessian) -> Self {
+        self.hessian = hessian;
+        self
+    }
+}
 
 impl ObjectiveOps for GammaObjective {
     fn objective_name(&self) -> &str {
@@ -238,7 +280,10 @@ impl ObjectiveOps for GammaObjective {
             let mu = glm_clamp_exp(predictions[index]);
             let y_over_mu = targets[index] / mu.max(1e-7);
             let grad = (1.0 - y_over_mu) * weight;
-            let hess = y_over_mu.max(1e-7) * weight;
+            let hess = match self.hessian {
+                GlmHessian::Exact => y_over_mu.max(1e-7),
+                GlmHessian::Bounded => bounded_log_link_hessian(2.0, y_over_mu, 1.0, 1.0).max(1e-7),
+            } * weight;
             gradients.push(GradientPair::new(grad, hess)?);
         }
         Ok(gradients)
@@ -276,9 +321,14 @@ impl ObjectiveOps for GammaObjective {
 /// Tweedie regression objective with log-link for variance power `p ∈ (1, 2)`
 /// (compound Poisson-gamma).  Targets must be ≥ 0.  Use [`PoissonObjective`]
 /// for `p = 1` and [`GammaObjective`] for `p = 2`.
+///
+/// The default hessian is the simplified `w·μ^(2−p)`; with
+/// [`GlmHessian::Bounded`] it is `w·(p·y·μ^(1−p) + (3−p)·μ^(2−p))/3`, which
+/// interpolates the bounded Poisson and Gamma curvatures.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TweedieObjective {
     pub variance_power: f32,
+    hessian: GlmHessian,
 }
 
 impl TweedieObjective {
@@ -289,7 +339,15 @@ impl TweedieObjective {
                  use PoissonObjective for p=1 and GammaObjective for p=2"
             )));
         }
-        Ok(Self { variance_power })
+        Ok(Self {
+            variance_power,
+            hessian: GlmHessian::Exact,
+        })
+    }
+
+    pub fn with_glm_hessian(mut self, hessian: GlmHessian) -> Self {
+        self.hessian = hessian;
+        self
     }
 }
 
@@ -352,7 +410,12 @@ impl ObjectiveOps for TweedieObjective {
             let grad = (mu_2mp - targets[index] * mu_1mp) * weight;
             // Simplified Newton hessian (LightGBM/XGBoost convention) — drops the
             // (1-p)·y·μ^(1-p) second-derivative term which would be negative.
-            let hess = mu_2mp.max(1e-7) * weight;
+            let hess = match self.hessian {
+                GlmHessian::Exact => mu_2mp.max(1e-7),
+                GlmHessian::Bounded => {
+                    bounded_log_link_hessian(p, targets[index], mu_1mp, mu_2mp).max(1e-7)
+                }
+            } * weight;
             gradients.push(GradientPair::new(grad, hess)?);
         }
         Ok(gradients)

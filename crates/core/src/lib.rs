@@ -48,8 +48,8 @@ pub use binned::{
     MISSING_BIN_U16,
 };
 pub use config::{
-    BoostingMode, DartNormalize, DartSampleType, Device, LeafModelKind, LeafSolverKind,
-    MAX_TREE_NODE_SLOTS, TrainParams, TreeGrowth,
+    BoostingMode, DartNormalize, DartSampleType, Device, GlmHessian, GrnForm, LeafModelKind,
+    LeafSolverKind, MAX_TREE_NODE_SLOTS, TrainParams, TreeGrowth,
 };
 pub use dataset::{
     ColumnarMatrixColumnView, ColumnarMatrixView, DatasetMatrix, DatasetSchema, DenseMatrixView,
