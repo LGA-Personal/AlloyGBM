@@ -7,6 +7,7 @@ mod multiclass_build;
 mod policy;
 mod tree_build;
 mod validate;
+mod vector_leaf_build;
 
 pub(crate) use interaction::{InteractionConstraintIndex, filter_histogram_bundle_by_features};
 use monotone::{
@@ -46,6 +47,11 @@ use multiclass_build::{
     MulticlassTreeBuildOutcome, collect_ordered_class_results, should_parallelize_multiclass_trees,
 };
 use rayon::prelude::*;
+use vector_leaf_build::{
+    FullHessianInputs, VectorLeafBinLayout, VectorLeafGradients, VectorLeafTreeInputs,
+    apply_abs_residual_hessian, build_vector_leaf_tree, softmax_rows, validate_multiclass_hessian,
+    validate_vector_leaf_support,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trainer {
@@ -1110,6 +1116,13 @@ impl Trainer {
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
         validate_warm_start_neutralization_contract(&self.params, warm_start.is_some(), dataset)?;
+        let vector_leaves =
+            self.params.multiclass_strategy == alloygbm_core::MulticlassStrategy::VectorLeaves;
+        if vector_leaves {
+            validate_vector_leaf_support(&self.params, &self.categorical_features)?;
+        }
+        validate_multiclass_hessian(&self.params, objective.num_classes)?;
+        let multiclass_hessian = self.params.multiclass_hessian;
         validate_training_alignment(dataset, binned_matrix)?;
         if let Some(validation_ref) = validation {
             validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
@@ -1134,6 +1147,7 @@ impl Trainer {
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
         let mut controls = controls;
         resolve_split_noise(&mut controls, &self.params, sampling_seed_base);
+        let vector_leaf_layout = vector_leaves.then(|| VectorLeafBinLayout::new(binned_matrix));
         let split_resolution = split_selection_options_with_controls(
             &self.params,
             None,
@@ -1481,6 +1495,9 @@ impl Trainer {
                     dataset.sample_weights.as_deref(),
                 )?;
                 for mut tmp_buf in all_class_gradients {
+                    if multiclass_hessian == alloygbm_core::MulticlassHessian::AbsResidual {
+                        apply_abs_residual_hessian(&mut tmp_buf);
+                    }
                     let original_norm = if gradient_projector.is_some() {
                         Some(gradient_l2_norm_only(&tmp_buf))
                     } else {
@@ -1617,21 +1634,68 @@ impl Trainer {
                     })
                 };
 
-            let build_results =
-                if should_parallelize_multiclass_trees(k, sampled_row_count, sampled_feature_count)
-                {
-                    class_candidate_predictions
-                        .par_iter_mut()
-                        .enumerate()
-                        .map(&build_class_tree)
-                        .collect::<Vec<_>>()
-                } else {
-                    class_candidate_predictions
-                        .iter_mut()
-                        .enumerate()
-                        .map(build_class_tree)
-                        .collect::<Vec<_>>()
+            let build_results = if let Some(layout) = vector_leaf_layout.as_ref() {
+                // One shared tree whose leaves hold a K-vector; it comes back
+                // as K per-class trees with the same structure.
+                let inputs = VectorLeafTreeInputs {
+                    binned_matrix,
+                    layout,
+                    gradients: VectorLeafGradients {
+                        leaf: &class_gradient_buffers,
+                        split: None,
+                    },
+                    root_rows: root_row_indices.clone(),
+                    features: feature_tiles
+                        .iter()
+                        .flat_map(|tile| tile.start_feature as usize..tile.end_feature as usize)
+                        .collect(),
+                    round_index: effective_round,
+                    split_options: round_split_options,
+                    params: &self.params,
+                    controls: &controls,
+                    feature_weights: &self.params.feature_weights,
+                    full_hessian: (multiclass_hessian == alloygbm_core::MulticlassHessian::Full)
+                        .then(|| FullHessianInputs {
+                            probabilities: softmax_rows(&class_predictions),
+                            targets: &dataset.targets,
+                        }),
                 };
+                match build_vector_leaf_tree(&inputs, &mut class_candidate_predictions) {
+                    Ok(trees) => trees
+                        .into_iter()
+                        .enumerate()
+                        .map(|(class_k, round_stumps)| {
+                            Ok(MulticlassTreeBuildOutcome {
+                                class_index: class_k,
+                                diagnostics: IterationDiagnostics::from_gradient_snapshot(
+                                    &class_gradient_buffers[class_k],
+                                    class_original_gradient_norms[class_k],
+                                    sampled_row_count,
+                                    sampled_feature_count,
+                                ),
+                                round_stumps,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                    Err(error) => vec![Err(error)],
+                }
+            } else if should_parallelize_multiclass_trees(
+                k,
+                sampled_row_count,
+                sampled_feature_count,
+            ) {
+                class_candidate_predictions
+                    .par_iter_mut()
+                    .enumerate()
+                    .map(&build_class_tree)
+                    .collect::<Vec<_>>()
+            } else {
+                class_candidate_predictions
+                    .iter_mut()
+                    .enumerate()
+                    .map(build_class_tree)
+                    .collect::<Vec<_>>()
+            };
             let outcomes = collect_ordered_class_results(build_results)?;
             let mut any_tree_produced = false;
             let mut per_class_diagnostics: Vec<IterationDiagnostics> = Vec::with_capacity(k);
