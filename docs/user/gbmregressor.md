@@ -45,6 +45,27 @@ one-dimensional inputs are rejected before native training.
     softmax, otherwise off); `0.0` turns it off; a positive value applies it
     under either policy and for any objective. Not applied to MorphBoost,
     piecewise-linear shortlists or `MultiLabelGBMRanker(multi_label_mode="joint")`.
+- `multiclass_strategy: str = "per_class_trees"`
+  - Tree layout for multiclass softmax (`GBMClassifier` with 3+ classes);
+    ignored by every other objective. `"per_class_trees"` grows K trees per
+    round, one per class. `"vector_leaves"` grows one tree per round: each
+    split is scored on the sum of the per-class Newton gains and each leaf
+    holds one Newton step per class (XGBoost's `multi_strategy=
+    "multi_output_tree"`, CatBoost's multiclass trees). It is stored as K
+    per-class trees sharing one structure, so prediction, SHAP and saved
+    models work unchanged. A vector tree is about as fast as one per-class
+    round but usually needs more rounds. Not supported with
+    `training_mode="morph"`, `leaf_model="linear"`, `leaf_solver="dro"`,
+    `neutralization="split_penalty"`, `interaction_constraints` or native
+    categorical splits.
+- `multiclass_hessian: str = "diagonal"`
+  - Newton Hessian for multiclass softmax. `"diagonal"` uses `p_k (1 - p_k)`.
+    `"full"` (requires `multiclass_strategy="vector_leaves"`, at most 16
+    classes, no factor neutralization) solves each vector leaf with the full
+    softmax Hessian `diag(p) - p pᵀ` summed over the leaf's rows, plus
+    `lambda_l2` on the diagonal; splits are still scored on the diagonal.
+    `"abs_residual"` replaces the Hessian with `|p_k - y_k|`, which bounds
+    each row's step.
 
 ## Boosting Mode
 
