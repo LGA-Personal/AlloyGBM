@@ -171,6 +171,8 @@ fn fixture_params() -> TrainParams {
         joint_dro_robust_split_gain: false,
         early_stopping_relative_tolerance: 0.0,
         split_noise_strength: None,
+        multiclass_strategy: alloygbm_core::MulticlassStrategy::PerClassTrees,
+        multiclass_hessian: alloygbm_core::MulticlassHessian::Diagonal,
     }
 }
 

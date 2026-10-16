@@ -28,6 +28,37 @@ pub enum TreeGrowth {
     Leaf,
 }
 
+/// How a multiclass softmax fit grows its trees each round.
+///
+/// `PerClassTrees` (default) grows K independent trees per round, one per
+/// class, each scored on that class's gradients alone. `VectorLeaves` grows
+/// one tree per round whose splits are scored on all K classes at once and
+/// whose leaves hold a K-vector (one Newton step per class). The vector tree
+/// is stored as K per-class trees that share its structure, so artifacts,
+/// prediction and SHAP are unchanged. Ignored by every other objective.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MulticlassStrategy {
+    #[default]
+    PerClassTrees,
+    VectorLeaves,
+}
+
+/// Which Hessian a multiclass softmax fit uses for its Newton steps.
+///
+/// `Diagonal` (default) uses `p_k (1 - p_k)` per class, the softmax
+/// Hessian's diagonal. `Full` (vector leaves only) solves each leaf with the
+/// full softmax Hessian `diag(p) - p p^T`, summed over the leaf's rows;
+/// splits are still scored on the diagonal. `AbsResidual` replaces the
+/// Hessian with `|p_k - y_k|`, a pseudo-Hessian that bounds each row's step.
+/// Ignored by every other objective.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MulticlassHessian {
+    #[default]
+    Diagonal,
+    Full,
+    AbsResidual,
+}
+
 /// Leaf representation strategy for tree models.
 ///
 /// `Constant` (default) is identical to current behavior: each leaf stores a
@@ -253,6 +284,12 @@ pub struct TrainParams {
     /// split path, not to MorphBoost, piecewise-linear shortlists or the joint
     /// multi-output trainer.
     pub split_noise_strength: Option<f32>,
+    /// Tree layout for multiclass softmax; see [`MulticlassStrategy`].
+    /// `PerClassTrees` (default) keeps the existing K-trees-per-round fit.
+    pub multiclass_strategy: MulticlassStrategy,
+    /// Newton Hessian for multiclass softmax; see [`MulticlassHessian`].
+    /// `Diagonal` (default) keeps the existing leaf and split math.
+    pub multiclass_hessian: MulticlassHessian,
 }
 
 impl Default for TrainParams {
@@ -290,6 +327,8 @@ impl Default for TrainParams {
             joint_dro_robust_split_gain: false,
             early_stopping_relative_tolerance: 0.0,
             split_noise_strength: None,
+            multiclass_strategy: MulticlassStrategy::PerClassTrees,
+            multiclass_hessian: MulticlassHessian::Diagonal,
         }
     }
 }
