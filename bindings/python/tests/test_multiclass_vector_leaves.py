@@ -156,6 +156,21 @@ def test_vector_leaves_support_early_stopping() -> None:
     assert model.predict_proba(X).shape == (400, 4)
 
 
+@pytest.mark.parametrize("hessian", ["diagonal", "full"])
+def test_vector_leaves_auto_n_estimators(hessian: str) -> None:
+    X, y = make_fixture(rows=400)
+    model = GBMClassifier(
+        multiclass_strategy="vector_leaves", multiclass_hessian=hessian, seed=7
+    ).fit(X, y)
+
+    assert model.n_estimators == "auto"
+    assert model.auto_rounds_["mode"] == "holdout"
+    assert model.n_estimators_ == model.auto_rounds_["refit_rounds"] > 0
+    proba = model.predict_proba(X)
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, rtol=1e-5)
+    assert -np.mean(np.log(proba[np.arange(len(y)), y])) < -np.log(0.25)
+
+
 @pytest.mark.parametrize(
     "kwargs, message",
     [
