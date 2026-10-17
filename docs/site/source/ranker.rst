@@ -47,7 +47,9 @@ Ranking objectives
 - ``"yetirank"`` -- YetiRank (Gulin et al.; the CatBoost formulation):
   pairwise logistic loss over documents that are neighbours in a
   Logistic-noise-perturbed ranking, weighted by label gap and a 0.85 position
-  decay, 10 noisy rankings per query per round
+  decay, 10 noisy rankings per query per round. The decay and permutation
+  count are fixed at CatBoost's published defaults and are not exposed as
+  parameters
 - ``"rank:ndcg_smoothed"`` -- LambdaMART NDCG on uniform-noise-smoothed
   scores. This was ``"yetirank"`` in v1.0.0 and earlier; use it to reproduce
   those models

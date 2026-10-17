@@ -35,7 +35,10 @@ objectives:
 - ``RankNdcgObjective`` -- LambdaMART with NDCG weighting
 - ``RankXendcgObjective`` -- cross-entropy approximation to NDCG
 - ``QueryRmseObjective`` -- query-grouped RMSE
-- ``YetiRankObjective`` -- stochastic NDCG-weighted pairwise
+- ``YetiRankObjective`` -- YetiRank (CatBoost formulation): pairwise logistic over
+  neighbours in Logistic-noise-perturbed rankings, with position decay
+- ``SmoothedNdcgObjective`` -- LambdaMART NDCG on uniform-noise-smoothed scores
+  (``rank:ndcg_smoothed``; the ``yetirank`` of v1.0.0 and earlier)
 
 Training pipeline
 -----------------
