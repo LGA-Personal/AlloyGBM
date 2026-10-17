@@ -10,7 +10,8 @@ use alloygbm_categorical::fit_transform_target_encoder;
 use alloygbm_core::{
     BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FeatureTile, GradientPair, HistogramBundle,
     LeafModelKind, LeafValue, LinearFeatureScaler, LinearLeaf, MAX_PL_SLOPE_REGRESSORS, NodeSlice,
-    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, leaf_effective_gradient,
+    NodeStats, PartitionResult, SplitCandidate, TrainParams, TrainingDataset,
+    leaf_effective_gradient, leaf_gain_term,
 };
 use rayon::prelude::*;
 use std::cmp::Ordering;
@@ -553,6 +554,18 @@ fn propose_level_node<B: BackendOps>(
         return Ok(LevelNodeOutcome::rejected(
             local_node_id,
             IterationStopReason::LeafRowsBelowThreshold,
+        ));
+    }
+    if !quantized_split_keeps_float_gain(
+        context.params,
+        &context.split_options,
+        context.controls,
+        &left_stats,
+        &right_stats,
+    ) {
+        return Ok(LevelNodeOutcome::rejected(
+            local_node_id,
+            IterationStopReason::GainBelowThreshold,
         ));
     }
     if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
@@ -1318,6 +1331,16 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             last_rejection = IterationStopReason::LeafRowsBelowThreshold;
             continue;
         }
+        if !quantized_split_keeps_float_gain(
+            params,
+            &split_options,
+            controls,
+            &left_stats,
+            &right_stats,
+        ) {
+            last_rejection = IterationStopReason::GainBelowThreshold;
+            continue;
+        }
 
         if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
             return Err(EngineError::ContractViolation(
@@ -1886,6 +1909,40 @@ pub(crate) fn validate_iteration_controls(controls: IterationControls) -> Engine
         ));
     }
     Ok(())
+}
+
+/// Under quantized gradients a split is chosen on rounded gradients, whose
+/// noise gives converged nodes (true gain at or below zero) a spurious
+/// positive gain. Re-scoring the chosen split on the float child sums keeps
+/// those nodes leaves, as the float trainer would: trees stay the size they
+/// would be without quantization. Always true when quantization is off.
+fn quantized_split_keeps_float_gain(
+    params: &TrainParams,
+    options: &SplitSelectionOptions,
+    controls: &IterationControls,
+    left: &NodeStats,
+    right: &NodeStats,
+) -> bool {
+    if params.quantized_grad_bits.is_none() {
+        return true;
+    }
+    let term = |grad: f32, hess: f32| {
+        2.0 * leaf_gain_term(
+            grad,
+            hess,
+            0.0,
+            0,
+            options.l1_alpha,
+            options.l2_lambda,
+            None,
+        )
+    };
+    let gain = term(left.grad_sum, left.hess_sum) + term(right.grad_sum, right.hess_sum)
+        - term(
+            left.grad_sum + right.grad_sum,
+            left.hess_sum + right.hess_sum,
+        );
+    gain.is_finite() && gain > controls.min_split_gain
 }
 
 #[cfg(test)]

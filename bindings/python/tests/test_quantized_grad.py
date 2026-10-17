@@ -138,3 +138,14 @@ def test_pickle_from_before_the_option_existed():
     assert restored.get_params()["quantized_grad_bits"] == 4
     np.testing.assert_array_equal(restored.predict(X), model.predict(X))
     pickle.loads(pickle.dumps(restored))
+
+
+def test_rounding_noise_does_not_grow_extra_splits():
+    # Converged nodes have near-zero true gain; rounding noise alone must not
+    # split them, so quantized trees stay about the size of float trees.
+    X, y = _regression_data(n=4000)
+    labels = (y > np.median(y)).astype(int)
+    common = dict(n_estimators=150, learning_rate=0.1, max_depth=6, seed=0)
+    base = GBMClassifier(**common).fit(X, labels)
+    quantized = GBMClassifier(**common, quantized_grad=True, quantized_grad_bits=2).fit(X, labels)
+    assert len(quantized.artifact_bytes) < 1.1 * len(base.artifact_bytes)
