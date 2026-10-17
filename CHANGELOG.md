@@ -167,6 +167,14 @@
 
 ### Added
 
+- **`quantized_grad` / `quantized_grad_bits` (opt-in).** Quantized-gradient
+  histograms, the equivalent of LightGBM's `use_quantized_grad`: each tree's
+  gradients and Hessians are stochastically rounded to 2-8 bits and histograms
+  are built by integer accumulation, while leaves are still fitted from the
+  float gradients. On the 68-task dev suite (4 bits, equal rounds) loss ties on
+  binary and multiclass and is 1% lower on regression, with fits 1.06x slower;
+  on wide five-level data (Numerai-like, 200k x 300) fits take 0.92x the time.
+  Off by default and byte-identical when off.
 - **`multiclass_strategy` (`"auto"`, `"per_class_trees"`, `"vector_leaves"`)
   and `multiclass_hessian` on `GBMClassifier`.** Vector leaves grow one tree
   per round for multiclass softmax, scoring splits on the sum of per-class
