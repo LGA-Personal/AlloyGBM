@@ -220,6 +220,9 @@ pub struct IterationDiagnostics {
     /// reported the internal split-feature *tile* count, which changed
     /// with the thread count.)
     pub n_active_features: usize,
+    /// The gradient-regularized Newton term added to this round's leaf
+    /// solve. `None` when `grn_strength == 0` or on the joint trainer.
+    pub grn_lambda: Option<f32>,
 }
 
 impl IterationDiagnostics {
@@ -251,6 +254,7 @@ impl IterationDiagnostics {
             neutralization_effectiveness: effectiveness,
             n_active_rows,
             n_active_features,
+            grn_lambda: None,
         }
     }
 
@@ -280,6 +284,7 @@ impl IterationDiagnostics {
             neutralization_effectiveness: max_opt(|d| d.neutralization_effectiveness),
             n_active_rows: class_entries[0].n_active_rows,
             n_active_features: class_entries[0].n_active_features,
+            grn_lambda: class_entries[0].grn_lambda,
         }
     }
 }

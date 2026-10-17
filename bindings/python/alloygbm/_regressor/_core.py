@@ -85,6 +85,35 @@ def _validate_multiclass_strategy(value: object) -> str:
     return value
 
 
+_GLM_HESSIANS = ("exact", "bounded")
+_GRN_FORMS = ("per_leaf", "per_row")
+
+
+def _validate_glm_hessian(value: object) -> str:
+    if value not in _GLM_HESSIANS:
+        raise ValueError(f"glm_hessian must be one of {_GLM_HESSIANS}, got {value!r}")
+    return str(value)
+
+
+def _validate_grn_strength(value: object) -> float:
+    message = "grn_strength must be a finite float >= 0"
+    if isinstance(value, bool):
+        raise ValueError(message)
+    try:
+        strength = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if not math.isfinite(strength) or strength < 0.0:
+        raise ValueError(message)
+    return strength
+
+
+def _validate_grn_form(value: object) -> str:
+    if value not in _GRN_FORMS:
+        raise ValueError(f"grn_form must be one of {_GRN_FORMS}, got {value!r}")
+    return str(value)
+
+
 def _validate_n_jobs(value: object) -> int | None:
     if value is None:
         return None
@@ -188,6 +217,9 @@ class _GBMEstimatorCore(
         random_strength: float | None = None,
         multiclass_strategy: str = "auto",
         multiclass_hessian: str = "diagonal",
+        glm_hessian: str = "exact",
+        grn_strength: float = 0.0,
+        grn_form: str = "per_leaf",
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -580,6 +612,9 @@ class _GBMEstimatorCore(
         self.random_strength = _validate_random_strength(random_strength)
         self.multiclass_strategy = _validate_multiclass_strategy(multiclass_strategy)
         self.multiclass_hessian = _validate_multiclass_hessian(multiclass_hessian)
+        self.glm_hessian = _validate_glm_hessian(glm_hessian)
+        self.grn_strength = _validate_grn_strength(grn_strength)
+        self.grn_form = _validate_grn_form(grn_form)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -667,6 +702,9 @@ class _GBMEstimatorCore(
         random_strength: float | None = None,
         multiclass_strategy: str = "auto",
         multiclass_hessian: str = "diagonal",
+        glm_hessian: str = "exact",
+        grn_strength: float = 0.0,
+        grn_form: str = "per_leaf",
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -735,6 +773,9 @@ class _GBMEstimatorCore(
         self.random_strength = random_strength
         self.multiclass_strategy = multiclass_strategy
         self.multiclass_hessian = multiclass_hessian
+        self.glm_hessian = glm_hessian
+        self.grn_strength = grn_strength
+        self.grn_form = grn_form
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -820,7 +861,10 @@ class _GBMEstimatorCore(
             f"n_jobs={self.n_jobs}, "
             f"random_strength={self.random_strength}, "
             f"multiclass_strategy='{self.multiclass_strategy}', "
-            f"multiclass_hessian='{self.multiclass_hessian}'"
+            f"multiclass_hessian='{self.multiclass_hessian}', "
+            f"glm_hessian='{self.glm_hessian}', "
+            f"grn_strength={self.grn_strength}, "
+            f"grn_form='{self.grn_form}'"
             ")"
         )
 
@@ -895,6 +939,9 @@ class _GBMEstimatorCore(
             "random_strength": self.random_strength,
             "multiclass_strategy": self.multiclass_strategy,
             "multiclass_hessian": self.multiclass_hessian,
+            "glm_hessian": self.glm_hessian,
+            "grn_strength": self.grn_strength,
+            "grn_form": self.grn_form,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -967,6 +1014,9 @@ class _GBMEstimatorCore(
             "random_strength",
             "multiclass_strategy",
             "multiclass_hessian",
+            "glm_hessian",
+            "grn_strength",
+            "grn_form",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1064,6 +1114,14 @@ class _GBMEstimatorCore(
             self.multiclass_hessian = _validate_multiclass_hessian(
                 params["multiclass_hessian"]
             )
+        if "glm_hessian" in params:
+            self.glm_hessian = _validate_glm_hessian(params["glm_hessian"])
+
+        if "grn_strength" in params:
+            self.grn_strength = _validate_grn_strength(params["grn_strength"])
+
+        if "grn_form" in params:
+            self.grn_form = _validate_grn_form(params["grn_form"])
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1880,6 +1938,20 @@ class _GBMEstimatorCore(
             return "vector_leaves"
         return "per_class_trees"
 
+    def _leaf_math_kwargs(self) -> dict:
+        """Native kwargs for the opt-in ``glm_hessian`` and GRN parameters.
+
+        Only non-default values are passed, so default fits call the native
+        trainer exactly as before.
+        """
+        kwargs: dict = {}
+        if self.glm_hessian != "exact":
+            kwargs["glm_hessian"] = self.glm_hessian
+        if self.grn_strength > 0.0:
+            kwargs["grn_strength"] = float(self.grn_strength)
+            kwargs["grn_form"] = self.grn_form
+        return kwargs
+
     def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
         if self.learning_rate != _auto_rounds.AUTO:
             return float(self.learning_rate)
@@ -2192,7 +2264,13 @@ class _GBMEstimatorCore(
         if sample_weight is not None:
             validated_sample_weights = self._validate_sample_weight(sample_weight, row_count)
             obj = self._objective_name()
-            if obj in ("rank_pairwise", "rank_ndcg", "rank_xendcg", "yetirank"):
+            if obj in (
+                "rank_pairwise",
+                "rank_ndcg",
+                "rank_xendcg",
+                "rank_ndcg_smoothed",
+                "yetirank",
+            ):
                 import warnings
 
                 warnings.warn(
@@ -2580,6 +2658,7 @@ class _GBMEstimatorCore(
                     **self._early_stopping_relative_kwargs(),
                     **self._split_noise_kwargs(),
                     **self._multiclass_strategy_kwargs(),
+                    **self._leaf_math_kwargs(),
                     **ranking_sigma_kwargs,
                 )
                 return self._finalize_training_result(
@@ -2747,6 +2826,7 @@ class _GBMEstimatorCore(
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
                 **self._multiclass_strategy_kwargs(),
+                **self._leaf_math_kwargs(),
                 **ranking_sigma_kwargs,
             )
         else:
@@ -2864,6 +2944,7 @@ class _GBMEstimatorCore(
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
                 **self._multiclass_strategy_kwargs(),
+                **self._leaf_math_kwargs(),
                 **ranking_sigma_kwargs,
             )
 
@@ -3092,6 +3173,11 @@ class _GBMEstimatorCore(
         if self._multiclass_strategy_kwargs():
             raise RuntimeError(
                 "multiclass_strategy and multiclass_hessian require a native alloygbm build "
+                "with training summary support"
+            )
+        if self._leaf_math_kwargs():
+            raise RuntimeError(
+                "glm_hessian and grn_strength require a native alloygbm build "
                 "with training summary support"
             )
         if eval_set is not None:

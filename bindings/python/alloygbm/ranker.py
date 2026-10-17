@@ -18,6 +18,7 @@ _RANKING_OBJECTIVES = frozenset({
     "rank:ndcg",
     "rank:xendcg",
     "queryrmse",
+    "rank:ndcg_smoothed",
     "yetirank",
     "poisson",
     "gamma",
@@ -30,6 +31,7 @@ _OBJECTIVE_NAME_MAP = {
     "rank:ndcg": "rank_ndcg",
     "rank:xendcg": "rank_xendcg",
     "queryrmse": "queryrmse",
+    "rank:ndcg_smoothed": "rank_ndcg_smoothed",
     "yetirank": "yetirank",
     "poisson": "poisson",
     "gamma": "gamma",
@@ -64,7 +66,11 @@ class GBMRanker(_GBMEstimatorCore):
         * ``"rank:ndcg"`` -- LambdaMART with NDCG weighting
         * ``"rank:xendcg"`` -- Cross-entropy approximation to NDCG
         * ``"queryrmse"`` -- Query-grouped RMSE
-        * ``"yetirank"`` -- YetiRank (stochastic NDCG-weighted pairwise)
+        * ``"yetirank"`` -- YetiRank (Gulin et al., as in CatBoost): pairwise
+          logistic loss on neighbouring documents of Logistic-noise-perturbed
+          rankings, weighted by label gap and a 0.85 position decay
+        * ``"rank:ndcg_smoothed"`` -- LambdaMART NDCG on uniform-noise-smoothed
+          scores; this was ``"yetirank"`` in v1.0.0 and earlier
         * ``"poisson"`` -- Poisson deviance (count regression)
         * ``"gamma"`` -- Gamma deviance (strictly positive regression)
         * ``"tweedie"`` -- Tweedie deviance (compound Poisson-Gamma regression)
@@ -72,7 +78,8 @@ class GBMRanker(_GBMEstimatorCore):
 
     ranking_sigma : float, default ``1.0``
         Sigmoid sharpness for pairwise ranking-family objectives
-        (``"rank:pairwise"``, ``"rank:ndcg"``, and ``"yetirank"``).
+        (``"rank:pairwise"``, ``"rank:ndcg"``, ``"rank:ndcg_smoothed"``, and
+        ``"yetirank"``).
         Higher values make pairwise score margins steeper.
     lambdarank_truncation_level : int | None, default ``30``
         For ``"rank:ndcg"``, restrict pairwise LambdaMART gradients to pairs
@@ -406,7 +413,10 @@ class GBMRanker(_GBMEstimatorCore):
             f"n_jobs={self.n_jobs}, "
             f"random_strength={self.random_strength}, "
             f"multiclass_strategy='{self.multiclass_strategy}', "
-            f"multiclass_hessian='{self.multiclass_hessian}'"
+            f"multiclass_hessian='{self.multiclass_hessian}', "
+            f"glm_hessian='{self.glm_hessian}', "
+            f"grn_strength={self.grn_strength}, "
+            f"grn_form='{self.grn_form}'"
             ")"
         )
 

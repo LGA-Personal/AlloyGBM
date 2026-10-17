@@ -52,8 +52,7 @@ one-dimensional inputs are rejected before native training.
     training rows and nothing below rules vector leaves out, and
     `"per_class_trees"` otherwise; the choice is in `multiclass_strategy_`
     after fitting. Set `"per_class_trees"` or `"vector_leaves"` to override
-    it. `"per_class_trees"` grows K trees per
-    round, one per class. `"vector_leaves"` grows one tree per round: each
+    it. `"per_class_trees"` grows K trees per round, one per class. `"vector_leaves"` grows one tree per round: each
     split is scored on the sum of the per-class Newton gains and each leaf
     holds one Newton step per class (XGBoost's `multi_strategy=
     "multi_output_tree"`, CatBoost's multiclass trees). It is stored as K
@@ -72,6 +71,29 @@ one-dimensional inputs are rejected before native training.
     `lambda_l2` on the diagonal; splits are still scored on the diagonal.
     `"abs_residual"` replaces the Hessian with `|p_k - y_k|`, which bounds
     each row's step.
+- `glm_hessian: str = "exact"`
+  - Curvature for the log-link objectives (`"poisson"`, `"gamma"`,
+    `"tweedie"`); ignored by every other objective. `"exact"` keeps today's
+    Hessians. `"bounded"` uses XGBoost's bounded-step pseudo-Hessians
+    (Poisson `(2μ + y)/3`, Gamma `(2y/μ + 1)/3`, Tweedie
+    `(p·y·μ^(1−p) + (3−p)·μ^(2−p))/3`), which cap each Newton leaf step and
+    replace the `poisson_max_delta_step` stabilizer (ignored under
+    `"bounded"`). Opt-in while it is benchmarked.
+- `grn_strength: float = 0.0`
+  - Gradient-regularized Newton (Mishchenko 2023). Each round adds
+    `λ = grn_strength · sqrt(rms(g))` to the leaf solve, where `rms(g)` is the
+    root-mean-square row gradient that round, so the damping fades as the fit
+    converges. Aimed at losses whose Hessian can vanish or blow up (custom
+    robust losses, log-link objectives at a high learning rate); expect no
+    gain on squared error. `0.0` (default) is off and byte-identical.
+    Single-output estimators and multiclass `GBMClassifier`; rejected by
+    `MultiLabelGBMRanker(multi_label_mode="joint")`. The per-round `λ` is in
+    `diagnostics_per_round_[i]["grn_lambda"]`.
+- `grn_form: str = "per_leaf"`
+  - Where the GRN term enters: `"per_leaf"` adds `λ` to the split and leaf
+    L2 term (`-G / (H + λ_l2 + λ)`); `"per_row"` adds `λ·w_i` to every row's
+    Hessian, the paper's per-row regularizer (`-G / (H + λ·Σw)` in a leaf),
+    which damps large leaves far more.
 
 ## Boosting Mode
 

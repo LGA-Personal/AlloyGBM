@@ -1,0 +1,492 @@
+[
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:yetirank",
+  "seed": 0,
+  "ndcg10": 0.7473644310889855,
+  "fit_s": 1.0215794659999347
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 0,
+  "ndcg10": 0.7466002344782982,
+  "fit_s": 1.1304368520000025
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg",
+  "seed": 0,
+  "ndcg10": 0.7485685644778861,
+  "fit_s": 0.8723093219999782
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "catboost:YetiRank",
+  "seed": 0,
+  "ndcg10": 0.7677688271677445,
+  "fit_s": 2.1265984929999604
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "lightgbm:lambdarank",
+  "seed": 0,
+  "ndcg10": 0.7544439024685441,
+  "fit_s": 29.504009738000036
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:yetirank",
+  "seed": 0,
+  "ndcg10": 0.6668747926244435,
+  "fit_s": 0.47874344000001656
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 0,
+  "ndcg10": 0.6783806921775597,
+  "fit_s": 0.6464498520000461
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg",
+  "seed": 0,
+  "ndcg10": 0.6465886831919524,
+  "fit_s": 0.45544723600005455
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "catboost:YetiRank",
+  "seed": 0,
+  "ndcg10": 0.6694132201128515,
+  "fit_s": 1.3115100370000619
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:yetirank",
+  "seed": 0,
+  "ndcg10": 0.9980289401211273,
+  "fit_s": 0.9086449720000473
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 0,
+  "ndcg10": 0.9972230229249064,
+  "fit_s": 1.3328476069999624
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg",
+  "seed": 0,
+  "ndcg10": 0.997290147549964,
+  "fit_s": 0.8800439729999425
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "catboost:YetiRank",
+  "seed": 0,
+  "ndcg10": 0.998096064746185,
+  "fit_s": 1.6284877919999872
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "lightgbm:lambdarank",
+  "seed": 0,
+  "ndcg10": 0.9980713001008926,
+  "fit_s": 13.640414144000033
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:yetirank",
+  "seed": 1,
+  "ndcg10": 0.7562129393255568,
+  "fit_s": 0.7356626970000661
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 1,
+  "ndcg10": 0.7552751968902183,
+  "fit_s": 0.9216335590000426
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg",
+  "seed": 1,
+  "ndcg10": 0.7745211519571207,
+  "fit_s": 0.7528814719998991
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "catboost:YetiRank",
+  "seed": 1,
+  "ndcg10": 0.7537887791461799,
+  "fit_s": 1.74346282099998
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "lightgbm:lambdarank",
+  "seed": 1,
+  "ndcg10": 0.7544439024685441,
+  "fit_s": 0.8044142700000521
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:yetirank",
+  "seed": 2,
+  "ndcg10": 0.7663597007212766,
+  "fit_s": 1.0002268420000746
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 2,
+  "ndcg10": 0.7370724223289361,
+  "fit_s": 1.1544524329999604
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg",
+  "seed": 2,
+  "ndcg10": 0.7534655279502467,
+  "fit_s": 0.748087923000071
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "catboost:YetiRank",
+  "seed": 2,
+  "ndcg10": 0.7526141078017302,
+  "fit_s": 1.8961724940000977
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "lightgbm:lambdarank",
+  "seed": 2,
+  "ndcg10": 0.7544439024685441,
+  "fit_s": 0.6058572910000066
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:yetirank",
+  "seed": 3,
+  "ndcg10": 0.7661679646816104,
+  "fit_s": 0.7613170270000182
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 3,
+  "ndcg10": 0.7541658454358011,
+  "fit_s": 1.1573510609999857
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg",
+  "seed": 3,
+  "ndcg10": 0.7415689509867002,
+  "fit_s": 0.9275843839999425
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "catboost:YetiRank",
+  "seed": 3,
+  "ndcg10": 0.7572952711595186,
+  "fit_s": 1.5741427279999698
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "lightgbm:lambdarank",
+  "seed": 3,
+  "ndcg10": 0.7544439024685441,
+  "fit_s": 0.6099172089999456
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:yetirank",
+  "seed": 4,
+  "ndcg10": 0.7579722105898794,
+  "fit_s": 0.8275035180000714
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 4,
+  "ndcg10": 0.7560516092926588,
+  "fit_s": 1.1283285159998968
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "alloy:rank:ndcg",
+  "seed": 4,
+  "ndcg10": 0.7344506892999324,
+  "fit_s": 0.6944311440000774
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "catboost:YetiRank",
+  "seed": 4,
+  "ndcg10": 0.7657360638957229,
+  "fit_s": 1.7679801570000109
+ },
+ {
+  "dataset": "lightgbm_rank_example",
+  "arm": "lightgbm:lambdarank",
+  "seed": 4,
+  "ndcg10": 0.7544439024685441,
+  "fit_s": 31.336989895999977
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:yetirank",
+  "seed": 1,
+  "ndcg10": 0.6779850049948255,
+  "fit_s": 0.4442725669999845
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 1,
+  "ndcg10": 0.6810714902551376,
+  "fit_s": 0.5722977399999536
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg",
+  "seed": 1,
+  "ndcg10": 0.6669213530987158,
+  "fit_s": 0.4132568559999754
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "catboost:YetiRank",
+  "seed": 1,
+  "ndcg10": 0.6857512222837764,
+  "fit_s": 1.0588871480000535
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:yetirank",
+  "seed": 2,
+  "ndcg10": 0.6730539029521346,
+  "fit_s": 0.4512525480000704
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 2,
+  "ndcg10": 0.670480743039965,
+  "fit_s": 0.6035615199999711
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg",
+  "seed": 2,
+  "ndcg10": 0.6580415763330332,
+  "fit_s": 0.43102530199996636
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "catboost:YetiRank",
+  "seed": 2,
+  "ndcg10": 0.7028155699717323,
+  "fit_s": 1.0131468890000406
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:yetirank",
+  "seed": 3,
+  "ndcg10": 0.6675557595711686,
+  "fit_s": 0.5052399020000848
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 3,
+  "ndcg10": 0.6696908836715506,
+  "fit_s": 0.5726337879999619
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg",
+  "seed": 3,
+  "ndcg10": 0.6800630479234636,
+  "fit_s": 0.46485597799994594
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "catboost:YetiRank",
+  "seed": 3,
+  "ndcg10": 0.6726603409807729,
+  "fit_s": 0.7740226629999825
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:yetirank",
+  "seed": 4,
+  "ndcg10": 0.6713951195311634,
+  "fit_s": 0.4615555549999044
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 4,
+  "ndcg10": 0.6727075493194816,
+  "fit_s": 0.5400003710000192
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "alloy:rank:ndcg",
+  "seed": 4,
+  "ndcg10": 0.667851062626741,
+  "fit_s": 0.4186671050000541
+ },
+ {
+  "dataset": "catboost_querywise",
+  "arm": "catboost:YetiRank",
+  "seed": 4,
+  "ndcg10": 0.6928826987493122,
+  "fit_s": 0.9631791179999709
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:yetirank",
+  "seed": 1,
+  "ndcg10": 0.9990218143720085,
+  "fit_s": 0.9255199500000799
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 1,
+  "ndcg10": 0.9971455504750688,
+  "fit_s": 0.8921056490000865
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg",
+  "seed": 1,
+  "ndcg10": 0.9971806629451413,
+  "fit_s": 0.6611956919999784
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "catboost:YetiRank",
+  "seed": 1,
+  "ndcg10": 0.9972126751001262,
+  "fit_s": 1.6443249919999516
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "lightgbm:lambdarank",
+  "seed": 1,
+  "ndcg10": 0.9980713001008926,
+  "fit_s": 0.5013667529999566
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:yetirank",
+  "seed": 2,
+  "ndcg10": 0.9990742503741764,
+  "fit_s": 0.7406155109999872
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 2,
+  "ndcg10": 0.9980289401211273,
+  "fit_s": 0.815909028999954
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg",
+  "seed": 2,
+  "ndcg10": 0.9981908607281177,
+  "fit_s": 0.6075102339999603
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "catboost:YetiRank",
+  "seed": 2,
+  "ndcg10": 0.9981735371960225,
+  "fit_s": 1.2920372940000107
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "lightgbm:lambdarank",
+  "seed": 2,
+  "ndcg10": 0.9980713001008926,
+  "fit_s": 0.419337890999941
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:yetirank",
+  "seed": 3,
+  "ndcg10": 0.9971879104548339,
+  "fit_s": 0.774150433999921
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 3,
+  "ndcg10": 0.9981735371960225,
+  "fit_s": 1.0157544950000101
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg",
+  "seed": 3,
+  "ndcg10": 0.9990742503741764,
+  "fit_s": 0.7442020309999862
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "catboost:YetiRank",
+  "seed": 3,
+  "ndcg10": 0.998233220707883,
+  "fit_s": 1.4232600889999958
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "lightgbm:lambdarank",
+  "seed": 3,
+  "ndcg10": 0.9980713001008926,
+  "fit_s": 0.5004253350000454
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:yetirank",
+  "seed": 4,
+  "ndcg10": 0.9973252600200364,
+  "fit_s": 0.7804935030000024
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg_smoothed",
+  "seed": 4,
+  "ndcg10": 0.9971282269429735,
+  "fit_s": 0.9284297379999771
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "alloy:rank:ndcg",
+  "seed": 4,
+  "ndcg10": 0.9990742503741764,
+  "fit_s": 0.6425579060000928
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "catboost:YetiRank",
+  "seed": 4,
+  "ndcg10": 0.99813842472595,
+  "fit_s": 1.2078525389999868
+ },
+ {
+  "dataset": "synthetic_ranking",
+  "arm": "lightgbm:lambdarank",
+  "seed": 4,
+  "ndcg10": 0.9980713001008926,
+  "fit_s": 0.3944193300000052
+ }
+]

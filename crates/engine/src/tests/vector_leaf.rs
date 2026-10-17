@@ -342,6 +342,12 @@ fn vector_leaves_reject_unsupported_options() {
             multiclass_hessian: MulticlassHessian::Full,
             ..vector_params(TreeGrowth::Level)
         },
+        TrainParams {
+            multiclass_hessian: MulticlassHessian::Full,
+            grn_strength: 1.0,
+            grn_form: alloygbm_core::GrnForm::PerRow,
+            ..vector_params(TreeGrowth::Level)
+        },
     ];
     for params in rejected {
         let error = fit(params, controls(2, TreeGrowth::Level), &dataset, &binned)

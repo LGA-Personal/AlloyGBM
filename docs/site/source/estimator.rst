@@ -51,22 +51,31 @@ Core parameters
   when nothing below rules vector leaves out, and ``"per_class_trees"``
   otherwise; the choice is in ``multiclass_strategy_`` after fitting. Set
   ``"per_class_trees"`` or ``"vector_leaves"`` to override it.
-  ``"per_class_trees"`` grows
-  K trees per round; ``"vector_leaves"`` grows one tree per round whose splits
-  are scored on the sum of per-class Newton gains and whose leaves hold one
-  Newton step per class. It is stored as K per-class trees sharing one
-  structure, so prediction, SHAP and saved models are unchanged. Vector leaves
-  need about twice the rounds, so ``n_estimators="auto"`` doubles their round
-  cap. Not supported
-  with ``training_mode="morph"``, ``leaf_model="linear"``,
+  ``"per_class_trees"`` grows K trees per round; ``"vector_leaves"`` grows one
+  tree per round whose splits are scored on the sum of per-class Newton gains
+  and whose leaves hold one Newton step per class. It is stored as K per-class
+  trees sharing one structure, so prediction, SHAP and saved models are
+  unchanged. Vector leaves need about twice the rounds, so
+  ``n_estimators="auto"`` doubles their round cap. Not supported with
+  ``training_mode="morph"``, ``leaf_model="linear"``,
   ``leaf_solver="dro"``, ``neutralization="split_penalty"``,
   ``interaction_constraints`` or native categorical splits.
 - ``multiclass_hessian: str = "diagonal"`` -- Newton Hessian for multiclass
   softmax: ``"diagonal"`` (``p_k (1 - p_k)``), ``"full"`` (vector leaves only,
   which ``"auto"`` then picks; at most 16 classes: each leaf solves with the
   full softmax Hessian ``diag(p) - p p^T``; splits are still scored on the
-  diagonal) or
-  ``"abs_residual"`` (``|p_k - y_k|``).
+  diagonal) or ``"abs_residual"`` (``|p_k - y_k|``).
+- ``glm_hessian: str = "exact"`` -- curvature for the log-link objectives
+  (``"poisson"``, ``"gamma"``, ``"tweedie"``). ``"bounded"`` uses XGBoost's
+  bounded-step pseudo-Hessians, which cap each Newton leaf step and replace
+  ``poisson_max_delta_step``. Ignored by other objectives.
+- ``grn_strength: float = 0.0`` -- gradient-regularized Newton: each round adds
+  ``grn_strength * sqrt(rms(g))`` to the leaf solve, fading as the gradients
+  shrink. ``0.0`` is off. Single-output estimators and multiclass
+  ``GBMClassifier``; not ``MultiLabelGBMRanker(multi_label_mode="joint")``.
+- ``grn_form: str = "per_leaf"`` -- ``"per_leaf"`` adds the GRN term to the
+  leaf L2 denominator; ``"per_row"`` adds it to every row's Hessian (the
+  paper's form).
 - ``quantile_alpha: float = 0.5``
   - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 

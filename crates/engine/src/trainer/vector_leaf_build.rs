@@ -1204,6 +1204,14 @@ pub(crate) fn validate_multiclass_hessian(
             "multiclass_hessian='full' does not support factor neutralization".to_string(),
         ));
     }
+    // The full-Hessian solve rebuilds each leaf's Hessian from the softmax
+    // probabilities, so a per-row GRN term added to the row Hessians would be
+    // dropped silently.
+    if params.grn_strength > 0.0 && params.grn_form == alloygbm_core::GrnForm::PerRow {
+        return Err(EngineError::InvalidConfig(
+            "multiclass_hessian='full' does not support grn_form='per_row'".to_string(),
+        ));
+    }
     Ok(())
 }
 

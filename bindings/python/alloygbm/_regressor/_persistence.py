@@ -86,6 +86,12 @@ class _PersistenceMixin:
             self.multiclass_strategy = "per_class_trees"
         if not hasattr(self, "multiclass_hessian"):
             self.multiclass_hessian = "diagonal"
+        if not hasattr(self, "glm_hessian"):
+            self.glm_hessian = "exact"
+        if not hasattr(self, "grn_strength"):
+            self.grn_strength = 0.0
+        if not hasattr(self, "grn_form"):
+            self.grn_form = "per_leaf"
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
         if self._is_fitted and not hasattr(self, "feature_bundling_diagnostics_"):

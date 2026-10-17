@@ -147,7 +147,7 @@ impl JointObjective {
                 obj.initial_prediction(targets, None).unwrap_or(0.0)
             }
             Self::Gamma => {
-                let obj = GammaObjective;
+                let obj = GammaObjective::default();
                 obj.initial_prediction(targets, None).unwrap_or(0.0)
             }
             Self::Tweedie { variance_power } => {
@@ -250,7 +250,7 @@ impl JointObjective {
                     .map_err(|e| e.to_string())
             }
             Self::Gamma => {
-                let obj = GammaObjective;
+                let obj = GammaObjective::default();
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
             }

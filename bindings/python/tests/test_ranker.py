@@ -37,6 +37,7 @@ class GBMRankerObjectiveTests(unittest.TestCase):
         "rank:xendcg",
         "queryrmse",
         "yetirank",
+        "rank:ndcg_smoothed",
     ]
 
     def test_all_objectives_train_without_error(self) -> None:
@@ -62,6 +63,38 @@ class GBMRankerObjectiveTests(unittest.TestCase):
         self.assertEqual(GBMRanker(ranking_objective="rank:xendcg")._objective_name(), "rank_xendcg")
         self.assertEqual(GBMRanker(ranking_objective="queryrmse")._objective_name(), "queryrmse")
         self.assertEqual(GBMRanker(ranking_objective="yetirank")._objective_name(), "yetirank")
+        self.assertEqual(
+            GBMRanker(ranking_objective="rank:ndcg_smoothed")._objective_name(),
+            "rank_ndcg_smoothed",
+        )
+
+    def test_yetirank_differs_from_ndcg_smoothed_and_learns(self) -> None:
+        # "yetirank" was LambdaMART on noise-smoothed scores up to v1.0.0; that
+        # objective is now "rank:ndcg_smoothed" and "yetirank" is the published
+        # YetiRank, so the two train different models.
+        X, y, group = _make_ranking_dataset(n_queries=30)
+        preds = {}
+        for obj in ("yetirank", "rank:ndcg_smoothed"):
+            ranker = GBMRanker(
+                ranking_objective=obj,
+                n_estimators=20,
+                seed=7,
+                training_policy="manual",
+                min_split_gain=0.0,
+            )
+            ranker.fit(X, y, group=group)
+            preds[obj] = ranker.predict(X)
+            self.assertGreater(ndcg(y, preds[obj], group=group, k=10), 0.9)
+        self.assertFalse(np.allclose(preds["yetirank"], preds["rank:ndcg_smoothed"]))
+
+    def test_yetirank_is_reproducible_for_a_seed(self) -> None:
+        X, y, group = _make_ranking_dataset()
+        runs = []
+        for _ in range(2):
+            ranker = GBMRanker(ranking_objective="yetirank", n_estimators=10, seed=3)
+            ranker.fit(X, y, group=group)
+            runs.append(ranker.predict(X))
+        np.testing.assert_array_equal(runs[0], runs[1])
 
     def test_invalid_objective_raises(self) -> None:
         X, y, group = _make_ranking_dataset()

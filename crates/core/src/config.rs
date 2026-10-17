@@ -88,6 +88,60 @@ pub enum LeafSolverKind {
     Dro,
 }
 
+/// Curvature used by the log-link objectives (Poisson, Gamma, Tweedie).
+///
+/// `Exact` (default) keeps today's Hessians: Poisson `μ·exp(max_delta_step)`,
+/// Gamma `y/μ`, Tweedie `μ^(2-p)`. `Bounded` uses the bounded-step
+/// pseudo-Hessians from XGBoost (dmlc/xgboost#12538): a convex blend of the
+/// exact curvature and its `y`-free counterpart that caps each Newton leaf
+/// step (Poisson steps lie in `(-3/2, 3)`, Gamma steps in `(-3, 3/2)`) and
+/// keeps the quadratic gain from overstating the real loss reduction.
+/// `Bounded` ignores `poisson_max_delta_step`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GlmHessian {
+    #[default]
+    Exact,
+    Bounded,
+}
+
+impl GlmHessian {
+    pub fn parse(value: &str) -> CoreResult<Self> {
+        match value {
+            "exact" => Ok(Self::Exact),
+            "bounded" => Ok(Self::Bounded),
+            other => Err(CoreError::InvalidConfig(format!(
+                "glm_hessian must be 'exact' or 'bounded' (got '{other}')"
+            ))),
+        }
+    }
+}
+
+/// How the gradient-regularized Newton (GRN) term enters the leaf solve.
+///
+/// Each round GRN computes `λ_k = grn_strength · sqrt(‖g_k‖)`, with
+/// `‖g_k‖ = sqrt(mean_i g_i²)` over that round's gradients (Mishchenko 2023).
+/// `PerLeaf` adds `λ_k` to the split and leaf L2 denominator
+/// (`-G / (H + λ + λ_k)`); `PerRow` adds `λ_k·w_i` to every row's Hessian,
+/// which is the paper's per-row regularizer (`-G / (H + λ_k·Σw)` in a leaf).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GrnForm {
+    #[default]
+    PerLeaf,
+    PerRow,
+}
+
+impl GrnForm {
+    pub fn parse(value: &str) -> CoreResult<Self> {
+        match value {
+            "per_leaf" => Ok(Self::PerLeaf),
+            "per_row" => Ok(Self::PerRow),
+            other => Err(CoreError::InvalidConfig(format!(
+                "grn_form must be 'per_leaf' or 'per_row' (got '{other}')"
+            ))),
+        }
+    }
+}
+
 /// DART tree-weight normalization policy.  Mirrors LightGBM/MART
 /// terminology — see `crates/engine/src/dart.rs` for how the policy
 /// affects per-round leaf-weight rescaling.
@@ -290,6 +344,17 @@ pub struct TrainParams {
     /// Newton Hessian for multiclass softmax; see [`MulticlassHessian`].
     /// `Diagonal` (default) keeps the existing leaf and split math.
     pub multiclass_hessian: MulticlassHessian,
+    /// Curvature for the log-link objectives. `Exact` (default) is unchanged
+    /// behavior; ignored by every other objective. See [`GlmHessian`].
+    pub glm_hessian: GlmHessian,
+    /// Gradient-regularized Newton strength (`C·sqrt(M)` in the paper). `0.0`
+    /// (default) disables GRN and leaves training byte-identical. Applies to
+    /// the single-output and multiclass trainers, not the joint multi-output
+    /// trainer.
+    pub grn_strength: f32,
+    /// Where the GRN term enters the leaf solve. Ignored when
+    /// `grn_strength == 0`. See [`GrnForm`].
+    pub grn_form: GrnForm,
 }
 
 impl Default for TrainParams {
@@ -329,6 +394,9 @@ impl Default for TrainParams {
             split_noise_strength: None,
             multiclass_strategy: MulticlassStrategy::PerClassTrees,
             multiclass_hessian: MulticlassHessian::Diagonal,
+            glm_hessian: GlmHessian::Exact,
+            grn_strength: 0.0,
+            grn_form: GrnForm::PerLeaf,
         }
     }
 }

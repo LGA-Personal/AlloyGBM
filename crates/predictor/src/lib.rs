@@ -2067,6 +2067,9 @@ mod tests {
             split_noise_strength: None,
             multiclass_strategy: alloygbm_core::MulticlassStrategy::PerClassTrees,
             multiclass_hessian: alloygbm_core::MulticlassHessian::Diagonal,
+            glm_hessian: alloygbm_core::GlmHessian::Exact,
+            grn_strength: 0.0,
+            grn_form: alloygbm_core::GrnForm::PerLeaf,
         }
     }
 

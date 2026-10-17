@@ -35,9 +35,9 @@ use alloygbm_engine::{
     EngineError, GammaObjective, IterationRunSummary, LambdaMARTObjective,
     MultiClassIterationRunSummary, MultiClassSoftmaxObjective, MultiClassTrainedModel,
     MultiClassWarmStartState, ObjectiveFamily, PairwiseRankingObjective, PerRoundMetricCallback,
-    PoissonObjective, QuantileObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel,
-    Trainer, TrainingPolicyMode, TweedieObjective, WarmStartState, XeNDCGObjective,
-    YetiRankObjective,
+    PoissonObjective, QuantileObjective, QueryRMSEObjective, SmoothedNdcgObjective,
+    SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode, TweedieObjective,
+    WarmStartState, XeNDCGObjective, YETIRANK_DEFAULT_PERMUTATIONS, YetiRankObjective,
 };
 use numpy::{PyArray2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
@@ -569,6 +569,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     let user_seed = params.seed;
     let tweedie_variance_power = params.tweedie_variance_power;
     let poisson_max_delta_step = params.poisson_max_delta_step;
+    let glm_hessian = params.glm_hessian;
     let quantile_alpha = params.quantile_alpha;
     let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
     let backend = CpuBackend;
@@ -587,9 +588,8 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     let objective_family = match objective {
         "binary_crossentropy" => ObjectiveFamily::BinaryClassification,
         "multiclass_softmax" => ObjectiveFamily::MulticlassClassification,
-        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
-            ObjectiveFamily::Ranking
-        }
+        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "rank_ndcg_smoothed"
+        | "yetirank" => ObjectiveFamily::Ranking,
         _ => ObjectiveFamily::Regression,
     };
 
@@ -656,10 +656,10 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
         "squared_error" => run_training!(&SquaredErrorObjective),
         "binary_crossentropy" => run_training!(&BinaryCrossEntropyObjective),
         "poisson" => {
-            let obj = PoissonObjective::new(poisson_max_delta_step);
+            let obj = PoissonObjective::new(poisson_max_delta_step).with_glm_hessian(glm_hessian);
             run_training!(&obj)
         }
-        "gamma" => run_training!(&GammaObjective),
+        "gamma" => run_training!(&GammaObjective::default().with_glm_hessian(glm_hessian)),
         "quantile" => {
             let obj = QuantileObjective {
                 alpha: quantile_alpha,
@@ -667,10 +667,11 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
             run_training!(&obj)
         }
         "tweedie" => {
-            let obj = TweedieObjective::new(tweedie_variance_power)?;
+            let obj = TweedieObjective::new(tweedie_variance_power)?.with_glm_hessian(glm_hessian);
             run_training!(&obj)
         }
-        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
+        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "rank_ndcg_smoothed"
+        | "yetirank" => {
             let group_id = prepared.dataset.group_id.as_ref().ok_or_else(|| {
                 EngineError::ContractViolation(format!(
                     "objective '{objective}' requires group_id to be provided"
@@ -714,9 +715,25 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                     }
                     run_training!(&obj)
                 }
+                "rank_ndcg_smoothed" => {
+                    let mut obj = SmoothedNdcgObjective::new_with_sigma(
+                        group_id,
+                        10,
+                        user_seed,
+                        ranking_sigma,
+                    )?;
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
                 "yetirank" => {
-                    let mut obj =
-                        YetiRankObjective::new_with_sigma(group_id, 10, user_seed, ranking_sigma)?;
+                    let mut obj = YetiRankObjective::new_with_sigma(
+                        group_id,
+                        YETIRANK_DEFAULT_PERMUTATIONS,
+                        user_seed,
+                        ranking_sigma,
+                    )?;
                     if let Some(vg) = val_group_id {
                         obj = obj.with_validation_group(vg);
                     }
@@ -868,7 +885,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
             return Err(EngineError::InvalidConfig(format!(
                 "unknown objective '{other}', expected one of: squared_error, \
                  binary_crossentropy, multiclass_softmax, custom, queryrmse, rank_pairwise, \
-                 rank_ndcg, rank_xendcg, yetirank, poisson, gamma, tweedie"
+                 rank_ndcg, rank_xendcg, rank_ndcg_smoothed, yetirank, poisson, gamma, tweedie"
             )));
         }
     };
@@ -1476,7 +1493,10 @@ pub(crate) fn train_regression_artifact_dense(
     early_stopping_relative_tolerance=0.0,
     split_noise_strength=None::<f32>,
     multiclass_strategy="per_class_trees",
-    multiclass_hessian="diagonal"
+    multiclass_hessian="diagonal",
+    glm_hessian="exact",
+    grn_strength=0.0,
+    grn_form="per_leaf"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1565,6 +1585,9 @@ pub(crate) fn train_regression_artifact_with_summary(
     split_noise_strength: Option<f32>,
     multiclass_strategy: &str,
     multiclass_hessian: &str,
+    glm_hessian: &str,
+    grn_strength: f32,
+    grn_form: &str,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -1637,6 +1660,7 @@ pub(crate) fn train_regression_artifact_with_summary(
         parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
     params.multiclass_hessian =
         parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
+    apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -1870,7 +1894,10 @@ mod tests {
     early_stopping_relative_tolerance=0.0,
     split_noise_strength=None::<f32>,
     multiclass_strategy="per_class_trees",
-    multiclass_hessian="diagonal"
+    multiclass_hessian="diagonal",
+    glm_hessian="exact",
+    grn_strength=0.0,
+    grn_form="per_leaf"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -1962,6 +1989,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     split_noise_strength: Option<f32>,
     multiclass_strategy: &str,
     multiclass_hessian: &str,
+    glm_hessian: &str,
+    grn_strength: f32,
+    grn_form: &str,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -2034,6 +2064,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
     params.multiclass_hessian =
         parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
+    apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -2209,7 +2240,10 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     early_stopping_relative_tolerance=0.0,
     split_noise_strength=None::<f32>,
     multiclass_strategy="per_class_trees",
-    multiclass_hessian="diagonal"
+    multiclass_hessian="diagonal",
+    glm_hessian="exact",
+    grn_strength=0.0,
+    grn_form="per_leaf"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -2301,6 +2335,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     split_noise_strength: Option<f32>,
     multiclass_strategy: &str,
     multiclass_hessian: &str,
+    glm_hessian: &str,
+    grn_strength: f32,
+    grn_form: &str,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let values = dense_input_to_f32_vec(values_bytes)?;
@@ -2379,6 +2416,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
     params.multiclass_hessian =
         parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
+    apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -2436,4 +2474,20 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
             .map_err(engine_error_to_pyerr)
         })
     })
+}
+
+/// Parse the opt-in leaf-math kwargs (`glm_hessian`, `grn_strength`,
+/// `grn_form`) onto `params`. Defaults leave `params` unchanged.
+fn apply_leaf_math_params(
+    params: &mut TrainParams,
+    glm_hessian: &str,
+    grn_strength: f32,
+    grn_form: &str,
+) -> PyResult<()> {
+    params.glm_hessian = alloygbm_core::GlmHessian::parse(glm_hessian)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    params.grn_form = alloygbm_core::GrnForm::parse(grn_form)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    params.grn_strength = grn_strength;
+    Ok(())
 }

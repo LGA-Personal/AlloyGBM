@@ -1,8 +1,9 @@
 //! Ranking objectives and shared NDCG helpers.
 //!
 //! This module bundles all learning-to-rank objectives (`queryrmse`,
-//! `rank:pairwise`, `rank:ndcg`, `rank_xendcg`, `yetirank`) plus the DCG/NDCG
-//! computation helpers and `compute_group_boundaries`. The objectives share
+//! `rank:pairwise`, `rank:ndcg`, `rank_xendcg`, `rank:ndcg_smoothed`,
+//! `yetirank`) plus the DCG/NDCG computation helpers and
+//! `compute_group_boundaries`. The objectives share
 //! these helpers so they live together.
 
 use alloygbm_core::GradientPair;
@@ -808,16 +809,21 @@ impl ObjectiveOps for XeNDCGObjective {
     }
 }
 
-// ── YetiRank Objective ───────────────────────────────────────────────────
+// ── Smoothed NDCG Objective (`rank:ndcg_smoothed`) ──────────────────────
 
-/// YetiRank / YetiRankPairwise ranking objective.
+/// LambdaMART NDCG on noise-smoothed scores (`rank:ndcg_smoothed`).
 ///
-/// Uses stochastic pairwise comparisons with NDCG-weighted gradients.
-/// Each gradient computation samples random permutations to estimate
-/// position-dependent importance weights, providing a smoother gradient
-/// signal than deterministic LambdaMART.
+/// Every pair of documents with different labels gets a pairwise logistic
+/// gradient weighted by its |ΔNDCG|, where the positions behind ΔNDCG come
+/// from scores perturbed by uniform noise in [-0.5, 0.5] and averaged over
+/// `num_permutations` draws. The noise draws depend only on the seed, the
+/// group and the permutation index, so they repeat every round.
+///
+/// Until v1.0.x this objective shipped under the name `yetirank`. It is
+/// not the published YetiRank (see [`YetiRankObjective`]) and is kept
+/// unchanged under its own name so earlier results stay reproducible.
 #[derive(Debug, Clone, PartialEq)]
-pub struct YetiRankObjective {
+pub struct SmoothedNdcgObjective {
     pub group_boundaries: Vec<usize>,
     pub validation_group_boundaries: Option<Vec<usize>>,
     /// Number of random permutations to sample per query per gradient call.
@@ -827,7 +833,7 @@ pub struct YetiRankObjective {
     pub sigma: f32,
 }
 
-impl YetiRankObjective {
+impl SmoothedNdcgObjective {
     pub fn new(group_id: &[u32], num_permutations: usize, seed: u64) -> Self {
         Self {
             group_boundaries: compute_group_boundaries(group_id),
@@ -870,9 +876,9 @@ impl YetiRankObjective {
     }
 }
 
-impl ObjectiveOps for YetiRankObjective {
+impl ObjectiveOps for SmoothedNdcgObjective {
     fn objective_name(&self) -> &str {
-        "yetirank"
+        "rank_ndcg_smoothed"
     }
 
     fn initial_prediction(
@@ -986,6 +992,271 @@ impl ObjectiveOps for YetiRankObjective {
             .collect();
         merge_group_chunks(chunks, &mut grads, &mut hesses);
         gradient_pairs_from_parts(&grads, &hesses)
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        let boundaries = resolve_boundaries_for_len(
+            &self.group_boundaries,
+            &self.validation_group_boundaries,
+            predictions.len(),
+        );
+        let num_groups = boundaries.len() - 1;
+        if num_groups == 0 {
+            return Ok(0.0);
+        }
+        let mut ndcg_sum = 0.0_f64;
+        for g in 0..num_groups {
+            let start = boundaries[g];
+            let end = boundaries[g + 1];
+            ndcg_sum += ndcg_for_group(&targets[start..end], &predictions[start..end]) as f64;
+        }
+        Ok((1.0 - ndcg_sum / num_groups as f64) as f32)
+    }
+
+    fn requires_group_id(&self) -> bool {
+        true
+    }
+
+    fn supports_leaf_refinement(&self) -> bool {
+        false
+    }
+}
+
+// ── YetiRank Objective ───────────────────────────────────────────────────
+
+/// CatBoost's default number of sampled permutations per query.
+pub const YETIRANK_DEFAULT_PERMUTATIONS: usize = 10;
+/// CatBoost's default position decay `b` for YetiRank pair weights.
+pub const YETIRANK_DEFAULT_DECAY: f32 = 0.85;
+
+/// YetiRank (Gulin, Kuralenok & Pavlov, 2011), as implemented by CatBoost
+/// and evaluated in Lyzhin et al., "Which Tricks Are Important for Learning
+/// to Rank?" (ICML 2023).
+///
+/// For each query and each of `num_permutations` draws, every document's
+/// score gets independent standard Logistic noise and the documents are
+/// sorted by the noisy score. Only documents that are neighbours in that
+/// noisy order form pairs: the pair at positions `(p, p + 1)` (0-based)
+/// gets weight `|r_a - r_b| * decay^p / num_permutations`, where `r` is the
+/// relevance label. The weighted pairs then train a pairwise logistic
+/// (RankNet) loss on the *un-noised* scores.
+///
+/// Noise is redrawn every round: the per-query random stream is seeded by
+/// the base seed, the query index, and a hash of the query's current
+/// scores, so a fit is reproducible for a fixed seed without the objective
+/// holding mutable state, and warm-started fits draw the same noise as an
+/// uninterrupted fit would at the same scores.
+///
+/// CatBoost also multiplies pair weights by a constant 0.15; Newton leaves
+/// are invariant to a common scale of gradients and hessians except through
+/// L2 regularization, so the constant is left out to keep `lambda_l2`
+/// comparable with the other ranking objectives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct YetiRankObjective {
+    pub group_boundaries: Vec<usize>,
+    pub validation_group_boundaries: Option<Vec<usize>>,
+    /// Number of noisy permutations sampled per query per round.
+    pub num_permutations: usize,
+    /// Base seed for reproducible sampling.
+    pub seed: u64,
+    /// Sigmoid sharpness of the pairwise logistic loss.
+    pub sigma: f32,
+    /// Position decay `b`: the neighbour pair starting at 0-based position
+    /// `p` is weighted by `decay^p`.
+    pub decay: f32,
+}
+
+/// SplitMix64 step: advance `state` and return the next pseudo-random u64.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// Hash of a query's current scores, so per-round noise differs as the
+/// model's scores change.
+fn hash_scores(scores: &[f32]) -> u64 {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    for &score in scores {
+        state ^= u64::from(score.to_bits());
+        let _ = splitmix64(&mut state);
+    }
+    state
+}
+
+/// One draw from the standard Logistic distribution.
+fn logistic_noise(state: &mut u64) -> f32 {
+    // 53 random bits mapped to the open interval (0, 1).
+    let u = ((splitmix64(state) >> 11) as f64 + 0.5) / (1_u64 << 53) as f64;
+    (u / (1.0 - u)).ln() as f32
+}
+
+impl YetiRankObjective {
+    pub fn new(group_id: &[u32], num_permutations: usize, seed: u64) -> Self {
+        Self {
+            group_boundaries: compute_group_boundaries(group_id),
+            validation_group_boundaries: None,
+            num_permutations: num_permutations.max(1),
+            seed,
+            sigma: 1.0,
+            decay: YETIRANK_DEFAULT_DECAY,
+        }
+    }
+
+    pub fn new_with_sigma(
+        group_id: &[u32],
+        num_permutations: usize,
+        seed: u64,
+        sigma: f32,
+    ) -> EngineResult<Self> {
+        let mut objective = Self::new(group_id, num_permutations, seed);
+        objective.sigma = validate_ranking_sigma(sigma)?;
+        Ok(objective)
+    }
+
+    /// Override the position decay `b` (must be in `(0, 1]`).
+    pub fn with_decay(mut self, decay: f32) -> EngineResult<Self> {
+        if !decay.is_finite() || decay <= 0.0 || decay > 1.0 {
+            return Err(EngineError::InvalidConfig(
+                "yetirank decay must be in (0, 1]".to_string(),
+            ));
+        }
+        self.decay = decay;
+        Ok(self)
+    }
+
+    pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
+        self.validation_group_boundaries = Some(compute_group_boundaries(validation_group_id));
+        self
+    }
+
+    /// Gradients and hessians for one query group.
+    fn group_gradients(
+        &self,
+        group_idx: usize,
+        group_scores: &[f32],
+        group_labels: &[f32],
+        group_grads: &mut [f32],
+        group_hesses: &mut [f32],
+    ) {
+        let group_len = group_scores.len();
+        if group_len <= 1 {
+            return;
+        }
+        let first_label = group_labels[0];
+        if group_labels.iter().all(|&label| label == first_label) {
+            return;
+        }
+        let inv_perms = 1.0 / self.num_permutations as f32;
+        let round_key = hash_scores(group_scores);
+        let mut rng_state = self.seed ^ round_key;
+        rng_state ^= (group_idx as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
+        let _ = splitmix64(&mut rng_state);
+
+        let mut noisy: Vec<(f32, usize)> = Vec::with_capacity(group_len);
+        for _ in 0..self.num_permutations {
+            noisy.clear();
+            for (idx, &score) in group_scores.iter().enumerate() {
+                noisy.push((score + logistic_noise(&mut rng_state), idx));
+            }
+            noisy.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            let mut position_weight = inv_perms;
+            for window in noisy.windows(2) {
+                let (a, b) = (window[0].1, window[1].1);
+                let label_gap = group_labels[a] - group_labels[b];
+                if label_gap != 0.0 {
+                    let (hi, lo) = if label_gap > 0.0 { (a, b) } else { (b, a) };
+                    let weight = label_gap.abs() * position_weight;
+                    let rho = sigmoid(-self.sigma * (group_scores[hi] - group_scores[lo]));
+                    let lambda = -self.sigma * rho * weight;
+                    let hess_pair = self.sigma * self.sigma * rho * (1.0 - rho) * weight;
+                    group_grads[hi] += lambda;
+                    group_grads[lo] -= lambda;
+                    group_hesses[hi] += hess_pair;
+                    group_hesses[lo] += hess_pair;
+                }
+                position_weight *= self.decay;
+            }
+        }
+    }
+
+    fn yetirank_gradients(&self, predictions: &[f32], targets: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let n = predictions.len();
+        let mut grads = vec![0.0_f32; n];
+        let mut hesses = vec![0.0_f32; n];
+        let chunks: Vec<GroupGradientChunk> = self
+            .group_boundaries
+            .par_windows(2)
+            .enumerate()
+            .map(|(group_idx, group)| {
+                let start = group[0];
+                let end = group[1];
+                let mut group_grads = vec![0.0_f32; end - start];
+                let mut group_hesses = vec![0.0_f32; end - start];
+                if end > start {
+                    self.group_gradients(
+                        group_idx,
+                        &predictions[start..end],
+                        &targets[start..end],
+                        &mut group_grads,
+                        &mut group_hesses,
+                    );
+                }
+                GroupGradientChunk {
+                    start,
+                    grads: group_grads,
+                    hesses: group_hesses,
+                }
+            })
+            .collect();
+        merge_group_chunks(chunks, &mut grads, &mut hesses);
+        (grads, hesses)
+    }
+}
+
+impl ObjectiveOps for YetiRankObjective {
+    fn objective_name(&self) -> &str {
+        "yetirank"
+    }
+
+    fn initial_prediction(
+        &self,
+        _targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        Ok(0.0)
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        let (grads, hesses) = self.yetirank_gradients(predictions, targets);
+        gradient_pairs_from_parts(&grads, &hesses)
+    }
+
+    fn compute_gradients_into(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        let (grads, hesses) = self.yetirank_gradients(predictions, targets);
+        fill_gradient_pair_buffer(&grads, &hesses, buffer)
     }
 
     fn loss(
@@ -1180,7 +1451,7 @@ mod tests {
         pairs_from_parts(&grads, &hesses)
     }
 
-    fn serial_yetirank_reference(
+    fn serial_ndcg_smoothed_reference(
         boundaries: &[usize],
         predictions: &[f32],
         targets: &[f32],
@@ -1213,7 +1484,7 @@ mod tests {
                 let mut noisy_order: Vec<usize> = (0..group_len).collect();
                 let mut noisy_scores = group_scores.to_vec();
                 for score in &mut noisy_scores {
-                    let r = YetiRankObjective::next_random(&mut rng_state);
+                    let r = SmoothedNdcgObjective::next_random(&mut rng_state);
                     let noise = ((r as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32;
                     *score += noise * 0.5;
                 }
@@ -1419,7 +1690,8 @@ mod tests {
 
         assert!(PairwiseRankingObjective::new_with_sigma(&group_id, 0.0).is_err());
         assert!(LambdaMARTObjective::new_with_sigma(&group_id, -1.0).is_err());
-        assert!(YetiRankObjective::new_with_sigma(&group_id, 3, 17, f32::INFINITY).is_err());
+        assert!(SmoothedNdcgObjective::new_with_sigma(&group_id, 3, 17, f32::INFINITY).is_err());
+        assert!(YetiRankObjective::new_with_sigma(&group_id, 3, 17, 0.0).is_err());
     }
 
     #[test]
@@ -1437,15 +1709,15 @@ mod tests {
     }
 
     #[test]
-    fn yetirank_parallel_gradients_match_serial_reference() {
+    fn ndcg_smoothed_parallel_gradients_match_serial_reference() {
         let group_id = [0, 0, 0, 1, 1, 1];
         let predictions = [0.6, -0.2, 0.1, 0.9, 0.0, -0.5];
         let targets = [2.0, 1.0, 0.0, 3.0, 1.0, 0.0];
-        let objective = YetiRankObjective::new(&group_id, 3, 17);
+        let objective = SmoothedNdcgObjective::new(&group_id, 3, 17);
         let actual = objective
             .compute_gradients(&predictions, &targets, None)
             .unwrap();
-        let expected = serial_yetirank_reference(
+        let expected = serial_ndcg_smoothed_reference(
             &compute_group_boundaries(&group_id),
             &predictions,
             &targets,
@@ -1453,6 +1725,127 @@ mod tests {
             17,
         );
         assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn yetirank_parallel_gradients_match_serial_reference() {
+        let group_id = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 2, 2];
+        let predictions = [
+            0.6, -0.2, 0.1, 0.3, 0.9, 0.0, -0.5, 0.2, 0.2, -0.1, 0.4, 0.0,
+        ];
+        let targets = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 0.0, 2.0, 1.0, 4.0, 0.0];
+        let objective = YetiRankObjective::new(&group_id, 4, 17);
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+
+        let boundaries = compute_group_boundaries(&group_id);
+        let mut grads = vec![0.0_f32; predictions.len()];
+        let mut hesses = vec![0.0_f32; predictions.len()];
+        for (group_idx, group) in boundaries.windows(2).enumerate() {
+            let (start, end) = (group[0], group[1]);
+            objective.group_gradients(
+                group_idx,
+                &predictions[start..end],
+                &targets[start..end],
+                &mut grads[start..end],
+                &mut hesses[start..end],
+            );
+        }
+        let expected = gradient_pairs_from_parts(&grads, &hesses).unwrap();
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+
+        let mut buffer = Vec::new();
+        objective
+            .compute_gradients_into(&predictions, &targets, None, &mut buffer)
+            .unwrap();
+        assert_gradient_pairs_close(&buffer, &expected, 0.0);
+    }
+
+    #[test]
+    fn yetirank_empty_group_slice_is_a_no_op() {
+        let objective = YetiRankObjective::new(&[0], 10, 7);
+        objective.group_gradients(0, &[], &[], &mut [], &mut []);
+    }
+
+    #[test]
+    fn yetirank_pairs_only_noisy_neighbours_with_position_decay() {
+        // Scores are 20 apart, so Logistic noise essentially never reorders
+        // them: the noisy order is always doc 2, doc 1, doc 0. The pairs are
+        // (2, 1) at position 0 and (1, 0) at position 1; docs 0 and 2 are
+        // never neighbours, so they never form a pair.
+        let group_id = [0, 0, 0];
+        let predictions = [-20.0, 0.0, 20.0];
+        let targets = [2.0, 1.0, 0.0];
+        let objective = YetiRankObjective::new(&group_id, 10, 7);
+        let decay = objective.decay;
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        // Each mis-ordered pair has rho ~= 1, so lambda ~= -weight.
+        let expected = [-decay, -1.0 + decay, 1.0];
+        for (pair, want) in actual.iter().zip(expected) {
+            assert!((pair.grad - want).abs() < 1e-5, "{} vs {want}", pair.grad);
+        }
+    }
+
+    #[test]
+    fn yetirank_two_document_group_weights_by_label_gap() {
+        // Two documents are always neighbours at position 0, so the pair
+        // weight is exactly the label gap whatever the noise draws.
+        let group_id = [0, 0];
+        let predictions = [0.3, -0.4];
+        let targets = [0.0, 3.0];
+        let objective = YetiRankObjective::new_with_sigma(&group_id, 5, 11, 2.0).unwrap();
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        let rho = sigmoid(-2.0 * (predictions[1] - predictions[0]));
+        let lambda = -2.0 * rho * 3.0;
+        let hess = 4.0 * rho * (1.0 - rho) * 3.0;
+        let expected = pairs_from_parts(&[-lambda, lambda], &[hess, hess]);
+        assert_gradient_pairs_close(&actual, &expected, 1e-5);
+    }
+
+    #[test]
+    fn yetirank_is_deterministic_and_redraws_noise_when_scores_change() {
+        let group_id = [0, 0, 0, 0, 0, 1, 1, 1, 2];
+        let targets = [3.0, 2.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0];
+        let predictions = [0.1, 0.0, 0.2, -0.1, 0.05, 0.3, 0.1, 0.0, 0.4];
+        let objective = YetiRankObjective::new(&group_id, 4, 3);
+        let first = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        let again = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        assert_eq!(first, again);
+
+        // Gradients within a group sum to zero; groups with one label value
+        // and single-document groups get no gradient.
+        let group_sum: f32 = first[..5].iter().map(|pair| pair.grad).sum();
+        assert!(group_sum.abs() < 1e-5);
+        for pair in &first[5..] {
+            assert_eq!(pair.grad, 0.0);
+        }
+
+        // Shifting every score by the same constant leaves the pairwise
+        // logistic terms unchanged but changes the noise seed, so the
+        // sampled pair weights (and hence gradients) change.
+        let shifted: Vec<f32> = predictions.iter().map(|p| p + 0.25).collect();
+        let redrawn = objective
+            .compute_gradients(&shifted, &targets, None)
+            .unwrap();
+        assert_ne!(first[..5], redrawn[..5]);
+    }
+
+    #[test]
+    fn yetirank_decay_must_be_in_unit_interval() {
+        let group_id = [0, 0];
+        let objective = YetiRankObjective::new(&group_id, 3, 1);
+        assert!(objective.clone().with_decay(0.0).is_err());
+        assert!(objective.clone().with_decay(1.5).is_err());
+        assert!(objective.with_decay(1.0).is_ok());
     }
 
     #[test]

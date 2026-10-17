@@ -39,6 +39,22 @@
 
 ### Changed
 
+- **`ranking_objective="yetirank"` is now the published YetiRank; the old
+  objective is `rank:ndcg_smoothed`.** Retraining with `"yetirank"` gives
+  different models from v1.0.0. The new objective follows Gulin et al. as
+  CatBoost implements it: Logistic noise on the scores, 10 noisy rankings
+  per query per round, pairs only between neighbours in each noisy ranking,
+  weighted by label gap times a 0.85 position decay, and a pairwise logistic
+  loss on the clean scores. The objective that shipped as `"yetirank"` was
+  LambdaMART NDCG over all pairs on uniform-noise-smoothed scores; it is
+  unchanged as `ranking_objective="rank:ndcg_smoothed"`, so pass that to
+  reproduce earlier results. Saved models load and predict exactly as before:
+  rankers store raw-score trees and the artifact's objective name only picks
+  the identity post-transform. At default settings the new objective ties or
+  beats the old one on three small ranking sets and trails it by 0.009
+  NDCG@10 on an MSLR-WEB10K slice, fitting 4x faster there; with
+  `lambda_l2=100` both reach 0.497. See `docs/benchmarks/yetirank_v1.md`.
+
 - **Multiclass auto policy: leaf L2 3, row subsample 0.8 and split-score
   noise.** Under `training_policy="auto"`, multiclass softmax now uses leaf L2
   3 (was 1), row subsample 0.8 at every size (was none below 2,048 rows), and
@@ -172,6 +188,25 @@
   fit time; the cells it leaves alone would have lost 1.7% with vector
   leaves. `n_estimators="auto"` doubles its round cap (to 4,000) for vector
   leaves, which need about twice the rounds.
+- **Opt-in bounded log-link Hessians: `glm_hessian="bounded"`.** Poisson,
+  Gamma and Tweedie use XGBoost's bounded-step pseudo-Hessians
+  (dmlc/xgboost#12538), which cap each Newton leaf step and replace
+  `poisson_max_delta_step` (ignored in this mode). On the dev suite's
+  non-negative regression tasks it lowers test RMSE 3.4% (Poisson) and 3.5%
+  (Gamma) and ties on Tweedie, and it makes `learning_rate=0.3` safe: with exact
+  Hessians that rate costs 15% on Gamma and 26% on Tweedie, with bounded ones
+  it fits in 0.37–0.48× the time at roughly baseline loss. Default stays
+  `"exact"` until the held-out run. See `docs/benchmarks/leaf_math_v1.md`.
+- **Opt-in gradient-regularized Newton: `grn_strength` and `grn_form`.** Each
+  round adds `grn_strength · sqrt(rms(g))` to the leaf solve (Mishchenko
+  2023), either to the L2 term (`"per_leaf"`) or to every row's Hessian
+  (`"per_row"`), so the damping fades as the fit converges. It is meant for
+  custom losses whose Hessian can vanish: a Charbonnier objective at learning
+  rate 1.0 diverges with plain Newton and converges with `"per_row"`. On the
+  built-in log-link objectives it ties at the default learning rate. Single-
+  output estimators and multiclass `GBMClassifier`; not
+  `MultiLabelGBMRanker(multi_label_mode="joint")`. `diagnostics_per_round_`
+  reports each round's `grn_lambda`.
 - **`random_strength` on every single-output estimator and multiclass
   `GBMClassifier`.** It sets the split-score noise strength (CatBoost's
   `random_strength`) under either training policy: `None` (default) keeps the
