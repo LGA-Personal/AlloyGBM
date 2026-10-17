@@ -25,6 +25,8 @@ pub use pl_histogram::build_linear_histograms_cpu;
 
 mod pl;
 
+mod quantized_hist;
+
 mod split_helpers;
 mod split_scan;
 
@@ -871,11 +873,30 @@ impl CpuBackend {
         }
         node.validate_bounds(binned_matrix.row_count)?;
 
-        let bin_count = binned_matrix.max_bin as usize + 1;
         // Gathered once per node and shared by every tile, so the cost is paid
         // once instead of once per feature.
         let node_gradients = Self::gather_node_gradients(gradients, &node.row_indices);
-        let node_gradients = node_gradients.as_slice();
+        Self::build_histograms_from_node_gradients(
+            binned_matrix,
+            &node_gradients,
+            node,
+            feature_tiles,
+            parallel_tiles,
+            include_grad_sq,
+        )
+    }
+
+    /// [`Self::build_histograms_internal`] after the gather:
+    /// `node_gradients[i]` is the gradient for `node.row_indices[i]`.
+    pub(crate) fn build_histograms_from_node_gradients(
+        binned_matrix: &BinnedMatrix,
+        node_gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        parallel_tiles: bool,
+        include_grad_sq: bool,
+    ) -> EngineResult<HistogramBundle> {
+        let bin_count = binned_matrix.max_bin as usize + 1;
         // Node totals let the kernel skip each sparse feature's dominant bin
         // and fill it in afterwards; only computed when some feature has one.
         let sparse_node = binned_matrix
@@ -893,19 +914,7 @@ impl CpuBackend {
                 }
             });
         let sparse_node = sparse_node.as_ref();
-        // Every tile lands in one bundle sized for the whole node up front,
-        // so appending tiles never reallocates or copies earlier tiles.
-        let total_bins = match binned_matrix.compact_histogram_layout() {
-            Some(layout) if binned_matrix.feature_bundle_map().is_none() => feature_tiles
-                .iter()
-                .flat_map(|tile| tile.start_feature as usize..tile.end_feature as usize)
-                .map(|feature| usize::from(layout.data_bins[feature]) + 1)
-                .sum(),
-            _ => feature_tiles
-                .iter()
-                .map(|tile| (tile.end_feature - tile.start_feature) as usize * bin_count)
-                .sum::<usize>(),
-        };
+        let total_bins = Self::node_bundle_bins(binned_matrix, feature_tiles, bin_count);
         if parallel_tiles {
             let mut per_tile_histograms = feature_tiles
                 .par_iter()
@@ -959,6 +968,27 @@ impl CpuBackend {
             )?;
         }
         Ok(histograms.expect("feature tiles are non-empty"))
+    }
+
+    /// Bins in a node's whole bundle. Every tile lands in one bundle sized
+    /// for the whole node up front, so appending tiles never reallocates or
+    /// copies earlier tiles.
+    pub(crate) fn node_bundle_bins(
+        binned_matrix: &BinnedMatrix,
+        feature_tiles: &[FeatureTile],
+        bin_count: usize,
+    ) -> usize {
+        match binned_matrix.compact_histogram_layout() {
+            Some(layout) if binned_matrix.feature_bundle_map().is_none() => feature_tiles
+                .iter()
+                .flat_map(|tile| tile.start_feature as usize..tile.end_feature as usize)
+                .map(|feature| usize::from(layout.data_bins[feature]) + 1)
+                .sum(),
+            _ => feature_tiles
+                .iter()
+                .map(|tile| (tile.end_feature - tile.start_feature) as usize * bin_count)
+                .sum::<usize>(),
+        }
     }
 
     /// `node_gradients[i]` is the gradient for `node.row_indices[i]` -- see

@@ -5,8 +5,8 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
-    HistogramExecution, LinearContext, MorphContext, PreparedLinearSplit, SplitNoise,
-    SplitSelectionOptions, SplitShortlist,
+    HistogramExecution, LinearContext, MorphContext, PreparedLinearSplit, QuantizedGradients,
+    SplitNoise, SplitSelectionOptions, SplitShortlist,
 };
 
 use crate::CpuBackend;
@@ -92,6 +92,35 @@ impl BackendOps for CpuBackend {
                 feature_tiles,
                 parallel_tiles,
                 include_grad_sq,
+            )
+        })
+    }
+
+    fn build_histograms_quantized(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        quantized: &QuantizedGradients,
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        execution: HistogramExecution,
+    ) -> EngineResult<HistogramBundle> {
+        let selected_feature_count = feature_tiles
+            .iter()
+            .map(|tile| (tile.end_feature - tile.start_feature) as usize)
+            .sum();
+        let parallel_tiles = execution == HistogramExecution::Parallel
+            && Self::should_parallelize_tiles(
+                feature_tiles.len(),
+                node.row_indices.len(),
+                selected_feature_count,
+            );
+        alloygbm_engine::time_tree_stage(alloygbm_engine::TreeStage::Histogram, || {
+            Self::build_histograms_quantized_internal(
+                binned_matrix,
+                quantized,
+                node,
+                feature_tiles,
+                parallel_tiles,
             )
         })
     }

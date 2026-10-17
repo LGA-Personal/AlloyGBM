@@ -20,5 +20,9 @@ wide = "0.7"
 name = "histogram_kernels"
 harness = false
 
+[[bench]]
+name = "quantized_histograms"
+harness = false
+
 [lints]
 workspace = true
