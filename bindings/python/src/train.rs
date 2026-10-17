@@ -1496,7 +1496,8 @@ pub(crate) fn train_regression_artifact_dense(
     multiclass_hessian="diagonal",
     glm_hessian="exact",
     grn_strength=0.0,
-    grn_form="per_leaf"
+    grn_form="per_leaf",
+    quantized_grad_bits=None::<u8>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1588,6 +1589,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     glm_hessian: &str,
     grn_strength: f32,
     grn_form: &str,
+    quantized_grad_bits: Option<u8>,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -1660,7 +1662,13 @@ pub(crate) fn train_regression_artifact_with_summary(
         parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
     params.multiclass_hessian =
         parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
-    apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
+    apply_leaf_math_params(
+        &mut params,
+        glm_hessian,
+        grn_strength,
+        grn_form,
+        quantized_grad_bits,
+    )?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -1897,7 +1905,8 @@ mod tests {
     multiclass_hessian="diagonal",
     glm_hessian="exact",
     grn_strength=0.0,
-    grn_form="per_leaf"
+    grn_form="per_leaf",
+    quantized_grad_bits=None::<u8>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -1992,6 +2001,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     glm_hessian: &str,
     grn_strength: f32,
     grn_form: &str,
+    quantized_grad_bits: Option<u8>,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -2064,7 +2074,13 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
     params.multiclass_hessian =
         parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
-    apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
+    apply_leaf_math_params(
+        &mut params,
+        glm_hessian,
+        grn_strength,
+        grn_form,
+        quantized_grad_bits,
+    )?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -2243,7 +2259,8 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     multiclass_hessian="diagonal",
     glm_hessian="exact",
     grn_strength=0.0,
-    grn_form="per_leaf"
+    grn_form="per_leaf",
+    quantized_grad_bits=None::<u8>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -2338,6 +2355,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     glm_hessian: &str,
     grn_strength: f32,
     grn_form: &str,
+    quantized_grad_bits: Option<u8>,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let values = dense_input_to_f32_vec(values_bytes)?;
@@ -2416,7 +2434,13 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
     params.multiclass_hessian =
         parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
-    apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
+    apply_leaf_math_params(
+        &mut params,
+        glm_hessian,
+        grn_strength,
+        grn_form,
+        quantized_grad_bits,
+    )?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -2477,17 +2501,20 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
 }
 
 /// Parse the opt-in leaf-math kwargs (`glm_hessian`, `grn_strength`,
-/// `grn_form`) onto `params`. Defaults leave `params` unchanged.
+/// `grn_form`, `quantized_grad_bits`) onto `params`. Defaults leave `params`
+/// unchanged.
 fn apply_leaf_math_params(
     params: &mut TrainParams,
     glm_hessian: &str,
     grn_strength: f32,
     grn_form: &str,
+    quantized_grad_bits: Option<u8>,
 ) -> PyResult<()> {
     params.glm_hessian = alloygbm_core::GlmHessian::parse(glm_hessian)
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     params.grn_form = alloygbm_core::GrnForm::parse(grn_form)
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     params.grn_strength = grn_strength;
+    params.quantized_grad_bits = quantized_grad_bits;
     Ok(())
 }

@@ -114,6 +114,22 @@ def _validate_grn_form(value: object) -> str:
     return str(value)
 
 
+def _validate_quantized_grad(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"quantized_grad must be a bool, got {value!r}")
+    return value
+
+
+def _validate_quantized_grad_bits(value: object) -> int:
+    message = "quantized_grad_bits must be an int in [2, 8]"
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(message)
+    bits = int(value)
+    if not 2 <= bits <= 8:
+        raise ValueError(message)
+    return bits
+
+
 def _validate_n_jobs(value: object) -> int | None:
     if value is None:
         return None
@@ -220,6 +236,8 @@ class _GBMEstimatorCore(
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
+        quantized_grad: bool = False,
+        quantized_grad_bits: int = 4,
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -615,6 +633,8 @@ class _GBMEstimatorCore(
         self.glm_hessian = _validate_glm_hessian(glm_hessian)
         self.grn_strength = _validate_grn_strength(grn_strength)
         self.grn_form = _validate_grn_form(grn_form)
+        self.quantized_grad = _validate_quantized_grad(quantized_grad)
+        self.quantized_grad_bits = _validate_quantized_grad_bits(quantized_grad_bits)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -705,6 +725,8 @@ class _GBMEstimatorCore(
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
+        quantized_grad: bool = False,
+        quantized_grad_bits: int = 4,
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -776,6 +798,8 @@ class _GBMEstimatorCore(
         self.glm_hessian = glm_hessian
         self.grn_strength = grn_strength
         self.grn_form = grn_form
+        self.quantized_grad = quantized_grad
+        self.quantized_grad_bits = quantized_grad_bits
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -864,7 +888,9 @@ class _GBMEstimatorCore(
             f"multiclass_hessian='{self.multiclass_hessian}', "
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
-            f"grn_form='{self.grn_form}'"
+            f"grn_form='{self.grn_form}', "
+            f"quantized_grad={self.quantized_grad}, "
+            f"quantized_grad_bits={self.quantized_grad_bits}"
             ")"
         )
 
@@ -942,6 +968,8 @@ class _GBMEstimatorCore(
             "glm_hessian": self.glm_hessian,
             "grn_strength": self.grn_strength,
             "grn_form": self.grn_form,
+            "quantized_grad": self.quantized_grad,
+            "quantized_grad_bits": self.quantized_grad_bits,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -1017,6 +1045,8 @@ class _GBMEstimatorCore(
             "glm_hessian",
             "grn_strength",
             "grn_form",
+            "quantized_grad",
+            "quantized_grad_bits",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1122,6 +1152,14 @@ class _GBMEstimatorCore(
 
         if "grn_form" in params:
             self.grn_form = _validate_grn_form(params["grn_form"])
+
+        if "quantized_grad" in params:
+            self.quantized_grad = _validate_quantized_grad(params["quantized_grad"])
+
+        if "quantized_grad_bits" in params:
+            self.quantized_grad_bits = _validate_quantized_grad_bits(
+                params["quantized_grad_bits"]
+            )
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1939,7 +1977,8 @@ class _GBMEstimatorCore(
         return "per_class_trees"
 
     def _leaf_math_kwargs(self) -> dict:
-        """Native kwargs for the opt-in ``glm_hessian`` and GRN parameters.
+        """Native kwargs for the opt-in ``glm_hessian``, GRN and
+        ``quantized_grad`` parameters.
 
         Only non-default values are passed, so default fits call the native
         trainer exactly as before.
@@ -1950,6 +1989,21 @@ class _GBMEstimatorCore(
         if self.grn_strength > 0.0:
             kwargs["grn_strength"] = float(self.grn_strength)
             kwargs["grn_form"] = self.grn_form
+        if self.quantized_grad:
+            unsupported = [
+                name
+                for name, active in (
+                    ("leaf_solver='dro'", self.leaf_solver == "dro"),
+                    ("leaf_model='linear'", self.leaf_model == "linear"),
+                    ("training_mode='morph'", self.training_mode == "morph"),
+                )
+                if active
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"quantized gradients are not supported with {unsupported[0]}"
+                )
+            kwargs["quantized_grad_bits"] = int(self.quantized_grad_bits)
         return kwargs
 
     def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
@@ -3177,7 +3231,7 @@ class _GBMEstimatorCore(
             )
         if self._leaf_math_kwargs():
             raise RuntimeError(
-                "glm_hessian and grn_strength require a native alloygbm build "
+                "glm_hessian, grn_strength and quantized_grad require a native alloygbm build "
                 "with training summary support"
             )
         if eval_set is not None:
