@@ -1,7 +1,8 @@
 use alloygbm_core::{
     BoostingMode, DartNormalize, DartSampleType, DroConfig, DroMetric, FactorExposureMatrix,
     FactorNeutralizationConfig, LeafModelKind, LeafSolverKind, LrSchedule, MorphConfig,
-    MulticlassHessian, MulticlassStrategy, NeutralizationKind, TrainParams, TreeGrowth,
+    MulticlassHessian, MulticlassSketch, MulticlassStrategy, NeutralizationKind, TrainParams,
+    TreeGrowth,
 };
 use alloygbm_engine::{EngineError, TrainingPolicyMode};
 use alloygbm_shap::{BinningContext, ShapError};
@@ -35,6 +36,19 @@ pub(crate) fn parse_multiclass_hessian(value: &str) -> Result<MulticlassHessian,
         "abs_residual" => Ok(MulticlassHessian::AbsResidual),
         other => Err(EngineError::InvalidConfig(format!(
             "multiclass_hessian must be 'diagonal', 'full' or 'abs_residual', received '{other}'"
+        ))),
+    }
+}
+
+pub(crate) fn parse_multiclass_sketch(value: &str) -> Result<MulticlassSketch, EngineError> {
+    match value {
+        "none" => Ok(MulticlassSketch::None),
+        "top_outputs" => Ok(MulticlassSketch::TopOutputs),
+        "random_sampling" => Ok(MulticlassSketch::RandomSampling),
+        "random_projection" => Ok(MulticlassSketch::RandomProjection),
+        other => Err(EngineError::InvalidConfig(format!(
+            "multiclass_sketch must be 'none', 'top_outputs', 'random_sampling' or \
+             'random_projection', received '{other}'"
         ))),
     }
 }
@@ -191,6 +205,8 @@ pub(crate) fn build_train_params(
         glm_hessian: alloygbm_core::GlmHessian::Exact,
         grn_strength: 0.0,
         grn_form: alloygbm_core::GrnForm::PerLeaf,
+        multiclass_sketch: alloygbm_core::MulticlassSketch::None,
+        multiclass_sketch_dim: 5,
     }
 }
 

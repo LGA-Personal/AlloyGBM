@@ -116,6 +116,14 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if params.multiclass_sketch != crate::MulticlassSketch::None
+        && params.multiclass_sketch_dim == 0
+    {
+        return Err(CoreError::InvalidConfig(
+            "multiclass_sketch_dim must be at least 1".to_string(),
+        ));
+    }
+
     for &c in &params.monotone_constraints {
         if c != -1 && c != 0 && c != 1 {
             return Err(CoreError::InvalidConfig(

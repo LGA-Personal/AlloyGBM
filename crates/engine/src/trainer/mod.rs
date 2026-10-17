@@ -1,5 +1,6 @@
 //! Trainer module — gradient-boosting iteration controller.
 
+mod gradient_sketch;
 mod interaction;
 #[allow(dead_code)]
 mod monotone;
@@ -52,7 +53,7 @@ use rayon::prelude::*;
 use vector_leaf_build::{
     FullHessianInputs, VectorLeafBinLayout, VectorLeafGradients, VectorLeafTreeInputs,
     apply_abs_residual_hessian, build_vector_leaf_tree, softmax_rows, validate_multiclass_hessian,
-    validate_vector_leaf_support,
+    validate_multiclass_sketch, validate_vector_leaf_support,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1124,6 +1125,7 @@ impl Trainer {
             validate_vector_leaf_support(&self.params, &self.categorical_features)?;
         }
         validate_multiclass_hessian(&self.params, objective.num_classes)?;
+        validate_multiclass_sketch(&self.params)?;
         let multiclass_hessian = self.params.multiclass_hessian;
         validate_training_alignment(dataset, binned_matrix)?;
         if let Some(validation_ref) = validation {
@@ -1656,12 +1658,19 @@ impl Trainer {
             let build_results = if let Some(layout) = vector_leaf_layout.as_ref() {
                 // One shared tree whose leaves hold a K-vector; it comes back
                 // as K per-class trees with the same structure.
+                let sketch = gradient_sketch::sketch_gradients(
+                    self.params.multiclass_sketch,
+                    self.params.multiclass_sketch_dim,
+                    &class_gradient_buffers,
+                    &root_row_indices,
+                    mixed_hash(sampling_seed_base ^ 0x5C3E_7C40_57B0_0571 ^ effective_round as u64),
+                );
                 let inputs = VectorLeafTreeInputs {
                     binned_matrix,
                     layout,
                     gradients: VectorLeafGradients {
                         leaf: &class_gradient_buffers,
-                        split: None,
+                        split: sketch.as_deref(),
                     },
                     root_rows: root_row_indices.clone(),
                     features: feature_tiles
