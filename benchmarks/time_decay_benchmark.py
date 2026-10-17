@@ -116,8 +116,8 @@ def _score(task: str, y_true: np.ndarray, prediction: np.ndarray) -> dict[str, f
 
 
 def run(args: argparse.Namespace) -> dict:
-    results: dict = {"config": vars(args).copy(), "datasets": {}}
-    results["config"]["cache_dir"] = str(args.cache_dir)
+    config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    results: dict = {"config": config, "datasets": {}}
     for name in args.datasets:
         X, y, period, task = load_dataset(name, args.cache_dir)
         periods = np.unique(period)
