@@ -410,7 +410,8 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             f"multiclass_hessian='{self.multiclass_hessian}', "
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
-            f"grn_form='{self.grn_form}'"
+            f"grn_form='{self.grn_form}', "
+            f"time_decay_half_life={self.time_decay_half_life}"
             ")"
         )
 

@@ -46,6 +46,7 @@ class _PersistenceMixin:
             "fit_timing_",
             "learning_rate_",
             "auto_rounds_",
+            "time_decay_",
             "classes_",
             "n_classes_",
         ):
@@ -92,6 +93,8 @@ class _PersistenceMixin:
             self.grn_strength = 0.0
         if not hasattr(self, "grn_form"):
             self.grn_form = "per_leaf"
+        if not hasattr(self, "time_decay_half_life"):
+            self.time_decay_half_life = None
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
         if self._is_fitted and not hasattr(self, "feature_bundling_diagnostics_"):

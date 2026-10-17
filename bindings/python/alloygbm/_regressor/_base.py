@@ -38,6 +38,9 @@ _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD = 0.10
 # Restores equal-frequency quantile cuts (pre-greedy borders) for A/B runs.
 # Mirrors EQUAL_FREQUENCY_BINS_ENV_VAR in bindings/python/src/lib.rs.
 _EQUAL_FREQUENCY_BINS_ENV_VAR = "ALLOYGBM_EXPERIMENT_EQUAL_FREQUENCY_BINS"
+# A/B switch for benchmarks: keep the random auto-rounds holdout under
+# ``time_decay_half_life`` instead of holding out the latest periods.
+_TIME_DECAY_RANDOM_HOLDOUT_ENV_VAR = "ALLOYGBM_EXPERIMENT_TIME_DECAY_RANDOM_HOLDOUT"
 # Selects CatBoost-style GreedyLogSum quantile cuts for A/B runs.
 # Mirrors GREEDY_LOG_SUM_BINS_ENV_VAR in bindings/python/src/lib.rs.
 _GREEDY_LOG_SUM_BINS_ENV_VAR = "ALLOYGBM_EXPERIMENT_GREEDY_LOG_SUM_BINS"
@@ -352,6 +355,10 @@ def _linear_tail_rank_enabled_from_env() -> bool:
 
 def _equal_frequency_bins_enabled_from_env() -> bool:
     return _parse_env_toggle(_EQUAL_FREQUENCY_BINS_ENV_VAR)
+
+
+def _time_decay_random_holdout_from_env() -> bool:
+    return _parse_env_toggle(_TIME_DECAY_RANDOM_HOLDOUT_ENV_VAR)
 
 
 def _greedy_log_sum_bins_enabled_from_env() -> bool:

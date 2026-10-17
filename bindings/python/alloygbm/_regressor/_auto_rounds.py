@@ -13,6 +13,11 @@ stopped by validation". With ``n_estimators="auto"`` (the default) and
 3. refits on every row for the chosen round count, scaled up by
    ``1 / (1 - fraction)`` because the refit sees more rows per round.
 
+With ``time_decay_half_life`` set, step 1 holds out the latest periods of
+``time_index`` instead (:func:`time_holdout_split`), and step 3 scales by the
+ratio of decay-weighted effective sample sizes, because the refit's extra
+rows are the newest and carry the most weight.
+
 When the caller passes ``eval_set``, that set drives the early stopping
 directly and there is no refit. Configurations whose round semantics do not
 survive a refit (warm start, DART, MorphBoost, learning-rate schedules,
@@ -138,6 +143,34 @@ def holdout_split(
             return None
         is_validation = np.zeros(row_count, dtype=bool)
         is_validation[rng.permutation(row_count)[:take]] = True
+    return np.flatnonzero(~is_validation), np.flatnonzero(is_validation)
+
+
+def time_holdout_split(
+    time_index: np.ndarray,
+    fraction: float,
+    *,
+    group_ids: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Hold out the latest time periods instead of random rows.
+
+    Takes whole periods, newest first, until at least ``fraction`` of the
+    rows are held out, and always leaves at least one period to train on.
+    Returns ``None`` with fewer than two periods, or when a query group
+    would straddle the cut.
+    """
+    times = np.asarray(time_index)
+    periods, counts = np.unique(times, return_counts=True)
+    if len(periods) < 2:
+        return None
+    newest_first = np.cumsum(counts[::-1])
+    held_periods = int(np.searchsorted(newest_first, fraction * len(times))) + 1
+    held_periods = min(held_periods, len(periods) - 1)
+    is_validation = times >= periods[-held_periods]
+    if group_ids is not None:
+        groups = np.asarray(group_ids)
+        if np.intersect1d(groups[is_validation], groups[~is_validation]).size:
+            return None
     return np.flatnonzero(~is_validation), np.flatnonzero(is_validation)
 
 

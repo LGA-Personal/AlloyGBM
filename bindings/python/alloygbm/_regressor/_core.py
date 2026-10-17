@@ -114,6 +114,43 @@ def _validate_grn_form(value: object) -> str:
     return str(value)
 
 
+# Ranking objectives that drop ``sample_weight`` (with a warning).
+_WEIGHT_IGNORING_RANKING_OBJECTIVES = (
+    "rank_pairwise",
+    "rank_ndcg",
+    "rank_xendcg",
+    "rank_ndcg_smoothed",
+    "yetirank",
+)
+
+
+def _effective_sample_size(weights: np.ndarray) -> float:
+    """Kish effective sample size, ``(sum w)^2 / sum w^2``."""
+    squares = float(np.square(weights).sum())
+    return float(weights.sum()) ** 2 / squares if squares > 0.0 else 0.0
+
+
+def _row_count(values: object) -> int:
+    if hasattr(values, "shape") and len(getattr(values, "shape")) > 0:
+        return int(values.shape[0])
+    return len(values)
+
+
+def _validate_time_decay_half_life(value: object) -> float | None:
+    message = "time_decay_half_life must be None or a float > 0 (inf for no decay)"
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(message)
+    try:
+        half_life = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if math.isnan(half_life) or half_life <= 0.0:
+        raise ValueError(message)
+    return half_life
+
+
 def _validate_n_jobs(value: object) -> int | None:
     if value is None:
         return None
@@ -220,6 +257,7 @@ class _GBMEstimatorCore(
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
+        time_decay_half_life: float | None = None,
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -615,6 +653,7 @@ class _GBMEstimatorCore(
         self.glm_hessian = _validate_glm_hessian(glm_hessian)
         self.grn_strength = _validate_grn_strength(grn_strength)
         self.grn_form = _validate_grn_form(grn_form)
+        self.time_decay_half_life = _validate_time_decay_half_life(time_decay_half_life)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -705,6 +744,7 @@ class _GBMEstimatorCore(
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
+        time_decay_half_life: float | None = None,
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -776,6 +816,7 @@ class _GBMEstimatorCore(
         self.glm_hessian = glm_hessian
         self.grn_strength = grn_strength
         self.grn_form = grn_form
+        self.time_decay_half_life = time_decay_half_life
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -864,7 +905,8 @@ class _GBMEstimatorCore(
             f"multiclass_hessian='{self.multiclass_hessian}', "
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
-            f"grn_form='{self.grn_form}'"
+            f"grn_form='{self.grn_form}', "
+            f"time_decay_half_life={self.time_decay_half_life}"
             ")"
         )
 
@@ -942,6 +984,7 @@ class _GBMEstimatorCore(
             "glm_hessian": self.glm_hessian,
             "grn_strength": self.grn_strength,
             "grn_form": self.grn_form,
+            "time_decay_half_life": self.time_decay_half_life,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -1017,6 +1060,7 @@ class _GBMEstimatorCore(
             "glm_hessian",
             "grn_strength",
             "grn_form",
+            "time_decay_half_life",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1122,6 +1166,11 @@ class _GBMEstimatorCore(
 
         if "grn_form" in params:
             self.grn_form = _validate_grn_form(params["grn_form"])
+
+        if "time_decay_half_life" in params:
+            self.time_decay_half_life = _validate_time_decay_half_life(
+                params["time_decay_half_life"]
+            )
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1715,6 +1764,8 @@ class _GBMEstimatorCore(
             (instead of the built-in loss) when ``early_stopping_rounds`` is set.
         """
         self._validate_hyperparameters()
+        if self.time_decay_half_life is not None and time_index is None:
+            raise ValueError("time_decay_half_life requires time_index to be passed to fit()")
         fit_kwargs = {
             "sample_weight": sample_weight,
             "eval_set": eval_set,
@@ -1737,7 +1788,7 @@ class _GBMEstimatorCore(
         mode = self._auto_rounds_mode(targets, fit_kwargs)
         if mode == _auto_rounds.MODE_HOLDOUT:
             self._check_holdout_inputs(X, targets, fit_kwargs)
-            split = self._auto_rounds_split(targets, group)
+            split = self._auto_rounds_split(targets, group, time_index)
             if split is not None and not self._split_has_weight_on_both_sides(
                 sample_weight, split
             ):
@@ -1789,20 +1840,32 @@ class _GBMEstimatorCore(
         holdout_unsupported = (
             self.neutralization != "none"
             or fit_kwargs["factor_exposures"] is not None
-            or fit_kwargs["time_index"] is not None
+            or (fit_kwargs["time_index"] is not None and self.time_decay_half_life is None)
             or self.categorical_time_aware
             or len(targets) < _auto_rounds.AUTO_MIN_ROWS
         )
         return _auto_rounds.MODE_LEGACY if holdout_unsupported else _auto_rounds.MODE_HOLDOUT
 
     def _auto_rounds_split(
-        self, targets: np.ndarray, group: object | None
+        self, targets: np.ndarray, group: object | None, time_index: object | None = None
     ) -> tuple[np.ndarray, np.ndarray] | None:
         row_count = len(targets)
         class_labels = None
         group_ids = None
         if group is not None:
             group_ids = np.asarray(self._validate_group(group, row_count))
+        if (
+            self.time_decay_half_life is not None
+            and time_index is not None
+            and not _base._time_decay_random_holdout_from_env()
+        ):
+            # A decayed fit is a forecast of the newest periods, so its round
+            # count is tuned on them, not on a random sample of the past.
+            return _auto_rounds.time_holdout_split(
+                np.asarray(self._validate_time_index(time_index, row_count)),
+                _auto_rounds.AUTO_VALIDATION_FRACTION,
+                group_ids=group_ids,
+            )
         elif self._objective_name() in ("binary_crossentropy", "multiclass_softmax"):
             class_labels = targets
         return _auto_rounds.holdout_split(
@@ -1848,6 +1911,59 @@ class _GBMEstimatorCore(
             dtype=float,
         )
         return bool(weights[train_idx].sum() > 0.0 and weights[valid_idx].sum() > 0.0)
+
+    def _time_decay_refit_fraction(self, fit_kwargs: dict, train_idx: np.ndarray) -> float:
+        """Refit scaling for a decayed fit: one minus the ratio of the
+        holdout pass's effective sample size to the refit's.
+
+        Rows outside the training part are the newest and carry the most
+        weight, so the row share would overstate how much the refit gains;
+        under a short half-life the two passes see nearly the same data.
+        """
+        time_index = fit_kwargs["time_index"]
+        sample_weight = fit_kwargs["sample_weight"]
+        full_weights, _ = self._time_decay_weights(
+            sample_weight, time_index, _row_count(time_index)
+        )
+        train_weights, _ = self._time_decay_weights(
+            self._take_rows(sample_weight, train_idx),
+            self._take_rows(time_index, train_idx),
+            len(train_idx),
+        )
+        ratio = _effective_sample_size(train_weights) / max(
+            _effective_sample_size(full_weights), 1e-12
+        )
+        return float(min(max(1.0 - ratio, 0.0), 0.9))
+
+    def _time_decay_weights(
+        self, sample_weight: object | None, time_index: object | None, row_count: int
+    ) -> tuple[np.ndarray, dict]:
+        """Row weights ``0.5 ** ((t_max - t) / half_life)`` times any
+        ``sample_weight``, plus the summary stored as ``time_decay_``."""
+        if time_index is None:
+            raise ValueError("time_decay_half_life requires time_index to be passed to fit()")
+        obj = self._objective_name()
+        if obj in _WEIGHT_IGNORING_RANKING_OBJECTIVES:
+            raise ValueError(
+                f"time_decay_half_life works through row weights, which ranking "
+                f"objective '{obj}' ignores"
+            )
+        times = np.asarray(self._validate_time_index(time_index, row_count), dtype=np.float64)
+        time_max = float(times.max()) if row_count else 0.0
+        decay = np.exp2(-(time_max - times) / float(self.time_decay_half_life))
+        weights = decay
+        if sample_weight is not None:
+            weights = decay * np.asarray(
+                self._validate_sample_weight(sample_weight, row_count), dtype=np.float64
+            )
+        summary = {
+            "half_life": float(self.time_decay_half_life),
+            "time_max": int(time_max),
+            "rows": int(row_count),
+            "min_decay_weight": float(decay.min()) if row_count else 1.0,
+            "effective_sample_size": _effective_sample_size(weights),
+        }
+        return weights, summary
 
     def _take_rows(self, values: object, indices: np.ndarray) -> object:
         """Row subset of an array-like, keeping DataFrames as DataFrames."""
@@ -2004,6 +2120,12 @@ class _GBMEstimatorCore(
         # Stratified and grouped splits need not hold out exactly the target
         # fraction, so scale the refit by the share actually held out.
         fraction = len(valid_idx) / (len(train_idx) + len(valid_idx))
+        time_split = (
+            self.time_decay_half_life is not None
+            and not _base._time_decay_random_holdout_from_env()
+        )
+        if time_split:
+            fraction = self._time_decay_refit_fraction(fit_kwargs, train_idx)
         learning_rate = self._resolved_learning_rate(_auto_rounds.MODE_HOLDOUT, None)
         patience = self.early_stopping_rounds or _auto_rounds.AUTO_PATIENCE
         y_array = targets
@@ -2015,6 +2137,8 @@ class _GBMEstimatorCore(
         if fit_kwargs["group"] is not None:
             holdout_kwargs["group"] = take(fit_kwargs["group"], train_idx)
             holdout_kwargs["eval_group"] = take(fit_kwargs["group"], valid_idx)
+        if fit_kwargs["time_index"] is not None:
+            holdout_kwargs["time_index"] = take(fit_kwargs["time_index"], train_idx)
         if fit_kwargs["categorical_feature_values"] is not None:
             holdout_kwargs["categorical_feature_values"] = take(
                 fit_kwargs["categorical_feature_values"], train_idx
@@ -2070,6 +2194,8 @@ class _GBMEstimatorCore(
             "refit_rounds": rounds,
             "holdout_fit_seconds": holdout_seconds,
         }
+        if time_split:
+            self.auto_rounds_["holdout_split"] = "latest_periods"
         return self
 
     def _fit_once(
@@ -2259,18 +2385,18 @@ class _GBMEstimatorCore(
                     f"but X has {feature_count} features"
                 )
 
+        self.time_decay_ = None
+        if self.time_decay_half_life is not None:
+            sample_weight, self.time_decay_ = self._time_decay_weights(
+                sample_weight, time_index, row_count
+            )
+
         # Validate sample_weight if provided.
         validated_sample_weights: list[float] | None = None
         if sample_weight is not None:
             validated_sample_weights = self._validate_sample_weight(sample_weight, row_count)
             obj = self._objective_name()
-            if obj in (
-                "rank_pairwise",
-                "rank_ndcg",
-                "rank_xendcg",
-                "rank_ndcg_smoothed",
-                "yetirank",
-            ):
+            if obj in _WEIGHT_IGNORING_RANKING_OBJECTIVES:
                 import warnings
 
                 warnings.warn(
