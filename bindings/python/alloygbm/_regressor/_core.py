@@ -45,7 +45,7 @@ def _validate_random_strength(value: object) -> float | None:
     return strength
 
 
-_MULTICLASS_STRATEGIES = ("per_class_trees", "vector_leaves")
+_MULTICLASS_STRATEGIES = ("auto", "per_class_trees", "vector_leaves")
 
 
 _MULTICLASS_HESSIANS = ("diagonal", "full", "abs_residual")
@@ -59,10 +59,17 @@ def _validate_multiclass_hessian(value: object) -> str:
     return value
 
 
+def _prefers_vector_leaves(rows: int, features: int, classes: int) -> bool:
+    """Whether ``multiclass_strategy="auto"`` picks vector leaves."""
+    # Placeholder until the learning-curve sweep sets the threshold: keep
+    # per-class trees so "auto" matches the previous default.
+    return False
+
+
 def _validate_multiclass_strategy(value: object) -> str:
     if not isinstance(value, str) or value not in _MULTICLASS_STRATEGIES:
         raise ValueError(
-            "multiclass_strategy must be 'per_class_trees' or 'vector_leaves'"
+            "multiclass_strategy must be 'auto', 'per_class_trees' or 'vector_leaves'"
         )
     return value
 
@@ -168,7 +175,7 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
-        multiclass_strategy: str = "per_class_trees",
+        multiclass_strategy: str = "auto",
         multiclass_hessian: str = "diagonal",
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
@@ -647,7 +654,7 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
-        multiclass_strategy: str = "per_class_trees",
+        multiclass_strategy: str = "auto",
         multiclass_hessian: str = "diagonal",
     ) -> None:
         self.learning_rate = learning_rate
@@ -1813,11 +1820,43 @@ class _GBMEstimatorCore(
         before.
         """
         kwargs = {}
-        if self.multiclass_strategy != "per_class_trees":
-            kwargs["multiclass_strategy"] = self.multiclass_strategy
+        strategy = getattr(self, "multiclass_strategy_", None) or "per_class_trees"
+        if strategy != "per_class_trees":
+            kwargs["multiclass_strategy"] = strategy
         if self.multiclass_hessian != "diagonal":
             kwargs["multiclass_hessian"] = self.multiclass_hessian
         return kwargs
+
+    def _resolve_multiclass_strategy(self, rows: int, features: int, classes: int) -> str:
+        """The ``multiclass_strategy`` a multiclass fit uses.
+
+        An explicit strategy is used as given. ``"auto"`` picks
+        ``"vector_leaves"`` only under ``training_policy="auto"``, when the
+        fit uses nothing vector leaves do not support, and when the data is
+        large enough for one shared tree per round to beat per-class trees
+        (see ``_prefers_vector_leaves``). ``multiclass_hessian=
+        "full"`` needs vector leaves, so it selects them whenever they are
+        supported.
+        """
+        if self.multiclass_strategy != "auto":
+            return self.multiclass_strategy
+        supported = not (
+            self.training_mode == "morph"
+            or self.leaf_model == "linear"
+            or self.leaf_solver == "dro"
+            or self.neutralization == "split_penalty"
+            or self.interaction_constraints
+            or (self.max_cat_threshold > 0 and self.categorical_feature_indices)
+        )
+        if not supported:
+            return "per_class_trees"
+        if self.multiclass_hessian == "full":
+            return "vector_leaves"
+        if self.training_policy != "auto":
+            return "per_class_trees"
+        if _prefers_vector_leaves(rows, features, classes):
+            return "vector_leaves"
+        return "per_class_trees"
 
     def _resolved_learning_rate(self, mode: str, init_model: object | None) -> float:
         if self.learning_rate != _auto_rounds.AUTO:

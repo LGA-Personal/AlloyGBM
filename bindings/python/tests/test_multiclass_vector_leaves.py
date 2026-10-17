@@ -35,13 +35,13 @@ def fit(**kwargs: object) -> GBMClassifier:
     return GBMClassifier(**params).fit(X, y)
 
 
-def test_defaults_are_per_class_trees_with_diagonal_hessian() -> None:
+def test_defaults_are_auto_strategy_with_diagonal_hessian() -> None:
     model = GBMClassifier()
 
-    assert model.multiclass_strategy == "per_class_trees"
+    assert model.multiclass_strategy == "auto"
     assert model.multiclass_hessian == "diagonal"
     params = model.get_params()
-    assert params["multiclass_strategy"] == "per_class_trees"
+    assert params["multiclass_strategy"] == "auto"
     assert params["multiclass_hessian"] == "diagonal"
 
 
@@ -174,7 +174,10 @@ def test_vector_leaves_auto_n_estimators(hessian: str) -> None:
 @pytest.mark.parametrize(
     "kwargs, message",
     [
-        ({"multiclass_hessian": "full"}, "requires multiclass_strategy='vector_leaves'"),
+        (
+            {"multiclass_strategy": "per_class_trees", "multiclass_hessian": "full"},
+            "requires multiclass_strategy='vector_leaves'",
+        ),
         (
             {"multiclass_strategy": "vector_leaves", "training_mode": "morph"},
             "does not support",
