@@ -1749,6 +1749,11 @@ class _GBMEstimatorCore(
 
         Parameters
         ----------
+        time_index : array-like of int or None, optional
+            Period of each row (era, day, week...). Required by
+            ``time_decay_half_life``, which weights each row by
+            ``0.5 ** ((max(time_index) - t) / half_life)`` and makes the
+            ``n_estimators="auto"`` holdout the newest periods.
         init_model : GBMRegressor or None, optional
             A previously fitted model to continue training from (warm-start).
             When provided, training resumes from this model's trees and
