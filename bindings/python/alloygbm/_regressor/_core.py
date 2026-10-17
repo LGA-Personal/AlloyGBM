@@ -1700,6 +1700,11 @@ class _GBMEstimatorCore(
 
         Parameters
         ----------
+        time_index : array-like of int or None, optional
+            Period of each row (era, day, week...). With
+            ``n_estimators="auto"``, the holdout that picks the round count
+            becomes the newest periods instead of random rows. Also feeds
+            ``categorical_time_aware`` encoding.
         init_model : GBMRegressor or None, optional
             A previously fitted model to continue training from (warm-start).
             When provided, training resumes from this model's trees and
@@ -1737,7 +1742,7 @@ class _GBMEstimatorCore(
         mode = self._auto_rounds_mode(targets, fit_kwargs)
         if mode == _auto_rounds.MODE_HOLDOUT:
             self._check_holdout_inputs(X, targets, fit_kwargs)
-            split = self._auto_rounds_split(targets, group)
+            split = self._auto_rounds_split(targets, group, time_index)
             if split is not None and not self._split_has_weight_on_both_sides(
                 sample_weight, split
             ):
@@ -1789,21 +1794,31 @@ class _GBMEstimatorCore(
         holdout_unsupported = (
             self.neutralization != "none"
             or fit_kwargs["factor_exposures"] is not None
-            or fit_kwargs["time_index"] is not None
             or self.categorical_time_aware
             or len(targets) < _auto_rounds.AUTO_MIN_ROWS
         )
         return _auto_rounds.MODE_LEGACY if holdout_unsupported else _auto_rounds.MODE_HOLDOUT
 
     def _auto_rounds_split(
-        self, targets: np.ndarray, group: object | None
+        self, targets: np.ndarray, group: object | None, time_index: object | None = None
     ) -> tuple[np.ndarray, np.ndarray] | None:
         row_count = len(targets)
         class_labels = None
         group_ids = None
         if group is not None:
             group_ids = np.asarray(self._validate_group(group, row_count))
-        elif self._objective_name() in ("binary_crossentropy", "multiclass_softmax"):
+        if time_index is not None:
+            # The fit is a forecast of later periods, so its round count is
+            # tuned on the newest ones, not on a random sample of the past.
+            return _auto_rounds.time_holdout_split(
+                np.asarray(self._validate_time_index(time_index, row_count)),
+                _auto_rounds.AUTO_VALIDATION_FRACTION,
+                group_ids=group_ids,
+            )
+        if group_ids is None and self._objective_name() in (
+            "binary_crossentropy",
+            "multiclass_softmax",
+        ):
             class_labels = targets
         return _auto_rounds.holdout_split(
             row_count,
@@ -2015,6 +2030,8 @@ class _GBMEstimatorCore(
         if fit_kwargs["group"] is not None:
             holdout_kwargs["group"] = take(fit_kwargs["group"], train_idx)
             holdout_kwargs["eval_group"] = take(fit_kwargs["group"], valid_idx)
+        if fit_kwargs["time_index"] is not None:
+            holdout_kwargs["time_index"] = take(fit_kwargs["time_index"], train_idx)
         if fit_kwargs["categorical_feature_values"] is not None:
             holdout_kwargs["categorical_feature_values"] = take(
                 fit_kwargs["categorical_feature_values"], train_idx
@@ -2069,6 +2086,9 @@ class _GBMEstimatorCore(
             "holdout_best_round": best_round,
             "refit_rounds": rounds,
             "holdout_fit_seconds": holdout_seconds,
+            "holdout_split": (
+                "latest_periods" if fit_kwargs["time_index"] is not None else "random"
+            ),
         }
         return self
 
