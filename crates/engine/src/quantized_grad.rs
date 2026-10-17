@@ -302,6 +302,23 @@ impl QuantizedPacking {
         (i64::from(QuantizedGradients::grad_level(packed)) << self.grad_shift) + hess + 1
     }
 
+    /// `(grad_shift, hess_shift, hess_mask, count_mask, hess_level_per_row)`
+    /// for decoding many sums in a loop: grad levels are `sum >> grad_shift`,
+    /// rows `sum & count_mask`, and hess levels
+    /// `((sum >> hess_shift) & hess_mask) + rows * hess_level_per_row` (the
+    /// mask is zero under a constant Hessian, the per-row level zero otherwise).
+    #[inline(always)]
+    pub fn fields(self) -> (u32, u32, i64, i64, i64) {
+        let hess_mask = (1_i64 << (self.grad_shift - self.hess_shift)) - 1;
+        (
+            self.grad_shift,
+            self.hess_shift,
+            hess_mask,
+            (1_i64 << self.hess_shift) - 1,
+            self.constant_hess_level,
+        )
+    }
+
     /// Split a summed triple back into `(grad_level_sum, hess_level_sum, count)`.
     #[inline(always)]
     pub fn decode(self, sum: i64) -> (i64, i64, u32) {
@@ -457,8 +474,13 @@ impl<B: BackendOps> BackendOps for QuantizedHistogramBackend<'_, B> {
         feature_tiles: &[FeatureTile],
         execution: HistogramExecution,
     ) -> EngineResult<HistogramBundle> {
-        self.inner
-            .build_histograms_quantized(binned_matrix, quantized, node, feature_tiles, execution)
+        self.inner.build_histograms_quantized(
+            binned_matrix,
+            quantized,
+            node,
+            feature_tiles,
+            execution,
+        )
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
@@ -472,8 +494,12 @@ impl<B: BackendOps> BackendOps for QuantizedHistogramBackend<'_, B> {
         feature_weights: &[f32],
         categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<SplitCandidate>> {
-        self.inner
-            .best_split_with_options(histograms, options, feature_weights, categorical_features)
+        self.inner.best_split_with_options(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+        )
     }
 
     fn shortlist_standard_splits(
@@ -768,9 +794,18 @@ mod tests {
 
     #[test]
     fn stochastic_rounding_is_unbiased() {
-        let gradients = vec![GradientPair { grad: 0.37, hess: 0.61 }; 200_000];
+        let gradients = vec![
+            GradientPair {
+                grad: 0.37,
+                hess: 0.61
+            };
+            200_000
+        ];
         let mut with_extremes = gradients.clone();
-        with_extremes.push(GradientPair { grad: 1.0, hess: 1.0 });
+        with_extremes.push(GradientPair {
+            grad: 1.0,
+            hess: 1.0,
+        });
         let quantized = QuantizedGradients::quantize(&with_extremes, 3, 11).unwrap();
         let rows = gradients.len();
         let (grad_sum, hess_sum) = quantized.packed()[..rows]

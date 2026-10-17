@@ -19,8 +19,7 @@ use rayon::prelude::*;
 
 use crate::arena::HistogramArena;
 use crate::{
-    CpuBackend, NODE_GENERATION, RowPositions, SPARSE_WALK_COST, THREAD_ARENA,
-    THREAD_ROW_POSITIONS,
+    CpuBackend, NODE_GENERATION, RowPositions, SPARSE_WALK_COST, THREAD_ARENA, THREAD_ROW_POSITIONS,
 };
 
 /// Bin copies the interleaved kernel accumulates into.
@@ -105,7 +104,9 @@ impl CpuBackend {
             .any(Option::is_some)
             .then(|| {
                 (
-                    values.iter().fold(0_i64, |total, &value| total.wrapping_add(value)),
+                    values
+                        .iter()
+                        .fold(0_i64, |total, &value| total.wrapping_add(value)),
                     NODE_GENERATION.fetch_add(1, Ordering::Relaxed),
                 )
             });
@@ -234,7 +235,11 @@ impl CpuBackend {
             .expect("integer kernels require unbundled column-major bins");
         let values = quantized_node.values;
         let dominant = quantized_node.sparse.and_then(|(total, generation)| {
-            let dominant = binned_matrix.dominant_bins().get(feature).copied().flatten()?;
+            let dominant = binned_matrix
+                .dominant_bins()
+                .get(feature)
+                .copied()
+                .flatten()?;
             Some((usize::from(dominant).min(slot_cap), total, generation))
         });
         match dominant {
@@ -318,16 +323,26 @@ impl CpuBackend {
                 }
             },
         }
-        let packing = quantized_node.packing;
-        for (bin, &sum) in bins.iter().enumerate() {
-            // A non-empty bin always has a non-zero count field.
-            if sum != 0 {
-                let (grad, hess, count) = packing.decode(sum);
-                let target = base + bin;
-                arena.grad_sums[target] = (grad as f64 * quantized_node.grad_scale) as f32;
-                arena.hess_sums[target] = (hess as f64 * quantized_node.hess_scale) as f32;
-                arena.counts[target] = count;
-            }
+        // Branch-free so the fold vectorizes: on a node of a few hundred rows
+        // it touches as many bins as the row loop touches rows. Empty bins
+        // decode to zeros, which is what the arena already holds.
+        let (grad_shift, hess_shift, hess_mask, count_mask, hess_per_row) =
+            quantized_node.packing.fields();
+        let grad_scale = quantized_node.grad_scale as f32;
+        let hess_scale = quantized_node.hess_scale as f32;
+        let grad_sums = &mut arena.grad_sums[base..base + feature_bins];
+        let hess_sums = &mut arena.hess_sums[base..base + feature_bins];
+        let counts = &mut arena.counts[base..base + feature_bins];
+        for ((&sum, (grad, hess)), count) in bins
+            .iter()
+            .zip(grad_sums.iter_mut().zip(hess_sums.iter_mut()))
+            .zip(counts.iter_mut())
+        {
+            let rows = sum & count_mask;
+            let hess_levels = ((sum >> hess_shift) & hess_mask) + rows * hess_per_row;
+            *grad = (sum >> grad_shift) as f32 * grad_scale;
+            *hess = hess_levels as f32 * hess_scale;
+            *count = rows as u32;
         }
     }
 }
