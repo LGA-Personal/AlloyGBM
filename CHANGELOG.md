@@ -39,6 +39,22 @@
 
 ### Changed
 
+- **`ranking_objective="yetirank"` is now the published YetiRank; the old
+  objective is `rank:ndcg_smoothed`.** Retraining with `"yetirank"` gives
+  different models from v1.0.0. The new objective follows Gulin et al. as
+  CatBoost implements it: Logistic noise on the scores, 10 noisy rankings
+  per query per round, pairs only between neighbours in each noisy ranking,
+  weighted by label gap times a 0.85 position decay, and a pairwise logistic
+  loss on the clean scores. The objective that shipped as `"yetirank"` was
+  LambdaMART NDCG over all pairs on uniform-noise-smoothed scores; it is
+  unchanged as `ranking_objective="rank:ndcg_smoothed"`, so pass that to
+  reproduce earlier results. Saved models load and predict exactly as before:
+  rankers store raw-score trees and the artifact's objective name only picks
+  the identity post-transform. At default settings the new objective ties or
+  beats the old one on three small ranking sets and trails it by 0.009
+  NDCG@10 on an MSLR-WEB10K slice, fitting 4x faster there; with
+  `lambda_l2=100` both reach 0.497. See `docs/benchmarks/yetirank_v1.md`.
+
 - **Multiclass auto policy: leaf L2 3, row subsample 0.8 and split-score
   noise.** Under `training_policy="auto"`, multiclass softmax now uses leaf L2
   3 (was 1), row subsample 0.8 at every size (was none below 2,048 rows), and

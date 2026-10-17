@@ -57,7 +57,8 @@ mod profiling;
 pub use objectives::{
     BinaryCrossEntropyObjective, GammaObjective, LambdaMARTObjective, MultiClassSoftmaxObjective,
     PairwiseRankingObjective, PoissonObjective, QuantileObjective, QueryRMSEObjective,
-    SquaredErrorObjective, TweedieObjective, XeNDCGObjective, YetiRankObjective,
+    SmoothedNdcgObjective, SquaredErrorObjective, TweedieObjective, XeNDCGObjective,
+    YETIRANK_DEFAULT_DECAY, YETIRANK_DEFAULT_PERMUTATIONS, YetiRankObjective,
     compute_group_boundaries,
 };
 pub use profiling::{TrainingProfileSnapshot, TreeStage, time_tree_stage};

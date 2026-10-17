@@ -1,0 +1,9 @@
+yeti_depthwise_norand 0 0.4952
+yeti_depthwise_norand 1 0.4877
+yeti_depthwise_norand 2 0.492
+yeti_symmetric_norand 0 0.4968
+yeti_symmetric_norand 1 0.5044
+yeti_symmetric_norand 2 0.498
+lambdamart_default 0 0.4927
+lambdamart_default 1 0.4871
+lambdamart_default 2 0.4897

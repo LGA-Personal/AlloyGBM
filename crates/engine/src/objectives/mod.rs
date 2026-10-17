@@ -12,8 +12,9 @@ pub use multiclass::MultiClassSoftmaxObjective;
 pub use quantile::QuantileObjective;
 pub(crate) use quantile::{resolve_boundaries_for_len, weighted_quantile};
 pub use ranking::{
-    LambdaMARTObjective, PairwiseRankingObjective, QueryRMSEObjective, XeNDCGObjective,
-    YetiRankObjective, compute_group_boundaries,
+    LambdaMARTObjective, PairwiseRankingObjective, QueryRMSEObjective, SmoothedNdcgObjective,
+    XeNDCGObjective, YETIRANK_DEFAULT_DECAY, YETIRANK_DEFAULT_PERMUTATIONS, YetiRankObjective,
+    compute_group_boundaries,
 };
 pub use squared::SquaredErrorObjective;
 
