@@ -4,6 +4,7 @@ use alloygbm_core::{
 };
 
 use crate::error::{EngineError, EngineResult};
+use crate::quantized_grad::QuantizedGradients;
 use crate::split_options::{
     CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, PreparedLinearSplit,
     SplitNoise, SplitSelectionOptions, SplitShortlist,
@@ -49,6 +50,28 @@ pub trait BackendOps: Sync {
             node,
             feature_tiles,
             include_grad_sq,
+        )
+    }
+    /// Histograms over a round's quantized gradients. Bins hold the integer
+    /// sums scaled back to floats, so the split scanners read them like any
+    /// other bundle. The default dequantizes every row and builds float
+    /// histograms; backends with integer kernels override it.
+    fn build_histograms_quantized(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        quantized: &QuantizedGradients,
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        execution: HistogramExecution,
+    ) -> EngineResult<HistogramBundle> {
+        let gradients = quantized.dequantize_all();
+        self.build_histograms_with_execution(
+            binned_matrix,
+            &gradients,
+            node,
+            feature_tiles,
+            false,
+            execution,
         )
     }
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>>;
