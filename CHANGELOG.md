@@ -175,8 +175,9 @@
   time-ordered holdout without decay. On four time-ordered public datasets
   the holdout alone lowers elec2 logloss 24% and Beijing PM2.5 RMSE 4.9%
   (8/8 paired wins), because a random holdout of autocorrelated rows picks
-  10-40x too many rounds; decay on top helps a little on drifting data and
-  costs a little elsewhere. `time_decay_` reports the effective sample size.
+  10-40x too many rounds; decay on top helps a little on drifting data,
+  costs a little elsewhere, and lowered Numerai per-era correlation at every
+  half-life tried (0.0075 to 0.0049-0.0063, one seed). `time_decay_` reports the effective sample size.
   Default `None` leaves fits unchanged. See `docs/benchmarks/time_decay_v1.md`.
 
 - **`multiclass_strategy` (`"auto"`, `"per_class_trees"`, `"vector_leaves"`)

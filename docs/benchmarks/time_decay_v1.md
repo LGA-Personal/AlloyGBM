@@ -72,14 +72,35 @@ vs 233; power 254 vs 187; weather 227 vs 186.
 - **Decay without the time-ordered holdout does not help**: the `/random`
   arms keep the leaked round count and land at or above baseline on three of
   four datasets.
+- **On Numerai decay hurts** (test corr 0.0075 to 0.0049-0.0063; see below).
 - Use `time_decay_half_life=inf` for the time-ordered holdout alone; try a
-  half-life around half the training span only where the target's relation to
-  the features drifts (elec2 is the textbook drift dataset).
+  finite half-life only where the target's relation to the features drifts
+  (elec2 is the textbook drift dataset), and check it against `inf`.
+
+## Numerai
+
+Quick profile of `benchmarks/numerai_scale.py` (PR #160) with a
+`--alloy-time-decay-half-life` flag, AlloyGBM only: medium features (780),
+156/52/104 eras with a 4-era embargo, seed 85, Apple M4 (10 threads). Early
+stopping uses the validation chunk (`eval_set`), so this measures the decay
+weights alone, not the latest-periods holdout.
+
+| Half-life (eras) | Test per-era corr | Sharpe | Positive eras | Trees | ESS share | Valid corr |
+|---|---:|---:|---:|---:|---:|---:|
+| none | **0.0075** | **0.473** | 66% | 189 | 100% | 0.0120 |
+| 208 | 0.0049 | 0.325 | 64% | 56 | 97.9% | 0.0096 |
+| 104 | 0.0063 | 0.396 | 66% | 83 | 92.2% | 0.0087 |
+| 52 | 0.0054 | 0.402 | 65% | 50 | 75.5% | 0.0063 |
+
+The baseline reproduces the first at-scale run exactly. Every half-life
+scores lower, and every decayed fit stops at a weaker validation peak with
+fewer trees. It is one seed and the ordering across half-lives is not
+monotone, so the gaps between half-lives are noise, but the direction is
+clear: recency weighting does not help on Numerai at this setup.
 
 ## Not covered
 
-- Numerai (the plan's test bed): eras as `time_index`, half-lives of none,
-  208, 104 and 52 eras on the quick profile of `benchmarks/numerai_scale.py`.
+- Numerai with several seeds, a fixed tree count, or the deep profile.
 - The holdout has no embargo between its training periods and the held-out
   newest periods; targets that overlap neighbouring periods (Numerai's 20-day
   targets) leak slightly across the cut.

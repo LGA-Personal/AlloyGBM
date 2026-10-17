@@ -241,8 +241,9 @@ those small datasets; see `docs/benchmarks/auto_rounds_v1.md`.
   - On four time-ordered datasets the time-ordered holdout is most of the
     gain (elec2 logloss -24%, Beijing PM2.5 RMSE -4.9%), because a random
     holdout of autocorrelated rows picks far too many rounds; a half-life
-    around half the training span adds a little on drifting data and costs a
-    little elsewhere. See `docs/benchmarks/time_decay_v1.md`.
+    around half the training span adds a little on drifting data, costs a
+    little elsewhere, and lowered Numerai test correlation at every half-life
+    tried. Start from `float("inf")`. See `docs/benchmarks/time_decay_v1.md`.
   - `time_decay_` records the half-life, `time_max`, the row count, the
     smallest decay weight and the Kish effective sample size
     `(Σw)² / Σw²`, which decay shrinks. Heavy decay also shrinks the
