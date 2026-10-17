@@ -50,6 +50,7 @@ nohup.out
 *.log
 benchmarks/data/
 benchmarks/results/numerai/
+benchmarks/results/numerai_scale/
 benchmarks/results/*.log
 benchmarks/results/*.json
 docs/site/build/

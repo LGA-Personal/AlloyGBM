@@ -127,6 +127,11 @@
 
 ### Fixed
 
+- **`best_iteration_` follows a custom `eval_metric`.** When an `eval_metric`
+  callable drove early stopping, the model was truncated at the metric's best
+  round but `best_iteration_` and `best_score_` still reported where the
+  built-in validation loss bottomed out, which could lie past the kept trees.
+  Both now describe the custom metric's best round.
 - **Quantile leaf refinement now counts NaN and categorical rows in the
   right leaf.** The pass that resets quantile leaves to the empirical
   quantile of their residuals sent every row left when its bin was at or
