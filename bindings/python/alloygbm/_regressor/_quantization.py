@@ -932,6 +932,32 @@ class _QuantizationMixin:
             quantized.append(quantized_row)
         return quantized
 
+    def _quantize_dense_values_for_prediction(
+        self, flat_values: list[float], row_count: int, feature_count: int
+    ) -> list[float]:
+        """Quantize a flat row-major payload exactly as ``predict`` does."""
+        max_bins = self.continuous_binning_max_bins
+        if self.continuous_binning_strategy == "linear":
+            mins, maxs = self._require_continuous_feature_bounds()
+            rank_flags = self._continuous_feature_linear_rank_flags
+            if rank_flags is not None and any(rank_flags):
+                return self._quantize_dense_values_linear_with_selective_rank(
+                    flat_values, row_count, feature_count, mins, maxs, rank_flags,
+                    self._require_continuous_feature_sorted_values(), max_bins=max_bins,
+                )
+            return self._quantize_dense_values_linear(
+                flat_values, row_count, feature_count, mins, maxs, max_bins=max_bins
+            )
+        if self.continuous_binning_strategy == "rank":
+            return self._quantize_dense_values_rank(
+                flat_values, row_count, feature_count,
+                self._require_continuous_feature_sorted_values(), max_bins=max_bins,
+            )
+        return self._quantize_dense_values_quantile(
+            flat_values, row_count, feature_count,
+            self._require_continuous_feature_quantile_cuts(), max_bins=max_bins,
+        )
+
     def _quantize_rows_for_prediction(
         self, rows: Sequence[Sequence[float]]
     ) -> list[list[float]]:

@@ -297,6 +297,63 @@ fn predict_tree_contribution(tree: &PredictorTree, features: &[f32], use_float: 
     }
 }
 
+/// Walks one tree and returns the terminal leaf slot (`2 * node + went_right`)
+/// together with the tree's contribution for the row. Empty trees return
+/// `None` for the slot and a zero contribution.
+#[inline]
+fn predict_tree_leaf(
+    tree: &PredictorTree,
+    features: &[f32],
+    use_float: bool,
+) -> (Option<u32>, f32) {
+    let mut node_index = tree.root_index;
+    let mut terminal: Option<(u32, CompactPredictorNode, bool)> = None;
+    while let Some(node) = tree.nodes.get(node_index as usize).copied() {
+        let feature_value = features[node.feature_index as usize];
+        let went_left = predictor_went_left(tree, node, feature_value, use_float);
+        terminal = Some((node_index, node, went_left));
+        node_index = node.child_index(went_left);
+    }
+
+    match terminal {
+        Some((index, node, went_left)) => (
+            Some(index * 2 + u32::from(!went_left)),
+            tree.eval_leaf(node, went_left, features),
+        ),
+        None => (None, 0.0),
+    }
+}
+
+/// Maps every leaf slot (`2 * node + went_right`) of a tree to a dense
+/// ordinal `0..n_leaves`, numbered in compact-node order. Slots that lead to
+/// a child node map to `NO_COMPACT_INDEX`.
+fn tree_leaf_ordinals(tree: &PredictorTree) -> Vec<u32> {
+    let mut ordinals = vec![NO_COMPACT_INDEX; tree.nodes.len() * 2];
+    let mut next = 0_u32;
+    for (index, node) in tree.nodes.iter().enumerate() {
+        for (side, child) in [node.left_child, node.right_child].into_iter().enumerate() {
+            if tree.nodes.get(child as usize).is_none() {
+                ordinals[index * 2 + side] = next;
+                next += 1;
+            }
+        }
+    }
+    ordinals
+}
+
+/// Per-row leaf membership for every tree of a single-output model.
+///
+/// Both vectors are row-major `row_count x tree_count`. Leaf indices are
+/// dense per tree (`0..n_leaves`, like LightGBM's `pred_leaf`); `leaf_outputs`
+/// holds each tree's contribution to the raw score, which for a linear leaf
+/// varies with the row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeafAssignments {
+    pub tree_count: usize,
+    pub leaf_indices: Vec<u32>,
+    pub leaf_outputs: Vec<f32>,
+}
+
 fn combine_branch_contribution(
     prefix_scalar: f32,
     prefix_linear: Option<&LinearLeafCompact>,
@@ -1062,6 +1119,80 @@ impl Predictor {
             })?;
 
         Ok(predictions)
+    }
+
+    /// Leaf index and per-tree contribution for every row and tree, from a
+    /// flat row-major dense slice. Single-output models only.
+    pub fn predict_leaf_dense(
+        &self,
+        values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+    ) -> PredictorResult<LeafAssignments> {
+        if self.is_multiclass() {
+            return Err(PredictorError::ContractViolation(
+                "leaf indices are only available for single-output models".to_string(),
+            ));
+        }
+        let model_feature_count = self.metadata.feature_names.len();
+        if feature_count != model_feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature_count {} does not match model feature_count {}",
+                feature_count, model_feature_count
+            )));
+        }
+        let expected_elements = checked_predictor_dense_element_count(row_count, feature_count)?;
+        if values.len() != expected_elements {
+            return Err(PredictorError::InvalidInput(format!(
+                "values length {} does not match row_count * feature_count {}",
+                values.len(),
+                expected_elements
+            )));
+        }
+        let tree_count = self.trees.len();
+        let output_count = row_count.checked_mul(tree_count).ok_or_else(|| {
+            PredictorError::InvalidInput(format!(
+                "row_count * tree_count overflows usize ({row_count} * {tree_count})"
+            ))
+        })?;
+        let ordinals: Vec<Vec<u32>> = self.trees.iter().map(tree_leaf_ordinals).collect();
+        let use_float = self.use_float_thresholds;
+        let mut leaf_indices = vec![0_u32; output_count];
+        let mut leaf_outputs = vec![0.0_f32; output_count];
+        if tree_count == 0 {
+            return Ok(LeafAssignments {
+                tree_count,
+                leaf_indices,
+                leaf_outputs,
+            });
+        }
+
+        let fill_row = |row_index: usize, indices: &mut [u32], outputs: &mut [f32]| {
+            let row = &values[row_index * feature_count..(row_index + 1) * feature_count];
+            for (tree_index, tree) in self.trees.iter().enumerate() {
+                let (slot, output) = predict_tree_leaf(tree, row, use_float);
+                indices[tree_index] = slot.map_or(0, |slot| ordinals[tree_index][slot as usize]);
+                outputs[tree_index] = output;
+            }
+        };
+        if should_parallel_predict_batch(row_count, tree_count) {
+            leaf_indices
+                .par_chunks_mut(tree_count)
+                .zip(leaf_outputs.par_chunks_mut(tree_count))
+                .enumerate()
+                .for_each(|(row_index, (indices, outputs))| fill_row(row_index, indices, outputs));
+        } else {
+            leaf_indices
+                .chunks_mut(tree_count)
+                .zip(leaf_outputs.chunks_mut(tree_count))
+                .enumerate()
+                .for_each(|(row_index, (indices, outputs))| fill_row(row_index, indices, outputs));
+        }
+        Ok(LeafAssignments {
+            tree_count,
+            leaf_indices,
+            leaf_outputs,
+        })
     }
 
     pub fn predict_row_stub(&self, features: &[f32]) -> PredictorResult<f32> {
@@ -2104,6 +2235,63 @@ mod tests {
             .map(|section| section.payload.clone())
             .expect("predictor layout payload exists");
         (parsed.contract.metadata, trees_payload, layout_payload)
+    }
+
+    #[test]
+    fn predict_leaf_dense_outputs_sum_to_raw_prediction() {
+        let (engine_model, dataset) = train_engine_model();
+        let artifact = engine_model
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let predictor = Predictor::from_artifact_bytes(&artifact).expect("artifact parses");
+        let rows = fixture_rows(&dataset);
+        let feature_count = rows[0].len();
+        let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+        let leaves = predictor
+            .predict_leaf_dense(&flat, rows.len(), feature_count)
+            .expect("leaf assignments");
+        assert!(leaves.tree_count > 0);
+        assert_eq!(leaves.leaf_indices.len(), rows.len() * leaves.tree_count);
+
+        let raw = predictor.predict_batch_raw(&rows).expect("raw predictions");
+        let n_leaves: Vec<u32> = predictor
+            .trees
+            .iter()
+            .map(|tree| {
+                tree_leaf_ordinals(tree)
+                    .iter()
+                    .filter(|&&o| o != NO_COMPACT_INDEX)
+                    .count() as u32
+            })
+            .collect();
+        for (row_index, expected) in raw.iter().enumerate() {
+            let span = row_index * leaves.tree_count..(row_index + 1) * leaves.tree_count;
+            let total = predictor.baseline_prediction
+                + leaves.leaf_outputs[span.clone()].iter().sum::<f32>();
+            assert!((total - expected).abs() < 1e-5, "{total} vs {expected}");
+            for (tree_index, leaf) in leaves.leaf_indices[span].iter().enumerate() {
+                assert!(*leaf < n_leaves[tree_index].max(1));
+            }
+        }
+        // Rows that agree on every leaf get the same per-tree outputs.
+        let distinct: std::collections::BTreeSet<Vec<u32>> = leaves
+            .leaf_indices
+            .chunks(leaves.tree_count)
+            .map(<[u32]>::to_vec)
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "fixture rows should land in different leaves"
+        );
+    }
+
+    #[test]
+    fn predict_leaf_dense_rejects_feature_count_mismatch() {
+        let predictor = predictor_stub();
+        let err = predictor
+            .predict_leaf_dense(&[0.0; 3], 1, 3)
+            .expect_err("feature mismatch must fail");
+        assert!(err.to_string().contains("feature_count"));
     }
 
     #[test]
