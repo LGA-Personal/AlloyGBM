@@ -77,6 +77,24 @@ def _prefers_vector_leaves(rows: int, features: int, classes: int) -> bool:
     return classes >= _AUTO_VECTOR_MIN_CLASSES and rows >= _AUTO_VECTOR_MIN_ROWS
 
 
+_MULTICLASS_SKETCHES = ("none", "top_outputs", "random_sampling", "random_projection")
+
+
+def _validate_multiclass_sketch(value: object) -> str:
+    if not isinstance(value, str) or value not in _MULTICLASS_SKETCHES:
+        raise ValueError(
+            "multiclass_sketch must be 'none', 'top_outputs', 'random_sampling' "
+            "or 'random_projection'"
+        )
+    return value
+
+
+def _validate_multiclass_sketch_dim(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+        raise ValueError("multiclass_sketch_dim must be an integer >= 1")
+    return int(value)
+
+
 def _validate_multiclass_strategy(value: object) -> str:
     if not isinstance(value, str) or value not in _MULTICLASS_STRATEGIES:
         raise ValueError(
@@ -220,6 +238,8 @@ class _GBMEstimatorCore(
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
+        multiclass_sketch: str = "none",
+        multiclass_sketch_dim: int = 5,
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -615,6 +635,8 @@ class _GBMEstimatorCore(
         self.glm_hessian = _validate_glm_hessian(glm_hessian)
         self.grn_strength = _validate_grn_strength(grn_strength)
         self.grn_form = _validate_grn_form(grn_form)
+        self.multiclass_sketch = _validate_multiclass_sketch(multiclass_sketch)
+        self.multiclass_sketch_dim = _validate_multiclass_sketch_dim(multiclass_sketch_dim)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -705,6 +727,8 @@ class _GBMEstimatorCore(
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
+        multiclass_sketch: str = "none",
+        multiclass_sketch_dim: int = 5,
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -776,6 +800,8 @@ class _GBMEstimatorCore(
         self.glm_hessian = glm_hessian
         self.grn_strength = grn_strength
         self.grn_form = grn_form
+        self.multiclass_sketch = multiclass_sketch
+        self.multiclass_sketch_dim = multiclass_sketch_dim
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -864,7 +890,9 @@ class _GBMEstimatorCore(
             f"multiclass_hessian='{self.multiclass_hessian}', "
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
-            f"grn_form='{self.grn_form}'"
+            f"grn_form='{self.grn_form}', "
+            f"multiclass_sketch='{self.multiclass_sketch}', "
+            f"multiclass_sketch_dim={self.multiclass_sketch_dim}"
             ")"
         )
 
@@ -942,6 +970,8 @@ class _GBMEstimatorCore(
             "glm_hessian": self.glm_hessian,
             "grn_strength": self.grn_strength,
             "grn_form": self.grn_form,
+            "multiclass_sketch": self.multiclass_sketch,
+            "multiclass_sketch_dim": self.multiclass_sketch_dim,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -1017,6 +1047,8 @@ class _GBMEstimatorCore(
             "glm_hessian",
             "grn_strength",
             "grn_form",
+            "multiclass_sketch",
+            "multiclass_sketch_dim",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1122,6 +1154,13 @@ class _GBMEstimatorCore(
 
         if "grn_form" in params:
             self.grn_form = _validate_grn_form(params["grn_form"])
+
+        if "multiclass_sketch" in params:
+            self.multiclass_sketch = _validate_multiclass_sketch(params["multiclass_sketch"])
+        if "multiclass_sketch_dim" in params:
+            self.multiclass_sketch_dim = _validate_multiclass_sketch_dim(
+                params["multiclass_sketch_dim"]
+            )
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1894,6 +1933,9 @@ class _GBMEstimatorCore(
             kwargs["multiclass_strategy"] = strategy
         if self.multiclass_hessian != "diagonal":
             kwargs["multiclass_hessian"] = self.multiclass_hessian
+        if strategy == "vector_leaves" and self.multiclass_sketch != "none":
+            kwargs["multiclass_sketch"] = self.multiclass_sketch
+            kwargs["multiclass_sketch_dim"] = int(self.multiclass_sketch_dim)
         return kwargs
 
     def _auto_round_cap(self) -> int:
@@ -1915,9 +1957,14 @@ class _GBMEstimatorCore(
         fit uses nothing vector leaves do not support, and when the data is
         large enough for one shared tree per round to beat per-class trees
         (see ``_prefers_vector_leaves``). ``multiclass_hessian=
-        "full"`` needs vector leaves, so it selects them whenever they are
-        supported.
+        "full"`` and a ``multiclass_sketch`` need vector leaves, so they
+        select them whenever they are supported.
         """
+        if self.multiclass_strategy == "per_class_trees" and self.multiclass_sketch != "none":
+            raise ValueError(
+                "multiclass_sketch scores the splits of vector-leaf trees; use "
+                "multiclass_strategy='vector_leaves' or 'auto', or multiclass_sketch='none'"
+            )
         if self.multiclass_strategy != "auto":
             return self.multiclass_strategy
         supported = not (
@@ -1930,7 +1977,7 @@ class _GBMEstimatorCore(
         )
         if not supported:
             return "per_class_trees"
-        if self.multiclass_hessian == "full":
+        if self.multiclass_hessian == "full" or self.multiclass_sketch != "none":
             return "vector_leaves"
         if self.training_policy != "auto":
             return "per_class_trees"
