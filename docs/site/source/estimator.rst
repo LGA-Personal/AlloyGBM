@@ -677,6 +677,8 @@ Main methods
 - ``load_model(path)`` (classmethod)
 - ``artifact_bytes`` -- property returning the raw artifact bytes
 - ``score(X, y)``
+- ``apply(X)`` -- ``(n_samples, n_trees)`` int32 leaf indices (single-output
+  models); see `Prediction intervals`_
 
 Important ``fit(...)`` rules:
 
@@ -760,6 +762,38 @@ The ``"quantile"`` objective is supported in combination with DART, MorphBoost, 
 Three deviance metrics in ``alloygbm.evaluation`` partner with the new
 objectives: ``poisson_deviance``, ``gamma_deviance``, and
 ``tweedie_deviance``.
+
+Prediction intervals
+--------------------
+
+``alloygbm.conformal`` wraps a fitted regressor and turns its point predictions
+into intervals with a finite-sample coverage guarantee. Fit on one part of the
+training data, calibrate on rows the model never saw, then predict intervals:
+
+.. code-block:: python
+
+   from alloygbm import GBMRegressor
+   from alloygbm.conformal import LoBoost
+
+   model = GBMRegressor().fit(X_fit, y_fit)
+   intervals = LoBoost(model).calibrate(X_cal, y_cal, alpha=0.1)
+   lower, upper = intervals.predict_interval(X_test)
+   lower, upper = intervals.predict_interval(X_test, alpha=0.2)
+
+- ``SplitConformal(model)`` -- one quantile of ``|y - predict(X)|`` over the
+  calibration rows; every interval has the same width.
+- ``LoBoost(model, n_part=50, p_min=0.005)`` -- local conformal intervals from
+  the model's own trees (Santos et al., arXiv 2602.22432). Calibration rows are
+  grouped by shared leaves, one tree at a time, while a group keeps at least
+  ``max(n_part, ceil(p_min * n_cal))`` rows; smaller groups merge into the
+  group with the closest leaf path, and each group gets its own residual
+  quantile. A row reaching a leaf no calibration row reached gets the
+  quantile of the deepest group it matched.
+
+Both work with ``GBMRegressor`` and ``GBMRanker``, pickle with their model and
+leave training and the artifact unchanged. Coverage is marginal. ``apply(X)``
+exposes the leaf indices (numbered ``0..n_leaves - 1`` per tree) on
+``GBMRegressor``, ``GBMRanker`` and binary ``GBMClassifier``.
 
 SHAP interaction values (v0.11.0+)
 ----------------------------------
