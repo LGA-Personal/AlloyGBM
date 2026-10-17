@@ -104,7 +104,12 @@ fn random_sampling(
         .map(|_| {
             state = mixed_hash(state);
             let draw = unit_interval(state);
-            let mut class = classes - 1;
+            // Rounding can leave the cumulative sum just under 1; a draw past
+            // it takes the last class that can be drawn at all.
+            let mut class = probabilities
+                .iter()
+                .rposition(|&p| p > 0.0)
+                .unwrap_or(classes - 1);
             let mut cumulative = 0.0;
             for (c, &p) in probabilities.iter().enumerate() {
                 cumulative += p;
@@ -114,12 +119,14 @@ fn random_sampling(
                 }
             }
             let p = probabilities[class].max(f64::MIN_POSITIVE);
-            let scale = (1.0 / (dim as f64 * p).sqrt()) as f32;
+            // Scaled in f64: the column's squared norm is ||G||^2 / dim
+            // however small `p` is, but `scale` alone can exceed f32.
+            let scale = 1.0 / (dim as f64 * p).sqrt();
             gradients[class]
                 .iter()
                 .zip(&hessians)
                 .map(|(pair, &hess)| GradientPair {
-                    grad: pair.grad * scale,
+                    grad: (f64::from(pair.grad) * scale) as f32,
                     hess,
                 })
                 .collect()
@@ -256,6 +263,23 @@ mod tests {
             mean += squared_norms(&sketch, &rows).iter().sum::<f64>() / trials as f64;
         }
         assert!((mean / full - 1.0).abs() < 0.1, "ratio {}", mean / full);
+    }
+
+    #[test]
+    fn random_sampling_stays_finite_for_a_vanishing_class() {
+        // Class 0's gradients are tiny next to the others', so its sampling
+        // probability is far below f32 range; if drawn, its rescaled column
+        // must still be finite.
+        let mut g = columns(3, 10);
+        for pair in &mut g[0] {
+            pair.grad = 1e-30;
+        }
+        let rows: Vec<u32> = (0..10).collect();
+        for seed in 0..200 {
+            let sketch =
+                sketch_gradients(MulticlassSketch::RandomSampling, 2, &g, &rows, seed).unwrap();
+            assert!(sketch.iter().flatten().all(|pair| pair.grad.is_finite()));
+        }
     }
 
     #[test]
