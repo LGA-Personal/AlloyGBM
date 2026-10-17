@@ -1678,7 +1678,7 @@ class _GBMEstimatorCore(
             mode = _auto_rounds.MODE_LEGACY
         learning_rate = self._resolved_learning_rate(mode, init_model)
         if mode == _auto_rounds.MODE_EVAL_SET:
-            rounds = _auto_rounds.AUTO_ROUND_CAP
+            rounds = self._auto_round_cap()
             patience = self.early_stopping_rounds or _auto_rounds.AUTO_PATIENCE
         elif mode == _auto_rounds.MODE_LEGACY:
             rounds, patience = _auto_rounds.LEGACY_N_ESTIMATORS, self.early_stopping_rounds
@@ -1827,6 +1827,17 @@ class _GBMEstimatorCore(
             kwargs["multiclass_hessian"] = self.multiclass_hessian
         return kwargs
 
+    def _auto_round_cap(self) -> int:
+        """Round cap for ``n_estimators="auto"``.
+
+        A vector-leaf round fits all classes with one shared tree and needs
+        about twice as many rounds as per-class trees, so it gets twice the
+        cap.
+        """
+        if getattr(self, "multiclass_strategy_", None) == "vector_leaves":
+            return 2 * _auto_rounds.AUTO_ROUND_CAP
+        return _auto_rounds.AUTO_ROUND_CAP
+
     def _resolve_multiclass_strategy(self, rows: int, features: int, classes: int) -> str:
         """The ``multiclass_strategy`` a multiclass fit uses.
 
@@ -1937,7 +1948,7 @@ class _GBMEstimatorCore(
         # that the rule ignores anyway. The chosen round is unchanged.
         self._holdout_relative_tolerance = _auto_rounds.AUTO_RELATIVE_TOLERANCE
         try:
-            with self._round_overrides(_auto_rounds.AUTO_ROUND_CAP, learning_rate, patience):
+            with self._round_overrides(self._auto_round_cap(), learning_rate, patience):
                 self._fit_once(take(X, train_idx), y_array[train_idx], **holdout_kwargs)
         finally:
             self._holdout_relative_tolerance = 0.0
@@ -1969,7 +1980,7 @@ class _GBMEstimatorCore(
             "learning_rate": learning_rate,
             "validation_fraction": fraction,
             "validation_rows": int(len(valid_idx)),
-            "round_cap": _auto_rounds.AUTO_ROUND_CAP,
+            "round_cap": self._auto_round_cap(),
             "patience": patience,
             "relative_tolerance": _auto_rounds.AUTO_RELATIVE_TOLERANCE,
             "holdout_best_round": best_round,
