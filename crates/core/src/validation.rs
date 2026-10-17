@@ -110,6 +110,12 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if !params.grn_strength.is_finite() || params.grn_strength < 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "grn_strength must be finite and >= 0".to_string(),
+        ));
+    }
+
     for &c in &params.monotone_constraints {
         if c != -1 && c != 0 && c != 1 {
             return Err(CoreError::InvalidConfig(

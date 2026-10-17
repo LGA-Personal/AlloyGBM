@@ -95,6 +95,7 @@ pub(crate) use tiling::*;
 mod round;
 pub(crate) use round::*;
 
+mod grn;
 mod leaf_refinement;
 pub(crate) use leaf_refinement::*;
 

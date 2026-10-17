@@ -82,6 +82,12 @@ class _PersistenceMixin:
             self.n_jobs = None
         if not hasattr(self, "random_strength"):
             self.random_strength = None
+        if not hasattr(self, "glm_hessian"):
+            self.glm_hessian = "exact"
+        if not hasattr(self, "grn_strength"):
+            self.grn_strength = 0.0
+        if not hasattr(self, "grn_form"):
+            self.grn_form = "per_leaf"
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
         if self._is_fitted and not hasattr(self, "feature_bundling_diagnostics_"):

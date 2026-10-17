@@ -25,6 +25,7 @@ EXPECTED_KEYS = {
     "neutralization_effectiveness",
     "n_active_rows",
     "n_active_features",
+    "grn_lambda",
 }
 
 

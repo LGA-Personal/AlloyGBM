@@ -40,8 +40,10 @@ pub(crate) use validate::{
 // The Trainer impl uses many crate-level types and pub(crate) helpers; rather than
 // enumerate ~50 imports here, we use a glob import. Tightening this is left to a
 // future task.
+use crate::grn::{add_grn_to_row_hessians, grn_round_lambda};
 use crate::profiling::{RoundProfile, Stage as ProfileStage};
 use crate::*;
+use alloygbm_core::GrnForm;
 use multiclass_build::{
     MulticlassTreeBuildOutcome, collect_ordered_class_results, should_parallelize_multiclass_trees,
 };
@@ -1496,6 +1498,18 @@ impl Trainer {
                     class_original_gradient_norms.push(original_norm);
                 }
             }
+            let grn_lambda = grn_round_lambda(
+                self.params.grn_strength,
+                class_gradient_buffers.iter().map(Vec::as_slice),
+                n,
+            );
+            if let Some(lambda) = grn_lambda
+                && self.params.grn_form == GrnForm::PerRow
+            {
+                for buffer in &mut class_gradient_buffers {
+                    add_grn_to_row_hessians(buffer, dataset.sample_weights.as_deref(), lambda);
+                }
+            }
 
             // Shared row sampling across all K classes. In GOSS mode this
             // amplifies the sampled-low rows in every class buffer.
@@ -1542,6 +1556,11 @@ impl Trainer {
 
             let mut round_split_options = split_options;
             round_split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
+            if let Some(lambda) = grn_lambda
+                && self.params.grn_form == GrnForm::PerLeaf
+            {
+                round_split_options.l2_lambda += lambda;
+            }
             let raw_feature_values = &dataset.matrix.values;
             let build_class_tree =
                 |(class_k, candidate_predictions): (usize, &mut Vec<f32>)|
@@ -1638,7 +1657,9 @@ impl Trainer {
             for outcome in outcomes {
                 debug_assert_eq!(outcome.class_index, per_class_diagnostics.len());
                 any_tree_produced |= !outcome.round_stumps.is_empty();
-                per_class_diagnostics.push(outcome.diagnostics);
+                let mut diagnostics = outcome.diagnostics;
+                diagnostics.grn_lambda = grn_lambda;
+                per_class_diagnostics.push(diagnostics);
                 class_stumps[outcome.class_index].extend(outcome.round_stumps);
             }
 
@@ -2861,6 +2882,24 @@ impl Trainer {
                     &mut projection_scratch,
                 )?;
             }
+            let grn_lambda = grn_round_lambda(
+                self.params.grn_strength,
+                [&gradient_buffer[..]],
+                active_dataset.row_count(),
+            );
+            if let Some(lambda) = grn_lambda
+                && self.params.grn_form == GrnForm::PerRow
+            {
+                add_grn_to_row_hessians(
+                    &mut gradient_buffer,
+                    active_dataset.sample_weights.as_deref(),
+                    lambda,
+                );
+            }
+            let grn_row_hess_offset = match grn_lambda {
+                Some(lambda) if self.params.grn_form == GrnForm::PerRow => lambda,
+                _ => 0.0,
+            };
             let RoundRowSelection {
                 selected: root_row_indices,
                 excluded: excluded_row_indices,
@@ -2895,12 +2934,13 @@ impl Trainer {
             // round being committed, so we stay in lockstep with the other
             // per-round vecs (loss_per_completed_round, etc.).  Round-level
             // cost: a single linear pass over the gradient buffer.
-            let round_diagnostics = IterationDiagnostics::from_gradient_snapshot(
+            let mut round_diagnostics = IterationDiagnostics::from_gradient_snapshot(
                 gradients,
                 original_gradient_norm,
                 sampled_row_count,
                 sampled_feature_count,
             );
+            round_diagnostics.grn_lambda = grn_lambda;
 
             // Update EMA stats from this round's gradients before tree-building so
             // morph split selection sees the latest mean/std.
@@ -2924,6 +2964,11 @@ impl Trainer {
 
             let mut round_split_options = split_options;
             round_split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
+            if let Some(lambda) = grn_lambda
+                && self.params.grn_form == GrnForm::PerLeaf
+            {
+                round_split_options.l2_lambda += lambda;
+            }
             let raw_fv = &active_dataset.matrix.values;
             let colsample_bynode =
                 (self.params.colsample_bynode < 1.0).then_some(crate::colsample::ColsampleBynode {
@@ -3064,6 +3109,7 @@ impl Trainer {
                         &active_dataset.targets,
                         active_dataset.sample_weights.as_deref(),
                         round_split_options.l2_lambda,
+                        grn_row_hess_offset,
                         self.params.learning_rate,
                         binary_leaf_newton_steps,
                         controls.max_abs_leaf_value,
