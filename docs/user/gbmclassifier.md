@@ -69,6 +69,21 @@ All parameters from `GBMRegressor` are accepted, including:
   and multi-class targets (see [GBMRegressor — Boosting Mode](gbmregressor.md#boosting-mode)).
   For multi-class DART, `dart_max_drop` applies to the actual class-tree pool,
   so a four-class round advances the dropout pressure by four trees.
+- `multiclass_strategy` (multi-class only) picks the tree layout.
+  `"vector_leaves"` grows one tree per round whose splits are scored on all
+  classes at once and whose leaves hold one Newton step per class;
+  `"per_class_trees"` grows one tree per class per round. The default,
+  `"auto"`, uses vector leaves with at least 10 classes and 1,000 training
+  rows (under `training_policy="auto"`) and per-class trees otherwise, and
+  records the choice in `multiclass_strategy_`; set either value to override
+  it. `multiclass_hessian="full"` (at most 16
+  classes) solves those leaves with the full softmax Hessian, and
+  `"abs_residual"` uses `|p - y|` as the Hessian. Prediction, SHAP and saved
+  models are unchanged. In a sweep of 14 datasets from 500 to 20k rows, vector
+  leaves won with 10+ classes (mnist 13–17% lower log loss) and mostly lost
+  with fewer classes or under 1,000 rows. See
+  [GBMRegressor — Parameters](gbmregressor.md#parameters) for the details and
+  the options they do not support yet.
 
 The objective is always binary cross-entropy and is not configurable.
 

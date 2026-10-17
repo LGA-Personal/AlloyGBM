@@ -49,7 +49,8 @@ pub use binned::{
 };
 pub use config::{
     BoostingMode, DartNormalize, DartSampleType, Device, GlmHessian, GrnForm, LeafModelKind,
-    LeafSolverKind, MAX_TREE_NODE_SLOTS, TrainParams, TreeGrowth,
+    LeafSolverKind, MAX_TREE_NODE_SLOTS, MulticlassHessian, MulticlassStrategy, TrainParams,
+    TreeGrowth,
 };
 pub use dataset::{
     ColumnarMatrixColumnView, ColumnarMatrixView, DatasetMatrix, DatasetSchema, DenseMatrixView,

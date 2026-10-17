@@ -60,6 +60,18 @@ supported on binary and multi-class classification (see :doc:`estimator`
 ``dart_max_drop`` applies to the actual class-tree pool, so a four-class
 round advances dropout pressure by four trees.
 
+For multi-class targets, ``multiclass_strategy`` picks the tree layout.
+``"vector_leaves"`` grows one tree per round whose splits are scored on all
+classes at once and whose leaves hold one Newton step per class;
+``"per_class_trees"`` grows one tree per class per round. The default,
+``"auto"``, uses vector leaves with at least 10 classes and 1,000 training rows
+(under ``training_policy="auto"``) and per-class trees otherwise, and records
+the choice in ``multiclass_strategy_``; set either value to override it. ``multiclass_hessian="full"`` (at most
+16 classes) solves those leaves with the full softmax Hessian, and
+``"abs_residual"`` uses ``|p - y|`` as the Hessian. Prediction, SHAP and saved
+models are unchanged. See :doc:`estimator` for the options vector leaves do
+not support yet.
+
 Target requirements:
 
 - ``y`` must contain only values in ``{0, 1}`` (or ``{0.0, 1.0}``)

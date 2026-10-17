@@ -45,6 +45,46 @@ def _validate_random_strength(value: object) -> float | None:
     return strength
 
 
+_MULTICLASS_STRATEGIES = ("auto", "per_class_trees", "vector_leaves")
+
+
+_MULTICLASS_HESSIANS = ("diagonal", "full", "abs_residual")
+
+
+def _validate_multiclass_hessian(value: object) -> str:
+    if not isinstance(value, str) or value not in _MULTICLASS_HESSIANS:
+        raise ValueError(
+            "multiclass_hessian must be 'diagonal', 'full' or 'abs_residual'"
+        )
+    return value
+
+
+# Where ``multiclass_strategy="auto"`` switches to vector leaves. Set from a
+# learning-curve sweep at default settings (500 to 20k training rows, 14
+# multiclass datasets): the number of classes decided it, not rows or
+# features. With 10+ classes vector leaves won at 1k rows and up (mnist -13 to
+# -17% log loss, krkopt -1 to -3%, volkert -1 to -3%); with 3 to 7 classes
+# they mostly lost (waveform +5%, nursery +3 to +6%, okcupid +1 to +2%).
+# Below 1k rows they lost even with many classes (led24 +3%, and collins,
+# soybean and micro-mass in the PMLB suite).
+_AUTO_VECTOR_MIN_CLASSES = 10
+_AUTO_VECTOR_MIN_ROWS = 1000
+
+
+def _prefers_vector_leaves(rows: int, features: int, classes: int) -> bool:
+    """Whether ``multiclass_strategy="auto"`` picks vector leaves."""
+    del features  # did not separate wins from losses in the sweep
+    return classes >= _AUTO_VECTOR_MIN_CLASSES and rows >= _AUTO_VECTOR_MIN_ROWS
+
+
+def _validate_multiclass_strategy(value: object) -> str:
+    if not isinstance(value, str) or value not in _MULTICLASS_STRATEGIES:
+        raise ValueError(
+            "multiclass_strategy must be 'auto', 'per_class_trees' or 'vector_leaves'"
+        )
+    return value
+
+
 _GLM_HESSIANS = ("exact", "bounded")
 _GRN_FORMS = ("per_leaf", "per_row")
 
@@ -175,6 +215,8 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
+        multiclass_strategy: str = "auto",
+        multiclass_hessian: str = "diagonal",
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
@@ -568,6 +610,8 @@ class _GBMEstimatorCore(
         self.quantile_alpha = float(quantile_alpha)
         self.n_jobs = _validate_n_jobs(n_jobs)
         self.random_strength = _validate_random_strength(random_strength)
+        self.multiclass_strategy = _validate_multiclass_strategy(multiclass_strategy)
+        self.multiclass_hessian = _validate_multiclass_hessian(multiclass_hessian)
         self.glm_hessian = _validate_glm_hessian(glm_hessian)
         self.grn_strength = _validate_grn_strength(grn_strength)
         self.grn_form = _validate_grn_form(grn_form)
@@ -656,6 +700,8 @@ class _GBMEstimatorCore(
         quantile_alpha: float = 0.5,
         n_jobs: int | None = None,
         random_strength: float | None = None,
+        multiclass_strategy: str = "auto",
+        multiclass_hessian: str = "diagonal",
         glm_hessian: str = "exact",
         grn_strength: float = 0.0,
         grn_form: str = "per_leaf",
@@ -725,6 +771,8 @@ class _GBMEstimatorCore(
         self.quantile_alpha = quantile_alpha
         self.n_jobs = n_jobs
         self.random_strength = random_strength
+        self.multiclass_strategy = multiclass_strategy
+        self.multiclass_hessian = multiclass_hessian
         self.glm_hessian = glm_hessian
         self.grn_strength = grn_strength
         self.grn_form = grn_form
@@ -812,6 +860,8 @@ class _GBMEstimatorCore(
             f"quantile_alpha={self.quantile_alpha}, "
             f"n_jobs={self.n_jobs}, "
             f"random_strength={self.random_strength}, "
+            f"multiclass_strategy='{self.multiclass_strategy}', "
+            f"multiclass_hessian='{self.multiclass_hessian}', "
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
             f"grn_form='{self.grn_form}'"
@@ -887,6 +937,8 @@ class _GBMEstimatorCore(
             "quantile_alpha": self.quantile_alpha,
             "n_jobs": self.n_jobs,
             "random_strength": self.random_strength,
+            "multiclass_strategy": self.multiclass_strategy,
+            "multiclass_hessian": self.multiclass_hessian,
             "glm_hessian": self.glm_hessian,
             "grn_strength": self.grn_strength,
             "grn_form": self.grn_form,
@@ -960,6 +1012,8 @@ class _GBMEstimatorCore(
             "quantile_alpha",
             "n_jobs",
             "random_strength",
+            "multiclass_strategy",
+            "multiclass_hessian",
             "glm_hessian",
             "grn_strength",
             "grn_form",
@@ -1052,6 +1106,14 @@ class _GBMEstimatorCore(
         if "random_strength" in params:
             self.random_strength = _validate_random_strength(params["random_strength"])
 
+        if "multiclass_strategy" in params:
+            self.multiclass_strategy = _validate_multiclass_strategy(
+                params["multiclass_strategy"]
+            )
+        if "multiclass_hessian" in params:
+            self.multiclass_hessian = _validate_multiclass_hessian(
+                params["multiclass_hessian"]
+            )
         if "glm_hessian" in params:
             self.glm_hessian = _validate_glm_hessian(params["glm_hessian"])
 
@@ -1685,7 +1747,7 @@ class _GBMEstimatorCore(
             mode = _auto_rounds.MODE_LEGACY
         learning_rate = self._resolved_learning_rate(mode, init_model)
         if mode == _auto_rounds.MODE_EVAL_SET:
-            rounds = _auto_rounds.AUTO_ROUND_CAP
+            rounds = self._auto_round_cap()
             patience = self.early_stopping_rounds or _auto_rounds.AUTO_PATIENCE
         elif mode == _auto_rounds.MODE_LEGACY:
             rounds, patience = _auto_rounds.LEGACY_N_ESTIMATORS, self.early_stopping_rounds
@@ -1819,6 +1881,63 @@ class _GBMEstimatorCore(
             return {}
         return {"split_noise_strength": float(self.random_strength)}
 
+    def _multiclass_strategy_kwargs(self) -> dict:
+        """Native kwargs for a non-default ``multiclass_strategy`` or
+        ``multiclass_hessian``.
+
+        Empty for the defaults, so the native trainer is called exactly as
+        before.
+        """
+        kwargs = {}
+        strategy = getattr(self, "multiclass_strategy_", None) or "per_class_trees"
+        if strategy != "per_class_trees":
+            kwargs["multiclass_strategy"] = strategy
+        if self.multiclass_hessian != "diagonal":
+            kwargs["multiclass_hessian"] = self.multiclass_hessian
+        return kwargs
+
+    def _auto_round_cap(self) -> int:
+        """Round cap for ``n_estimators="auto"``.
+
+        A vector-leaf round fits all classes with one shared tree and needs
+        about twice as many rounds as per-class trees, so it gets twice the
+        cap.
+        """
+        if getattr(self, "multiclass_strategy_", None) == "vector_leaves":
+            return 2 * _auto_rounds.AUTO_ROUND_CAP
+        return _auto_rounds.AUTO_ROUND_CAP
+
+    def _resolve_multiclass_strategy(self, rows: int, features: int, classes: int) -> str:
+        """The ``multiclass_strategy`` a multiclass fit uses.
+
+        An explicit strategy is used as given. ``"auto"`` picks
+        ``"vector_leaves"`` only under ``training_policy="auto"``, when the
+        fit uses nothing vector leaves do not support, and when the data is
+        large enough for one shared tree per round to beat per-class trees
+        (see ``_prefers_vector_leaves``). ``multiclass_hessian=
+        "full"`` needs vector leaves, so it selects them whenever they are
+        supported.
+        """
+        if self.multiclass_strategy != "auto":
+            return self.multiclass_strategy
+        supported = not (
+            self.training_mode == "morph"
+            or self.leaf_model == "linear"
+            or self.leaf_solver == "dro"
+            or self.neutralization == "split_penalty"
+            or self.interaction_constraints
+            or (self.max_cat_threshold > 0 and self.categorical_feature_indices)
+        )
+        if not supported:
+            return "per_class_trees"
+        if self.multiclass_hessian == "full":
+            return "vector_leaves"
+        if self.training_policy != "auto":
+            return "per_class_trees"
+        if _prefers_vector_leaves(rows, features, classes):
+            return "vector_leaves"
+        return "per_class_trees"
+
     def _leaf_math_kwargs(self) -> dict:
         """Native kwargs for the opt-in ``glm_hessian`` and GRN parameters.
 
@@ -1912,7 +2031,7 @@ class _GBMEstimatorCore(
         # that the rule ignores anyway. The chosen round is unchanged.
         self._holdout_relative_tolerance = _auto_rounds.AUTO_RELATIVE_TOLERANCE
         try:
-            with self._round_overrides(_auto_rounds.AUTO_ROUND_CAP, learning_rate, patience):
+            with self._round_overrides(self._auto_round_cap(), learning_rate, patience):
                 self._fit_once(take(X, train_idx), y_array[train_idx], **holdout_kwargs)
         finally:
             self._holdout_relative_tolerance = 0.0
@@ -1944,7 +2063,7 @@ class _GBMEstimatorCore(
             "learning_rate": learning_rate,
             "validation_fraction": fraction,
             "validation_rows": int(len(valid_idx)),
-            "round_cap": _auto_rounds.AUTO_ROUND_CAP,
+            "round_cap": self._auto_round_cap(),
             "patience": patience,
             "relative_tolerance": _auto_rounds.AUTO_RELATIVE_TOLERANCE,
             "holdout_best_round": best_round,
@@ -2538,6 +2657,7 @@ class _GBMEstimatorCore(
                     n_jobs=self.n_jobs,
                     **self._early_stopping_relative_kwargs(),
                     **self._split_noise_kwargs(),
+                    **self._multiclass_strategy_kwargs(),
                     **self._leaf_math_kwargs(),
                     **ranking_sigma_kwargs,
                 )
@@ -2705,6 +2825,7 @@ class _GBMEstimatorCore(
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
+                **self._multiclass_strategy_kwargs(),
                 **self._leaf_math_kwargs(),
                 **ranking_sigma_kwargs,
             )
@@ -2822,6 +2943,7 @@ class _GBMEstimatorCore(
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
                 **self._split_noise_kwargs(),
+                **self._multiclass_strategy_kwargs(),
                 **self._leaf_math_kwargs(),
                 **ranking_sigma_kwargs,
             )
@@ -3046,6 +3168,11 @@ class _GBMEstimatorCore(
         if self.random_strength is not None:
             raise RuntimeError(
                 "random_strength requires a native alloygbm build "
+                "with training summary support"
+            )
+        if self._multiclass_strategy_kwargs():
+            raise RuntimeError(
+                "multiclass_strategy and multiclass_hessian require a native alloygbm build "
                 "with training summary support"
             )
         if self._leaf_math_kwargs():

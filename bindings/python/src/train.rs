@@ -9,9 +9,9 @@ use crate::categorical_bridge::{
 use crate::errors::engine_error_to_pyerr;
 use crate::params::{
     build_train_params, parse_boosting_mode, parse_dro_config, parse_factor_exposure_matrix,
-    parse_leaf_model, parse_leaf_solver, parse_morph_config_from_pydict,
-    parse_neutralization_config, parse_training_policy, parse_tree_growth,
-    validate_neutralization_leaf_model,
+    parse_leaf_model, parse_leaf_solver, parse_morph_config_from_pydict, parse_multiclass_hessian,
+    parse_multiclass_strategy, parse_neutralization_config, parse_training_policy,
+    parse_tree_growth, validate_neutralization_leaf_model,
 };
 use crate::pyclasses::{
     NativeFeatureBundlingDiagnostics, NativeResolvedTrainingPolicy, NativeTrainingResult,
@@ -1492,6 +1492,8 @@ pub(crate) fn train_regression_artifact_dense(
     n_jobs=None::<FitThreadCount>,
     early_stopping_relative_tolerance=0.0,
     split_noise_strength=None::<f32>,
+    multiclass_strategy="per_class_trees",
+    multiclass_hessian="diagonal",
     glm_hessian="exact",
     grn_strength=0.0,
     grn_form="per_leaf"
@@ -1581,6 +1583,8 @@ pub(crate) fn train_regression_artifact_with_summary(
     n_jobs: Option<FitThreadCount>,
     early_stopping_relative_tolerance: f64,
     split_noise_strength: Option<f32>,
+    multiclass_strategy: &str,
+    multiclass_hessian: &str,
     glm_hessian: &str,
     grn_strength: f32,
     grn_form: &str,
@@ -1652,6 +1656,10 @@ pub(crate) fn train_regression_artifact_with_summary(
     );
     params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
     params.split_noise_strength = split_noise_strength;
+    params.multiclass_strategy =
+        parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
+    params.multiclass_hessian =
+        parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
     apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -1885,6 +1893,8 @@ mod tests {
     n_jobs=None::<FitThreadCount>,
     early_stopping_relative_tolerance=0.0,
     split_noise_strength=None::<f32>,
+    multiclass_strategy="per_class_trees",
+    multiclass_hessian="diagonal",
     glm_hessian="exact",
     grn_strength=0.0,
     grn_form="per_leaf"
@@ -1977,6 +1987,8 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     n_jobs: Option<FitThreadCount>,
     early_stopping_relative_tolerance: f64,
     split_noise_strength: Option<f32>,
+    multiclass_strategy: &str,
+    multiclass_hessian: &str,
     glm_hessian: &str,
     grn_strength: f32,
     grn_form: &str,
@@ -2048,6 +2060,10 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     );
     params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
     params.split_noise_strength = split_noise_strength;
+    params.multiclass_strategy =
+        parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
+    params.multiclass_hessian =
+        parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
     apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -2223,6 +2239,8 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     n_jobs=None::<FitThreadCount>,
     early_stopping_relative_tolerance=0.0,
     split_noise_strength=None::<f32>,
+    multiclass_strategy="per_class_trees",
+    multiclass_hessian="diagonal",
     glm_hessian="exact",
     grn_strength=0.0,
     grn_form="per_leaf"
@@ -2315,6 +2333,8 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     n_jobs: Option<FitThreadCount>,
     early_stopping_relative_tolerance: f64,
     split_noise_strength: Option<f32>,
+    multiclass_strategy: &str,
+    multiclass_hessian: &str,
     glm_hessian: &str,
     grn_strength: f32,
     grn_form: &str,
@@ -2392,6 +2412,10 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     );
     params.early_stopping_relative_tolerance = early_stopping_relative_tolerance;
     params.split_noise_strength = split_noise_strength;
+    params.multiclass_strategy =
+        parse_multiclass_strategy(multiclass_strategy).map_err(engine_error_to_pyerr)?;
+    params.multiclass_hessian =
+        parse_multiclass_hessian(multiclass_hessian).map_err(engine_error_to_pyerr)?;
     apply_leaf_math_params(&mut params, glm_hessian, grn_strength, grn_form)?;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(

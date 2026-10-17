@@ -5,3 +5,4 @@ use crate::artifact::{encode_predictor_layout_payload, encode_trained_model_payl
 
 mod main;
 mod morph_state;
+mod vector_leaf;

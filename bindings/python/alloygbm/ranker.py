@@ -412,6 +412,8 @@ class GBMRanker(_GBMEstimatorCore):
             f"dart_sample_type='{self.dart_sample_type}', "
             f"n_jobs={self.n_jobs}, "
             f"random_strength={self.random_strength}, "
+            f"multiclass_strategy='{self.multiclass_strategy}', "
+            f"multiclass_hessian='{self.multiclass_hessian}', "
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
             f"grn_form='{self.grn_form}'"

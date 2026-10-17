@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
-struct MockBackend;
+pub(super) struct MockBackend;
 struct MonotoneRegressionBackend;
 struct GradientNeutralizationCheckingBackend {
     exposures: FactorExposureMatrix,
@@ -10981,6 +10981,8 @@ fn train_params_reject_out_of_range_relative_tolerance() {
     let params = TrainParams {
         early_stopping_relative_tolerance: 1.5,
         split_noise_strength: None,
+        multiclass_strategy: alloygbm_core::MulticlassStrategy::PerClassTrees,
+        multiclass_hessian: alloygbm_core::MulticlassHessian::Diagonal,
         glm_hessian: alloygbm_core::GlmHessian::Exact,
         grn_strength: 0.0,
         grn_form: alloygbm_core::GrnForm::PerLeaf,

@@ -146,6 +146,13 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             self._label_encoder = label_map
             self._label_decoder = {v: k for k, v in label_map.items()}
             self._num_classes_for_training = n_classes
+        self.multiclass_strategy_ = None
+        if self._is_multiclass:
+            shape = np.shape(X)
+            features = int(shape[1]) if len(shape) > 1 else 1
+            self.multiclass_strategy_ = self._resolve_multiclass_strategy(
+                len(float_targets), features, n_classes
+            )
 
         # Reject custom callable objectives with multiclass labels — training produces
         # a single-output model that is incompatible with multiclass prediction routing.
@@ -399,6 +406,8 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             f"dart_sample_type='{self.dart_sample_type}', "
             f"n_jobs={self.n_jobs}, "
             f"random_strength={self.random_strength}, "
+            f"multiclass_strategy='{self.multiclass_strategy}', "
+            f"multiclass_hessian='{self.multiclass_hessian}', "
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
             f"grn_form='{self.grn_form}'"

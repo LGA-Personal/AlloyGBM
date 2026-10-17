@@ -45,6 +45,26 @@ Core parameters
   otherwise off), ``0.0`` turns it off, and a positive value applies it under
   either policy. Not applied to MorphBoost, piecewise-linear shortlists or
   ``MultiLabelGBMRanker(multi_label_mode="joint")``.
+- ``multiclass_strategy: str = "auto"`` -- tree layout for multiclass softmax
+  (ignored by other objectives). ``"auto"`` picks ``"vector_leaves"`` under
+  ``training_policy="auto"`` with at least 10 classes and 1,000 training rows
+  when nothing below rules vector leaves out, and ``"per_class_trees"``
+  otherwise; the choice is in ``multiclass_strategy_`` after fitting. Set
+  ``"per_class_trees"`` or ``"vector_leaves"`` to override it.
+  ``"per_class_trees"`` grows K trees per round; ``"vector_leaves"`` grows one
+  tree per round whose splits are scored on the sum of per-class Newton gains
+  and whose leaves hold one Newton step per class. It is stored as K per-class
+  trees sharing one structure, so prediction, SHAP and saved models are
+  unchanged. Vector leaves need about twice the rounds, so
+  ``n_estimators="auto"`` doubles their round cap. Not supported with
+  ``training_mode="morph"``, ``leaf_model="linear"``,
+  ``leaf_solver="dro"``, ``neutralization="split_penalty"``,
+  ``interaction_constraints`` or native categorical splits.
+- ``multiclass_hessian: str = "diagonal"`` -- Newton Hessian for multiclass
+  softmax: ``"diagonal"`` (``p_k (1 - p_k)``), ``"full"`` (vector leaves only,
+  which ``"auto"`` then picks; at most 16 classes: each leaf solves with the
+  full softmax Hessian ``diag(p) - p p^T``; splits are still scored on the
+  diagonal) or ``"abs_residual"`` (``|p_k - y_k|``).
 - ``glm_hessian: str = "exact"`` -- curvature for the log-link objectives
   (``"poisson"``, ``"gamma"``, ``"tweedie"``). ``"bounded"`` uses XGBoost's
   bounded-step pseudo-Hessians, which cap each Newton leaf step and replace

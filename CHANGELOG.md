@@ -167,6 +167,27 @@
 
 ### Added
 
+- **`multiclass_strategy` (`"auto"`, `"per_class_trees"`, `"vector_leaves"`)
+  and `multiclass_hessian` on `GBMClassifier`.** Vector leaves grow one tree
+  per round for multiclass softmax, scoring splits on the sum of per-class
+  Newton gains and storing one Newton step per class in each leaf; the tree is
+  saved as K per-class trees with one shared structure, so prediction, SHAP
+  and saved models are unchanged. `multiclass_hessian="full"` solves vector
+  leaves with the full softmax Hessian (at most 16 classes);
+  `"abs_residual"` uses `|p - y|` as the Hessian. On the 38 PMLB multiclass
+  datasets (matched regime, 5-fold × 2) vector leaves are 2.1% behind
+  per-class trees on log loss (4 wins, 12 losses; full Hessian 1.8%, 6/10)
+  at about twice the fit time, winning on the wider, many-class sets
+  (movement_libras −9%, mnist −14%, krkopt −2%). The default, `"auto"`,
+  picks vector leaves under `training_policy="auto"` with at least 10 classes
+  and 1,000 training rows, and per-class trees otherwise (the previous
+  behaviour); the choice is in `multiclass_strategy_`. In a learning-curve
+  sweep at default settings (14 datasets, 500 to 20k rows) the rule switched
+  18 cells, lowering log loss 3.6% on average (15 wins: mnist −13 to −17%,
+  helena −2 to −4%, volkert −1 to −3%, krkopt −1 to −3%) at about twice the
+  fit time; the cells it leaves alone would have lost 1.7% with vector
+  leaves. `n_estimators="auto"` doubles its round cap (to 4,000) for vector
+  leaves, which need about twice the rounds.
 - **Opt-in bounded log-link Hessians: `glm_hessian="bounded"`.** Poisson,
   Gamma and Tweedie use XGBoost's bounded-step pseudo-Hessians
   (dmlc/xgboost#12538), which cap each Newton leaf step and replace
