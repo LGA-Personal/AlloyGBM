@@ -857,6 +857,9 @@ fn populate_child_absolute_outputs_joint(
 /// `leaf_estimation_iterations`), then scales the result by `learning_rate`.
 /// Leaves must be scalar with no scale but the learning rate.
 ///
+/// `row_hess_offset` is added to every row's Hessian, scaled by its weight,
+/// so a per-row GRN term carries into the refinement steps.
+///
 /// `predictions` are the scores before this tree. On return the stumps hold
 /// the refined leaves and `candidate_predictions`, which held `predictions`
 /// plus the builder's tree, holds `predictions` plus the refined tree.
@@ -869,6 +872,7 @@ pub(crate) fn refine_binary_newton_leaf_values(
     targets: &[f32],
     sample_weights: Option<&[f32]>,
     l2_lambda: f32,
+    row_hess_offset: f32,
     learning_rate: f32,
     extra_iterations: usize,
     max_abs_leaf_value: f32,
@@ -957,7 +961,7 @@ pub(crate) fn refine_binary_newton_leaf_values(
         if weight > 0.0 {
             let p = crate::objectives::sigmoid(predictions[row] + values[slot]);
             acc[2 * slot] += (weight * (p - targets[row])) as f64;
-            acc[2 * slot + 1] += (weight * (p * (1.0 - p)).max(1e-7)) as f64;
+            acc[2 * slot + 1] += (weight * ((p * (1.0 - p)).max(1e-7) + row_hess_offset)) as f64;
         }
     };
     // Chunk totals are folded in chunk order, so the sums (and the fitted

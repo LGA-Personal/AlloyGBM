@@ -316,6 +316,7 @@ fn iteration_diagnostics_aggregate_per_class_takes_max_effectiveness() {
         neutralization_effectiveness: Some(0.5),
         n_active_rows: 10,
         n_active_features: 2,
+        grn_lambda: None,
     };
     let b = IterationDiagnostics {
         gradient_l2_norm: 2.0,
@@ -326,6 +327,7 @@ fn iteration_diagnostics_aggregate_per_class_takes_max_effectiveness() {
         neutralization_effectiveness: Some(0.75),
         n_active_rows: 10,
         n_active_features: 2,
+        grn_lambda: None,
     };
     let c = IterationDiagnostics {
         gradient_l2_norm: 3.0,
@@ -361,7 +363,7 @@ fn glm_initial_prediction_accumulates_mean_in_f64() {
     let poisson_init = PoissonObjective::default()
         .initial_prediction(&targets, None)
         .expect("poisson init");
-    let gamma_init = GammaObjective
+    let gamma_init = GammaObjective::default()
         .initial_prediction(&targets, None)
         .expect("gamma init");
     let tweedie_init = TweedieObjective::new(1.5)
@@ -428,7 +430,7 @@ fn glm_losses_accumulate_in_f64() {
     gamma_targets.push(100_000_000.0_f32);
     gamma_targets.extend(std::iter::repeat_n(2.0_f32, 1_000));
     let gamma_predictions = vec![0.0_f32; gamma_targets.len()];
-    let gamma_loss = GammaObjective
+    let gamma_loss = GammaObjective::default()
         .loss(&gamma_predictions, &gamma_targets, None)
         .expect("gamma loss");
     let gamma_big = 100_000_000.0_f64 - 100_000_000.0_f64.ln() - 1.0;
@@ -469,7 +471,7 @@ fn poisson_rejects_negative_targets() {
 #[test]
 fn gamma_initial_prediction_is_log_of_weighted_mean() {
     let targets = vec![1.0_f32, 2.0, 4.0, 8.0];
-    let init = GammaObjective
+    let init = GammaObjective::default()
         .initial_prediction(&targets, None)
         .expect("init");
     let expected = ((1.0_f32 + 2.0 + 4.0 + 8.0) / 4.0).ln();
@@ -480,7 +482,7 @@ fn gamma_initial_prediction_is_log_of_weighted_mean() {
 fn gamma_gradient_uses_one_minus_y_over_mu() {
     let predictions = vec![0.0_f32, 1.0];
     let targets = vec![1.0_f32, 4.0];
-    let gradients = GammaObjective
+    let gradients = GammaObjective::default()
         .compute_gradients(&predictions, &targets, None)
         .expect("grads");
     for (idx, gp) in gradients.iter().enumerate() {
@@ -494,7 +496,7 @@ fn gamma_gradient_uses_one_minus_y_over_mu() {
 
 #[test]
 fn gamma_rejects_zero_or_negative_targets() {
-    let err = GammaObjective
+    let err = GammaObjective::default()
         .initial_prediction(&[1.0_f32, 0.0, 3.0], None)
         .unwrap_err();
     let msg = format!("{err:?}").to_lowercase();

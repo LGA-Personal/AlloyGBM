@@ -45,6 +45,17 @@ Core parameters
   otherwise off), ``0.0`` turns it off, and a positive value applies it under
   either policy. Not applied to MorphBoost, piecewise-linear shortlists or
   ``MultiLabelGBMRanker(multi_label_mode="joint")``.
+- ``glm_hessian: str = "exact"`` -- curvature for the log-link objectives
+  (``"poisson"``, ``"gamma"``, ``"tweedie"``). ``"bounded"`` uses XGBoost's
+  bounded-step pseudo-Hessians, which cap each Newton leaf step and replace
+  ``poisson_max_delta_step``. Ignored by other objectives.
+- ``grn_strength: float = 0.0`` -- gradient-regularized Newton: each round adds
+  ``grn_strength * sqrt(rms(g))`` to the leaf solve, fading as the gradients
+  shrink. ``0.0`` is off. Single-output estimators and multiclass
+  ``GBMClassifier``; not ``MultiLabelGBMRanker(multi_label_mode="joint")``.
+- ``grn_form: str = "per_leaf"`` -- ``"per_leaf"`` adds the GRN term to the
+  leaf L2 denominator; ``"per_row"`` adds it to every row's Hessian (the
+  paper's form).
 - ``quantile_alpha: float = 0.5``
   - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 

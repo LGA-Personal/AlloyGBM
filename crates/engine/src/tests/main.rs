@@ -10981,7 +10981,134 @@ fn train_params_reject_out_of_range_relative_tolerance() {
     let params = TrainParams {
         early_stopping_relative_tolerance: 1.5,
         split_noise_strength: None,
+        glm_hessian: alloygbm_core::GlmHessian::Exact,
+        grn_strength: 0.0,
+        grn_form: alloygbm_core::GrnForm::PerLeaf,
         ..TrainParams::default()
     };
     assert!(Trainer::new(params).is_err());
+}
+
+// -- Gradient-regularized Newton (GRN) ------------------------------------
+
+fn grn_fit(mutate: impl FnOnce(&mut TrainParams)) -> IterationRunSummary {
+    let (dataset, binned) = colsample_bynode_fixture();
+    let mut params = colsample_bynode_train_params(|p| p.seed = 3);
+    mutate(&mut params);
+    let controls = IterationControls::new(5, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("controls");
+    Trainer::new(params)
+        .expect("valid params")
+        .fit_iterations_with_summary(
+            &dataset,
+            &binned,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("training succeeds")
+}
+
+fn summary_artifact(summary: &IterationRunSummary) -> Vec<u8> {
+    summary.model.to_artifact_bytes().expect("artifact")
+}
+
+#[test]
+fn grn_zero_strength_is_byte_identical_to_default() {
+    let base = grn_fit(|_| {});
+    for form in [
+        alloygbm_core::GrnForm::PerLeaf,
+        alloygbm_core::GrnForm::PerRow,
+    ] {
+        let off = grn_fit(|p| {
+            p.grn_strength = 0.0;
+            p.grn_form = form;
+        });
+        assert_eq!(summary_artifact(&base), summary_artifact(&off));
+        assert!(
+            off.diagnostics_per_round
+                .iter()
+                .all(|d| d.grn_lambda.is_none())
+        );
+    }
+}
+
+#[test]
+fn grn_lambda_follows_gradient_norm_and_shrinks_leaves() {
+    let base = grn_fit(|_| {});
+    for form in [
+        alloygbm_core::GrnForm::PerLeaf,
+        alloygbm_core::GrnForm::PerRow,
+    ] {
+        let grn = grn_fit(|p| {
+            p.grn_strength = 2.0;
+            p.grn_form = form;
+        });
+        assert_ne!(summary_artifact(&base), summary_artifact(&grn));
+        let lambdas: Vec<f32> = grn
+            .diagnostics_per_round
+            .iter()
+            .map(|d| d.grn_lambda.expect("GRN lambda is reported"))
+            .collect();
+        assert!(lambdas.iter().all(|l| l.is_finite() && *l > 0.0));
+        // Gradients shrink as the squared-error fit converges, so does lambda.
+        assert!(lambdas.last() < lambdas.first(), "{lambdas:?}");
+        // Round 0 sees the same gradients in both fits, so the extra
+        // regularizer can only damp its root leaves.
+        let base_root = &base.model.stumps[0];
+        let grn_root = &grn.model.stumps[0];
+        let magnitude = |stump: &TrainedStump| {
+            stump.left_leaf_value.as_scalar().abs() + stump.right_leaf_value.as_scalar().abs()
+        };
+        assert!(magnitude(grn_root) < magnitude(base_root));
+    }
+}
+
+#[test]
+fn grn_multiclass_reports_one_lambda_per_round() {
+    let mut dataset = sample_dataset();
+    dataset.targets = vec![0.0, 1.0, 2.0, 1.0];
+    let objective = MultiClassSoftmaxObjective::new(3).expect("three classes are valid");
+    let controls =
+        IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+    let fit = |strength: f32| {
+        Trainer::new(TrainParams {
+            grn_strength: strength,
+            ..TrainParams::default()
+        })
+        .expect("valid params")
+        .fit_multiclass_iterations_with_summary(
+            &dataset,
+            &sample_binned_matrix(),
+            &MockBackend,
+            &objective,
+            controls,
+        )
+        .expect("multiclass fit")
+    };
+    let off = fit(0.0);
+    assert!(
+        off.diagnostics_per_round
+            .iter()
+            .all(|d| d.grn_lambda.is_none())
+    );
+    let on = fit(1.0);
+    assert!(!on.diagnostics_per_round.is_empty());
+    assert!(
+        on.diagnostics_per_round
+            .iter()
+            .all(|d| d.grn_lambda.is_some_and(|l| l > 0.0))
+    );
+}
+
+#[test]
+fn grn_strength_is_validated() {
+    for strength in [-1.0, f32::NAN, f32::INFINITY] {
+        assert!(
+            Trainer::new(TrainParams {
+                grn_strength: strength,
+                ..TrainParams::default()
+            })
+            .is_err()
+        );
+    }
 }

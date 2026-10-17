@@ -151,6 +151,25 @@
 
 ### Added
 
+- **Opt-in bounded log-link Hessians: `glm_hessian="bounded"`.** Poisson,
+  Gamma and Tweedie use XGBoost's bounded-step pseudo-Hessians
+  (dmlc/xgboost#12538), which cap each Newton leaf step and replace
+  `poisson_max_delta_step` (ignored in this mode). On the dev suite's
+  non-negative regression tasks it lowers test RMSE 3.4% (Poisson) and 3.5%
+  (Gamma) and ties on Tweedie, and it makes `learning_rate=0.3` safe: with exact
+  Hessians that rate costs 15% on Gamma and 26% on Tweedie, with bounded ones
+  it fits in 0.37–0.48× the time at roughly baseline loss. Default stays
+  `"exact"` until the held-out run. See `docs/benchmarks/leaf_math_v1.md`.
+- **Opt-in gradient-regularized Newton: `grn_strength` and `grn_form`.** Each
+  round adds `grn_strength · sqrt(rms(g))` to the leaf solve (Mishchenko
+  2023), either to the L2 term (`"per_leaf"`) or to every row's Hessian
+  (`"per_row"`), so the damping fades as the fit converges. It is meant for
+  custom losses whose Hessian can vanish: a Charbonnier objective at learning
+  rate 1.0 diverges with plain Newton and converges with `"per_row"`. On the
+  built-in log-link objectives it ties at the default learning rate. Single-
+  output estimators and multiclass `GBMClassifier`; not
+  `MultiLabelGBMRanker(multi_label_mode="joint")`. `diagnostics_per_round_`
+  reports each round's `grn_lambda`.
 - **`random_strength` on every single-output estimator and multiclass
   `GBMClassifier`.** It sets the split-score noise strength (CatBoost's
   `random_strength`) under either training policy: `None` (default) keeps the

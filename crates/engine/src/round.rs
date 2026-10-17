@@ -1204,6 +1204,7 @@ mod tests {
             &targets,
             None,
             l2,
+            0.0,
             lr,
             50,
             100.0,
@@ -1225,6 +1226,44 @@ mod tests {
         );
         // The single step undershoots both leaves.
         assert!(left > left_one_step / lr && right < right_one_step / lr);
+        Ok(())
+    }
+
+    #[test]
+    fn binary_newton_refinement_carries_the_per_row_hessian_offset() -> EngineResult<()> {
+        // A per-row GRN term must damp the extra steps too, or they undo it
+        // on pure leaves where the logistic Hessian vanishes.
+        let binned =
+            BinnedMatrix::new(4, 1, 2, vec![0, 0, MISSING_BIN_U8, 2]).expect("valid binned matrix");
+        let targets = [1.0, 1.0, 1.0, 0.0];
+        let predictions = [0.0_f32; 4];
+        let lr = 0.1_f32;
+        let refined_left = |offset: f32| -> EngineResult<f32> {
+            let mut stumps = vec![TrainedStump::new_unweighted(
+                scalar_split(1, true, false, None),
+                LeafValue::Scalar(0.1),
+                LeafValue::Scalar(-0.1),
+            )];
+            let mut candidate = predictions.to_vec();
+            apply_tree_to_binned_predictions(&mut candidate, &binned, &stumps, None)?;
+            crate::leaf_refinement::refine_binary_newton_leaf_values(
+                &mut stumps,
+                &binned,
+                &predictions,
+                &mut candidate,
+                &targets,
+                None,
+                0.0,
+                offset,
+                lr,
+                2,
+                100.0,
+            )?;
+            Ok(stumps[0].left_leaf_value.as_scalar())
+        };
+        let plain = refined_left(0.0)?;
+        let damped = refined_left(5.0)?;
+        assert!(damped > 0.1 && damped < plain, "{damped} vs {plain}");
         Ok(())
     }
 
@@ -1262,6 +1301,7 @@ mod tests {
                         &targets,
                         None,
                         3.0,
+                        0.0,
                         0.1,
                         2,
                         100.0,
@@ -1300,6 +1340,7 @@ mod tests {
             &[1.0, 1.0, 1.0, 0.0],
             None,
             0.01,
+            0.0,
             lr,
             50,
             cap,
@@ -1325,6 +1366,7 @@ mod tests {
             &[1.0, 0.0],
             None,
             3.0,
+            0.0,
             0.1,
             0,
             100.0,
