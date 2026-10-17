@@ -72,6 +72,12 @@ the choice in ``multiclass_strategy_``; set either value to override it. ``multi
 models are unchanged. See :doc:`estimator` for the options vector leaves do
 not support yet.
 
+``multiclass_sketch`` (off by default) scores vector-leaf splits on
+``multiclass_sketch_dim`` columns derived from the class gradients instead of
+all of them (SketchBoost, Iosipoi & Vakhrushev 2022); leaves still solve on
+every class. ``"random_projection"`` with ``multiclass_sketch_dim=1`` is the
+setting to try first. Setting a sketch selects vector leaves.
+
 Target requirements:
 
 - ``y`` must contain only values in ``{0, 1}`` (or ``{0.0, 1.0}``)

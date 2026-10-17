@@ -71,6 +71,20 @@ one-dimensional inputs are rejected before native training.
     `lambda_l2` on the diagonal; splits are still scored on the diagonal.
     `"abs_residual"` replaces the Hessian with `|p_k - y_k|`, which bounds
     each row's step.
+- `multiclass_sketch: str = "none"`, `multiclass_sketch_dim: int = 5`
+  - SketchBoost (Iosipoi & Vakhrushev, NeurIPS 2022): vector-leaf trees score
+    their splits on `multiclass_sketch_dim` columns derived from the K class
+    gradients instead of all K, so histograms and split scans cost about
+    `multiclass_sketch_dim / K` of the full ones. Leaves still solve on all K
+    classes. `"random_projection"` multiplies the gradients by a Gaussian
+    `K x d` matrix (scaled by `1/sqrt(d)`), `"random_sampling"` draws `d`
+    classes with probability proportional to their squared gradient norm
+    (rescaled to stay unbiased), and `"top_outputs"` keeps the `d` classes
+    with the largest gradient norms. The first two score with the per-row
+    mean Hessian over classes; `"top_outputs"` keeps each class's own. A
+    sketch needs vector leaves, which `multiclass_strategy="auto"` then
+    picks; it raises with `"per_class_trees"`, and a width of K or more
+    scores on all classes. Ignored by every other objective.
 - `glm_hessian: str = "exact"`
   - Curvature for the log-link objectives (`"poisson"`, `"gamma"`,
     `"tweedie"`); ignored by every other objective. `"exact"` keeps today's
