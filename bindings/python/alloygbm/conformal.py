@@ -54,6 +54,10 @@ def _calibration_targets(model: object, X: object, y: object) -> tuple[np.ndarra
         )
     if targets.shape[0] == 0:
         raise ValueError("calibration data must contain at least one row")
+    if not np.isfinite(targets).all():
+        raise ValueError("calibration targets must be finite (no NaN or inf)")
+    if not np.isfinite(predictions).all():
+        raise ValueError("model predictions on the calibration rows must be finite")
     return targets, predictions
 
 

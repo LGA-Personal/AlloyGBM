@@ -3,7 +3,9 @@
 __version__ = "1.0.0"
 
 from ._alloygbm import native_runtime_info
+from . import conformal
 from .classifier import GBMClassifier
+from .conformal import LoBoost, SplitConformal
 from .evaluation import (
     accuracy,
     gamma_deviance,
@@ -29,9 +31,12 @@ __all__ = [
     "GBMClassifier",
     "GBMRanker",
     "GBMRegressor",
+    "LoBoost",
     "MultiLabelGBMRanker",
+    "SplitConformal",
     "__version__",
     "accuracy",
+    "conformal",
     "gamma_deviance",
     "hit_rate",
     "icir",

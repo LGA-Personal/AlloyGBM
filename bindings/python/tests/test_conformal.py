@@ -192,3 +192,16 @@ def test_conformal_rejects_classifiers_and_bad_alpha() -> None:
         SplitConformal(model).calibrate(X, y, alpha=1.5)
     with pytest.raises(RuntimeError):
         LoBoost(model).predict_interval(X)
+    y_nan = y.copy()
+    y_nan[3] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        LoBoost(model).calibrate(X, y_nan)
+    with pytest.raises(ValueError, match="finite"):
+        SplitConformal(model).calibrate(X, np.where(y > 0, np.inf, y))
+
+
+def test_conformal_is_exported_from_package() -> None:
+    import alloygbm
+
+    assert alloygbm.conformal.LoBoost is alloygbm.LoBoost is LoBoost
+    assert alloygbm.SplitConformal is SplitConformal
