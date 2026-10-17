@@ -4580,15 +4580,31 @@ fn quantized_histograms_match_dequantized_level_sums() {
     let mut exclusive_bins = Vec::with_capacity(rows * 2);
     for row in 0..rows {
         // Sparse with a dominant bin, dense, and mostly missing.
-        bins.push(if row % 20 == 3 { 1 + (row % 4) as u8 } else { 0 });
+        bins.push(if row % 20 == 3 {
+            1 + (row % 4) as u8
+        } else {
+            0
+        });
         bins.push((row % 17) as u8);
-        bins.push(if row % 10 == 7 { (row % 5) as u8 } else { MISSING_BIN_U8 });
+        bins.push(if row % 10 == 7 {
+            (row % 5) as u8
+        } else {
+            MISSING_BIN_U8
+        });
         // Two mutually exclusive sparse features, which bundle.
-        exclusive_bins.push(if row % 20 == 3 { 1 + (row % 4) as u8 } else { 0 });
-        exclusive_bins.push(if row % 20 == 11 { 1 + (row % 3) as u8 } else { 0 });
+        exclusive_bins.push(if row % 20 == 3 {
+            1 + (row % 4) as u8
+        } else {
+            0
+        });
+        exclusive_bins.push(if row % 20 == 11 {
+            1 + (row % 3) as u8
+        } else {
+            0
+        });
     }
-    let matrix = BinnedMatrix::new(rows, feature_count, u16::from(MISSING_BIN_U8), bins)
-        .expect("matrix");
+    let matrix =
+        BinnedMatrix::new(rows, feature_count, u16::from(MISSING_BIN_U8), bins).expect("matrix");
     let exclusive = BinnedMatrix::new(rows, 2, 4, exclusive_bins).expect("matrix");
     let map = discover_exact_feature_bundles(&exclusive, &[false; 2]).expect("bundle map");
     let bundled = exclusive
@@ -4604,9 +4620,17 @@ fn quantized_histograms_match_dequantized_level_sums() {
         .map(|row| GradientPair::new((row as f32 * 0.11).cos() * 3.0, 1.0))
         .collect::<Result<Vec<_>, _>>()
         .expect("gradients");
-    for (gradients, bits) in [(&varying, 4_u8), (&varying, 2), (&constant, 4), (&constant, 8)] {
+    for (gradients, bits) in [
+        (&varying, 4_u8),
+        (&varying, 2),
+        (&constant, 4),
+        (&constant, 8),
+    ] {
         let quantized = QuantizedGradients::quantize(gradients, bits, 17).expect("quantize");
-        assert_eq!(quantized.constant_hess(), std::ptr::eq(gradients, &constant));
+        assert_eq!(
+            quantized.constant_hess(),
+            std::ptr::eq(gradients, &constant)
+        );
         let levels = quantized.dequantize_all();
         for node_rows in [
             (0..rows as u32).collect::<Vec<_>>(),

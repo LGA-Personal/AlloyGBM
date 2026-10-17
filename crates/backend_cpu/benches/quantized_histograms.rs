@@ -43,9 +43,9 @@ fn main() {
             start.elapsed().as_secs_f64() / reps as f64 * 1e3
         );
         let tiles = [FeatureTile::new(0, features as u32).unwrap()];
-        for &fraction in &[1_usize, 8] {
+        for &fraction in &[1_usize, 8, 32, 128] {
             let node_rows = (0..rows as u32)
-                .filter(|_| xorshift(&mut state) % fraction as u64 == 0)
+                .filter(|_| xorshift(&mut state).is_multiple_of(fraction as u64))
                 .collect::<Vec<_>>();
             let node = NodeSlice::new(0, node_rows).unwrap();
             let backend = CpuBackend;
@@ -81,16 +81,38 @@ fn main() {
                 quantized_ms = quantized_ms.min(time(true));
             }
             let float_bundle = backend
-                .build_histograms_with_execution(&matrix, &gradients, &node, &tiles, false, HistogramExecution::Sequential)
+                .build_histograms_with_execution(
+                    &matrix,
+                    &gradients,
+                    &node,
+                    &tiles,
+                    false,
+                    HistogramExecution::Sequential,
+                )
                 .unwrap();
             let quantized_bundle = backend
-                .build_histograms_quantized(&matrix, &quantized, &node, &tiles, HistogramExecution::Sequential)
+                .build_histograms_quantized(
+                    &matrix,
+                    &quantized,
+                    &node,
+                    &tiles,
+                    HistogramExecution::Sequential,
+                )
                 .unwrap();
-            let options = SplitSelectionOptions { missing_bin_index: usize::from(bins), min_rows_per_leaf: 16, l2_lambda: 1.0, ..Default::default() };
+            let options = SplitSelectionOptions {
+                missing_bin_index: usize::from(bins),
+                min_rows_per_leaf: 16,
+                l2_lambda: 1.0,
+                ..Default::default()
+            };
             let scan = |bundle: &alloygbm_core::HistogramBundle| {
                 let start = Instant::now();
                 for _ in 0..reps * 10 {
-                    black_box(backend.best_split_with_options(bundle, options, &[], &[]).unwrap());
+                    black_box(
+                        backend
+                            .best_split_with_options(bundle, options, &[], &[])
+                            .unwrap(),
+                    );
                 }
                 start.elapsed().as_secs_f64() / (reps * 10) as f64 * 1e3
             };
