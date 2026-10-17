@@ -1147,8 +1147,11 @@ impl YetiRankObjective {
         group_hesses: &mut [f32],
     ) {
         let group_len = group_scores.len();
+        if group_len <= 1 {
+            return;
+        }
         let first_label = group_labels[0];
-        if group_len <= 1 || group_labels.iter().all(|&label| label == first_label) {
+        if group_labels.iter().all(|&label| label == first_label) {
             return;
         }
         let inv_perms = 1.0 / self.num_permutations as f32;
@@ -1187,27 +1190,8 @@ impl YetiRankObjective {
             }
         }
     }
-}
 
-impl ObjectiveOps for YetiRankObjective {
-    fn objective_name(&self) -> &str {
-        "yetirank"
-    }
-
-    fn initial_prediction(
-        &self,
-        _targets: &[f32],
-        _sample_weights: Option<&[f32]>,
-    ) -> EngineResult<f32> {
-        Ok(0.0)
-    }
-
-    fn compute_gradients(
-        &self,
-        predictions: &[f32],
-        targets: &[f32],
-        _sample_weights: Option<&[f32]>,
-    ) -> EngineResult<Vec<GradientPair>> {
+    fn yetirank_gradients(&self, predictions: &[f32], targets: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let n = predictions.len();
         let mut grads = vec![0.0_f32; n];
         let mut hesses = vec![0.0_f32; n];
@@ -1237,7 +1221,42 @@ impl ObjectiveOps for YetiRankObjective {
             })
             .collect();
         merge_group_chunks(chunks, &mut grads, &mut hesses);
+        (grads, hesses)
+    }
+}
+
+impl ObjectiveOps for YetiRankObjective {
+    fn objective_name(&self) -> &str {
+        "yetirank"
+    }
+
+    fn initial_prediction(
+        &self,
+        _targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        Ok(0.0)
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        let (grads, hesses) = self.yetirank_gradients(predictions, targets);
         gradient_pairs_from_parts(&grads, &hesses)
+    }
+
+    fn compute_gradients_into(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        let (grads, hesses) = self.yetirank_gradients(predictions, targets);
+        fill_gradient_pair_buffer(&grads, &hesses, buffer)
     }
 
     fn loss(
@@ -1706,6 +1725,47 @@ mod tests {
             17,
         );
         assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn yetirank_parallel_gradients_match_serial_reference() {
+        let group_id = [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 2, 2];
+        let predictions = [
+            0.6, -0.2, 0.1, 0.3, 0.9, 0.0, -0.5, 0.2, 0.2, -0.1, 0.4, 0.0,
+        ];
+        let targets = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 0.0, 2.0, 1.0, 4.0, 0.0];
+        let objective = YetiRankObjective::new(&group_id, 4, 17);
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+
+        let boundaries = compute_group_boundaries(&group_id);
+        let mut grads = vec![0.0_f32; predictions.len()];
+        let mut hesses = vec![0.0_f32; predictions.len()];
+        for (group_idx, group) in boundaries.windows(2).enumerate() {
+            let (start, end) = (group[0], group[1]);
+            objective.group_gradients(
+                group_idx,
+                &predictions[start..end],
+                &targets[start..end],
+                &mut grads[start..end],
+                &mut hesses[start..end],
+            );
+        }
+        let expected = gradient_pairs_from_parts(&grads, &hesses).unwrap();
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+
+        let mut buffer = Vec::new();
+        objective
+            .compute_gradients_into(&predictions, &targets, None, &mut buffer)
+            .unwrap();
+        assert_gradient_pairs_close(&buffer, &expected, 0.0);
+    }
+
+    #[test]
+    fn yetirank_empty_group_slice_is_a_no_op() {
+        let objective = YetiRankObjective::new(&[0], 10, 7);
+        objective.group_gradients(0, &[], &[], &mut [], &mut []);
     }
 
     #[test]
