@@ -76,6 +76,11 @@ Core parameters
 - ``grn_form: str = "per_leaf"`` -- ``"per_leaf"`` adds the GRN term to the
   leaf L2 denominator; ``"per_row"`` adds it to every row's Hessian (the
   paper's form).
+- ``quantized_grad: bool = False``, ``quantized_grad_bits: int = 4`` --
+  quantized-gradient histograms (LightGBM's ``use_quantized_grad``): splits are
+  scored on gradients stochastically rounded to 2-8 bits, leaves are fitted
+  from the full-precision gradients. Not with DRO leaves, linear leaves,
+  MorphBoost, ``split_penalty`` neutralization or joint multi-label mode.
 - ``quantile_alpha: float = 0.5``
   - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 
