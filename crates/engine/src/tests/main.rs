@@ -10986,6 +10986,7 @@ fn train_params_reject_out_of_range_relative_tolerance() {
         glm_hessian: alloygbm_core::GlmHessian::Exact,
         grn_strength: 0.0,
         grn_form: alloygbm_core::GrnForm::PerLeaf,
+        quantized_grad_bits: None,
         ..TrainParams::default()
     };
     assert!(Trainer::new(params).is_err());
