@@ -201,6 +201,13 @@ many small steps, stopped by validation.
   improvement in validation loss. It is then refit on every row for the
   chosen count scaled by `1 / (1 - share held out)` (usually `1 / 0.9`),
   because the refit sees more rows per round.
+- With `time_index` passed to `fit` (and no `eval_set`): the holdout is the
+  newest periods instead of random rows, whole periods at a time, until at
+  least 10% of the rows are held out. Rows close in time look alike, so a
+  random holdout of time-ordered data rewards rounds that only fit the
+  neighbours of the held-out rows, and picks too many. If every row shares one
+  period, or a `GBMRanker` query group spans the cut, the fit uses the fixed
+  defaults below.
 - With `eval_set`: that set drives early stopping directly (same learning
   rate, cap and patience) and there is no refit.
 - `early_stopping_rounds` sets the patience in both cases, and an explicit
@@ -208,16 +215,16 @@ many small steps, stopped by validation.
 
 `auto_rounds_` records what happened: the `mode` (`"holdout"`,
 `"eval_set"`, `"explicit"` or `"legacy"`), the learning rate, and for the
-holdout the validation rows, chosen round, refit rounds and the holdout fit's
-seconds. `learning_rate_` is the rate actually used.
+holdout the validation rows, chosen round, refit rounds, the holdout fit's
+seconds and `holdout_split` (`"random"` or `"latest_periods"`). `learning_rate_` is the rate actually used.
 
 A fit uses the old fixed defaults, 100 rounds at learning rate `0.1`
 (`mode="legacy"`), with `training_policy="manual"`, when continuing training
 (`warm_start` or `init_model`; the continuation reuses the earlier fit's
 learning rate), with `boosting_mode="dart"`, `training_mode="morph"`,
 `lr_schedule="warmup_cosine"` or a custom objective, and, when no `eval_set`
-is given, with factor neutralization, `time_index` / time-aware categorical
-encoding, or fewer than 50 rows. Pass `n_estimators=100, learning_rate=0.1`
+is given, with factor neutralization, time-aware categorical encoding
+(`categorical_time_aware=True`), or fewer than 50 rows. Pass `n_estimators=100, learning_rate=0.1`
 to reproduce the old defaults exactly.
 
 On the default-quality suite this lowers AlloyGBM's geometric-mean test loss
