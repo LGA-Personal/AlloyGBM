@@ -59,11 +59,22 @@ def _validate_multiclass_hessian(value: object) -> str:
     return value
 
 
+# Where ``multiclass_strategy="auto"`` switches to vector leaves. Set from a
+# learning-curve sweep at default settings (500 to 20k training rows, 14
+# multiclass datasets): the number of classes decided it, not rows or
+# features. With 10+ classes vector leaves won at 1k rows and up (mnist -13 to
+# -17% log loss, krkopt -1 to -3%, volkert -1 to -3%); with 3 to 7 classes
+# they mostly lost (waveform +5%, nursery +3 to +6%, okcupid +1 to +2%).
+# Below 1k rows they lost even with many classes (led24 +3%, and collins,
+# soybean and micro-mass in the PMLB suite).
+_AUTO_VECTOR_MIN_CLASSES = 10
+_AUTO_VECTOR_MIN_ROWS = 1000
+
+
 def _prefers_vector_leaves(rows: int, features: int, classes: int) -> bool:
     """Whether ``multiclass_strategy="auto"`` picks vector leaves."""
-    # Placeholder until the learning-curve sweep sets the threshold: keep
-    # per-class trees so "auto" matches the previous default.
-    return False
+    del features  # did not separate wins from losses in the sweep
+    return classes >= _AUTO_VECTOR_MIN_CLASSES and rows >= _AUTO_VECTOR_MIN_ROWS
 
 
 def _validate_multiclass_strategy(value: object) -> str:

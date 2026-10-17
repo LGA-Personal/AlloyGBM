@@ -187,3 +187,66 @@ def test_vector_leaves_auto_n_estimators(hessian: str) -> None:
 def test_unsupported_combinations_raise(kwargs: dict, message: str) -> None:
     with pytest.raises(Exception, match=message):
         fit(**kwargs)
+
+
+def auto_fit(rows: int, classes: int, **kwargs: object) -> GBMClassifier:
+    X, y = make_fixture(rows=rows, classes=classes)
+    params = dict(n_estimators=4, max_depth=3, seed=7)
+    params.update(kwargs)
+    return GBMClassifier(**params).fit(X, y)
+
+
+def test_auto_picks_vector_leaves_for_many_classes_and_rows() -> None:
+    assert auto_fit(1200, 10).multiclass_strategy_ == "vector_leaves"
+
+
+@pytest.mark.parametrize("rows, classes", [(1200, 4), (600, 10)])
+def test_auto_keeps_per_class_trees_otherwise(rows: int, classes: int) -> None:
+    model = auto_fit(rows, classes)
+    X, _ = make_fixture(rows=rows, classes=classes)
+    explicit = auto_fit(rows, classes, multiclass_strategy="per_class_trees")
+
+    assert model.multiclass_strategy_ == "per_class_trees"
+    np.testing.assert_array_equal(model.predict_proba(X), explicit.predict_proba(X))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"training_policy": "manual"},
+        {"training_mode": "morph"},
+        {"leaf_model": "linear"},
+    ],
+)
+def test_auto_keeps_per_class_trees_when_vector_leaves_do_not_apply(kwargs: dict) -> None:
+    assert auto_fit(1200, 10, **kwargs).multiclass_strategy_ == "per_class_trees"
+
+
+def test_explicit_strategy_overrides_auto() -> None:
+    assert (
+        auto_fit(1200, 10, multiclass_strategy="per_class_trees").multiclass_strategy_
+        == "per_class_trees"
+    )
+    assert (
+        auto_fit(300, 4, multiclass_strategy="vector_leaves").multiclass_strategy_
+        == "vector_leaves"
+    )
+
+
+def test_auto_full_hessian_selects_vector_leaves() -> None:
+    assert auto_fit(300, 4, multiclass_hessian="full").multiclass_strategy_ == "vector_leaves"
+
+
+def test_binary_has_no_multiclass_strategy() -> None:
+    X, y = make_fixture(rows=200, classes=2)
+    model = GBMClassifier(n_estimators=3).fit(X, y)
+
+    assert model.multiclass_strategy_ is None
+
+
+def test_vector_leaves_double_the_auto_round_cap() -> None:
+    X, y = make_fixture(rows=300)
+    vector = GBMClassifier(multiclass_strategy="vector_leaves", seed=7).fit(X, y)
+    per_class = GBMClassifier(multiclass_strategy="per_class_trees", seed=7).fit(X, y)
+
+    assert vector.auto_rounds_["round_cap"] == 2 * per_class.auto_rounds_["round_cap"]
