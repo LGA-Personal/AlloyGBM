@@ -167,6 +167,18 @@
 
 ### Added
 
+- **Opt-in time-decay weighting with a time-ordered auto-rounds holdout:
+  `time_decay_half_life`.** With `fit(..., time_index=...)`, each row is
+  weighted by `0.5 ** ((t_max - t) / half_life)` (times any `sample_weight`),
+  and `n_estimators="auto"` picks its round count on the newest ~10% of
+  periods instead of a random 10% of rows. `float("inf")` gives the
+  time-ordered holdout without decay. On four time-ordered public datasets
+  the holdout alone lowers elec2 logloss 24% and Beijing PM2.5 RMSE 4.9%
+  (8/8 paired wins), because a random holdout of autocorrelated rows picks
+  10-40x too many rounds; decay on top helps a little on drifting data and
+  costs a little elsewhere. `time_decay_` reports the effective sample size.
+  Default `None` leaves fits unchanged. See `docs/benchmarks/time_decay_v1.md`.
+
 - **`multiclass_strategy` (`"auto"`, `"per_class_trees"`, `"vector_leaves"`)
   and `multiclass_hessian` on `GBMClassifier`.** Vector leaves grow one tree
   per round for multiclass softmax, scoring splits on the sum of per-class

@@ -343,6 +343,17 @@ for validation conflicts. Independent ``MultiLabelGBMRanker`` fits support
 exact bundling; joint mode does not. The default remains ``"off"`` because
 discovery has a small cost on non-bundleable input.
 
+Time decay
+----------
+
+- ``time_decay_half_life: float | None = None`` -- weights each row by
+  ``0.5 ** ((max(time_index) - t) / half_life)`` (times any ``sample_weight``)
+  and makes the ``n_estimators="auto"`` holdout the newest ~10% of periods.
+  Requires ``fit(..., time_index=...)``. ``float("inf")`` keeps every weight at
+  1 and only makes the holdout time-ordered. ``time_decay_`` reports the
+  effective sample size. Rejected by ranking objectives that ignore
+  ``sample_weight``. See ``docs/benchmarks/time_decay_v1.md``.
+
 Categorical support
 -------------------
 
@@ -683,6 +694,7 @@ Important ``fit(...)`` rules:
 - ``early_stopping_rounds`` requires ``eval_set``, unless ``n_estimators="auto"``
   holds out its own validation rows
 - ``eval_time_index`` requires ``eval_set``
+- ``time_decay_half_life`` requires ``time_index`` during training
 - ``categorical_time_aware=True`` requires ``time_index`` during training and
   ``eval_time_index`` for validation when ``eval_set`` is used
 - ``sample_weight`` applies per-sample weights to the training loss

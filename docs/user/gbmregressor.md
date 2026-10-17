@@ -216,14 +216,40 @@ A fit uses the old fixed defaults, 100 rounds at learning rate `0.1`
 (`warm_start` or `init_model`; the continuation reuses the earlier fit's
 learning rate), with `boosting_mode="dart"`, `training_mode="morph"`,
 `lr_schedule="warmup_cosine"` or a custom objective, and, when no `eval_set`
-is given, with factor neutralization, `time_index` / time-aware categorical
-encoding, or fewer than 50 rows. Pass `n_estimators=100, learning_rate=0.1`
+is given, with factor neutralization, `time_index` without
+`time_decay_half_life`, time-aware categorical encoding, or fewer than 50
+rows. Pass `n_estimators=100, learning_rate=0.1`
 to reproduce the old defaults exactly.
 
 On the default-quality suite this lowers AlloyGBM's geometric-mean test loss
 by about 9% versus the old defaults, at roughly 7 to 10 times the fit time on
 those small datasets; see `docs/benchmarks/auto_rounds_v1.md`.
 `MultiLabelGBMRanker` keeps the fixed defaults in both modes.
+
+## Time Decay
+
+- `time_decay_half_life: float | None = None`
+  - Weights each training row by `0.5 ** ((max(time_index) - t) / half_life)`,
+    multiplied into any `sample_weight`, so a row one half-life older than
+    the newest counts half as much. Requires `fit(..., time_index=...)`
+    (integer periods: eras, days, weeks). With `n_estimators="auto"` and no
+    `eval_set`, the auto-rounds holdout becomes the newest periods holding
+    about 10% of the rows (whole periods, never all of them), and the refit's
+    round count is scaled by the ratio of the two passes' effective sample
+    sizes instead of the row share. `float("inf")` keeps every weight at 1
+    and only makes the holdout time-ordered. `None` (default) is off.
+  - On four time-ordered datasets the time-ordered holdout is most of the
+    gain (elec2 logloss -24%, Beijing PM2.5 RMSE -4.9%), because a random
+    holdout of autocorrelated rows picks far too many rounds; a half-life
+    around half the training span adds a little on drifting data and costs a
+    little elsewhere. See `docs/benchmarks/time_decay_v1.md`.
+  - `time_decay_` records the half-life, `time_max`, the row count, the
+    smallest decay weight and the Kish effective sample size
+    `(Σw)² / Σw²`, which decay shrinks. Heavy decay also shrinks the
+    Hessian sums that `min_child_hessian`-style thresholds see.
+  - Ranking objectives that ignore `sample_weight` (`rank:pairwise`,
+    `rank:ndcg`, `rank:xendcg`, `rank:ndcg_smoothed`, `yetirank`) reject it;
+    `MultiLabelGBMRanker(multi_label_mode="joint")` rejects it.
 
 ## Stopping And Training Policy
 
@@ -755,6 +781,7 @@ Important `fit(...)` rules:
 - If `early_stopping_rounds` is set, `eval_set` is required, unless
   `n_estimators="auto"` holds out its own validation rows.
 - If `eval_time_index` is passed, `eval_set` is required.
+- If `time_decay_half_life` is set, training requires `time_index`.
 - If `categorical_time_aware=True`, training requires `time_index`, and
   validation also requires `eval_time_index` when `eval_set` is used.
 - `sample_weight` applies per-sample weights to the training loss.
