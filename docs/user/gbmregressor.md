@@ -108,6 +108,18 @@ one-dimensional inputs are rejected before native training.
     L2 term (`-G / (H + λ_l2 + λ)`); `"per_row"` adds `λ·w_i` to every row's
     Hessian, the paper's per-row regularizer (`-G / (H + λ·Σw)` in a leaf),
     which damps large leaves far more.
+- `quantized_grad: bool = False`, `quantized_grad_bits: int = 4`
+  - Quantized-gradient histograms (LightGBM's `use_quantized_grad`). Each
+    tree stochastically rounds the row gradients and Hessians to
+    `quantized_grad_bits`-bit integers (2 to 8) and builds its split
+    histograms by integer accumulation; leaf values are still fitted from the
+    full-precision gradients. Single-output estimators and multiclass
+    `GBMClassifier` (with `multiclass_strategy="vector_leaves"` the splits are
+    scored on the quantized gradients, without the integer kernel). Rejected
+    with `leaf_solver="dro"`, `leaf_model="linear"`, `training_mode="morph"`,
+    `neutralization="split_penalty"`, and by
+    `MultiLabelGBMRanker(multi_label_mode="joint")`. Off (default) is
+    byte-identical; `quantized_grad_bits` is ignored while it is off.
 
 ## Boosting Mode
 

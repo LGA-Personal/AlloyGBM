@@ -380,6 +380,15 @@ pub struct TrainParams {
     /// Where the GRN term enters the leaf solve. Ignored when
     /// `grn_strength == 0`. See [`GrnForm`].
     pub grn_form: GrnForm,
+    /// Quantized-gradient histograms (LightGBM's `use_quantized_grad`):
+    /// `Some(bits)` stochastically rounds each round's gradients and
+    /// Hessians to `bits`-bit integers (2..=8) for histogram building and
+    /// split scoring; leaf values still use the float gradients. `None`
+    /// (default) leaves training byte-identical. Supported on the standard
+    /// split path of the single-output and multiclass trainers; rejected
+    /// with DRO leaves, linear leaves, MorphBoost and split-penalty
+    /// neutralization.
+    pub quantized_grad_bits: Option<u8>,
     /// Split-scoring sketch for vector-leaf multiclass; see
     /// [`MulticlassSketch`]. `None` (default) leaves training unchanged.
     pub multiclass_sketch: MulticlassSketch,
@@ -428,6 +437,7 @@ impl Default for TrainParams {
             glm_hessian: GlmHessian::Exact,
             grn_strength: 0.0,
             grn_form: GrnForm::PerLeaf,
+            quantized_grad_bits: None,
             multiclass_sketch: MulticlassSketch::None,
             multiclass_sketch_dim: 5,
         }

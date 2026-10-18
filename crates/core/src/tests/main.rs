@@ -36,6 +36,52 @@ fn split_noise_strength_accepts_none_and_non_negative_finite_values() {
 }
 
 #[test]
+fn quantized_grad_bits_accepts_two_to_eight_and_rejects_unsupported_modes() {
+    for bits in [None, Some(2), Some(4), Some(8)] {
+        let params = TrainParams {
+            quantized_grad_bits: bits,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&params).is_ok(), "{bits:?}");
+    }
+    for bits in [0, 1, 9] {
+        let params = TrainParams {
+            quantized_grad_bits: Some(bits),
+            ..TrainParams::default()
+        };
+        let error = validate_train_params(&params).expect_err("bad width must fail");
+        assert!(error.to_string().contains("quantized_grad_bits"));
+    }
+    let unsupported = [
+        TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.1,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        },
+        TrainParams {
+            leaf_model: LeafModelKind::Linear,
+            ..TrainParams::default()
+        },
+        TrainParams {
+            morph_config: Some(MorphConfig::default()),
+            ..TrainParams::default()
+        },
+    ];
+    for params in unsupported {
+        assert!(validate_train_params(&params).is_ok());
+        let params = TrainParams {
+            quantized_grad_bits: Some(4),
+            ..params
+        };
+        let error = validate_train_params(&params).expect_err("unsupported mode must fail");
+        assert!(error.to_string().contains("quantized gradients"), "{error}");
+    }
+}
+
+#[test]
 fn pl_split_candidates_defaults_to_compatibility_mode() {
     assert_eq!(TrainParams::default().pl_split_candidates, 0);
 }

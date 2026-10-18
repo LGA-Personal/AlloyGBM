@@ -87,6 +87,9 @@ pub(crate) use loss::{binary_crossentropy_loss, squared_error_loss};
 mod sampling;
 pub(crate) use sampling::*;
 
+pub mod quantized_grad;
+pub use quantized_grad::{QuantizedGradients, QuantizedPacking};
+
 mod colsample;
 
 mod tiling;

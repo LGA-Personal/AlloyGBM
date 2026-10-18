@@ -8,7 +8,7 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     BackendOps, FactorSplitContext, HistogramExecution, LinearContext, MorphContext,
-    SquaredErrorObjective, Trainer,
+    SquaredErrorObjective, Trainer, TrainingPolicyMode,
 };
 
 fn sample_binned_matrix() -> BinnedMatrix {
@@ -176,6 +176,7 @@ fn fixture_params() -> TrainParams {
         glm_hessian: alloygbm_core::GlmHessian::Exact,
         grn_strength: 0.0,
         grn_form: alloygbm_core::GrnForm::PerLeaf,
+        quantized_grad_bits: None,
         multiclass_sketch: alloygbm_core::MulticlassSketch::None,
         multiclass_sketch_dim: 5,
     }
@@ -4564,4 +4565,179 @@ fn split_noise_lets_close_features_take_turns_but_keeps_true_gains() {
         assert_eq!(noisy.gain, reference.gain);
     }
     assert!(wins[0] > 50 && wins[1] > 50, "wins {wins:?}");
+}
+
+/// Quantized-gradient histograms against direct per-row sums of the
+/// dequantized levels: counts exact, sums equal up to float rounding, for
+/// sparse (dominant-bin) features, small and large nodes (plain and
+/// interleaved kernels), constant and varying Hessians, and bundled matrices
+/// (which take the float fallback).
+#[test]
+fn quantized_histograms_match_dequantized_level_sums() {
+    use alloygbm_engine::QuantizedGradients;
+
+    let rows = 3_000;
+    let feature_count = 3;
+    let mut bins = Vec::with_capacity(rows * feature_count);
+    let mut exclusive_bins = Vec::with_capacity(rows * 2);
+    for row in 0..rows {
+        // Sparse with a dominant bin, dense, and mostly missing.
+        bins.push(if row % 20 == 3 {
+            1 + (row % 4) as u8
+        } else {
+            0
+        });
+        bins.push((row % 17) as u8);
+        bins.push(if row % 10 == 7 {
+            (row % 5) as u8
+        } else {
+            MISSING_BIN_U8
+        });
+        // Two mutually exclusive sparse features, which bundle.
+        exclusive_bins.push(if row % 20 == 3 {
+            1 + (row % 4) as u8
+        } else {
+            0
+        });
+        exclusive_bins.push(if row % 20 == 11 {
+            1 + (row % 3) as u8
+        } else {
+            0
+        });
+    }
+    let matrix =
+        BinnedMatrix::new(rows, feature_count, u16::from(MISSING_BIN_U8), bins).expect("matrix");
+    let exclusive = BinnedMatrix::new(rows, 2, 4, exclusive_bins).expect("matrix");
+    let map = discover_exact_feature_bundles(&exclusive, &[false; 2]).expect("bundle map");
+    let bundled = exclusive
+        .with_exact_feature_bundles(map)
+        .expect("bundled matrix");
+    assert!(bundled.feature_bundle_map().is_some());
+
+    let varying = (0..rows)
+        .map(|row| GradientPair::new((row as f32 * 0.37).sin(), 0.5 + (row % 7) as f32 * 0.1))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("gradients");
+    let constant = (0..rows)
+        .map(|row| GradientPair::new((row as f32 * 0.11).cos() * 3.0, 1.0))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("gradients");
+    for (gradients, bits) in [
+        (&varying, 4_u8),
+        (&varying, 2),
+        (&constant, 4),
+        (&constant, 8),
+    ] {
+        let quantized = QuantizedGradients::quantize(gradients, bits, 17).expect("quantize");
+        assert_eq!(
+            quantized.constant_hess(),
+            std::ptr::eq(gradients, &constant)
+        );
+        let levels = quantized.dequantize_all();
+        for node_rows in [
+            (0..rows as u32).collect::<Vec<_>>(),
+            (0..rows as u32).step_by(3).collect(),
+            (0..rows as u32).filter(|row| row % 97 < 5).collect(),
+            vec![5, 9, 400],
+        ] {
+            let node = NodeSlice::new(0, node_rows.clone()).expect("node");
+            for (matrix, execution) in [
+                (&matrix, HistogramExecution::Sequential),
+                (&matrix, HistogramExecution::Parallel),
+                (&bundled, HistogramExecution::Sequential),
+            ] {
+                let tile = [FeatureTile::new(0, matrix.feature_count as u32).expect("tile")];
+                let histograms = CpuBackend
+                    .build_histograms_quantized(matrix, &quantized, &node, &tile, execution)
+                    .expect("quantized histograms");
+                let expected = CpuBackend
+                    .build_histograms(matrix, &levels, &node, &tile)
+                    .expect("float histograms");
+                assert_eq!(histograms.feature_count(), expected.feature_count());
+                for (view, want) in histograms.features().zip(expected.features()) {
+                    assert_eq!(view.feature_index(), want.feature_index());
+                    assert_eq!(view.counts(), want.counts());
+                    for (got, want) in view
+                        .grad_sums()
+                        .iter()
+                        .zip(want.grad_sums())
+                        .chain(view.hess_sums().iter().zip(want.hess_sums()))
+                    {
+                        assert!(
+                            (got - want).abs() <= 1e-4 * (1.0 + want.abs()),
+                            "bits {bits}: {got} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Training with quantized gradients stays close to float training, is
+/// reproducible, and a different seed draws different rounding.
+#[test]
+fn quantized_gradient_training_is_reproducible_and_close_to_float() {
+    let rows = 4_000;
+    let features = 6;
+    let mut values = Vec::with_capacity(rows * features);
+    let mut targets = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let x = (0..features)
+            .map(|feature| ((row * (feature + 3) * 7919) % 1000) as f32 / 500.0 - 1.0)
+            .collect::<Vec<_>>();
+        targets.push(2.0 * x[0] + (3.0 * x[1]).sin() + x[2] * x[3]);
+        values.extend(x);
+    }
+    let bins = values
+        .iter()
+        .map(|value| (((value + 1.0) * 31.9) as u8).min(63))
+        .collect::<Vec<_>>();
+    let matrix = BinnedMatrix::new(rows, features, 63, bins).expect("matrix");
+    let dataset = TrainingDataset {
+        matrix: DatasetMatrix::new(rows, features, values).expect("dataset matrix"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let fit = |quantized_grad_bits: Option<u8>, seed: u64| {
+        let params = TrainParams {
+            learning_rate: 0.1,
+            max_depth: 5,
+            seed,
+            quantized_grad_bits,
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("trainer");
+        let controls = trainer
+            .iteration_controls_for_policy(&dataset, &matrix, 60, TrainingPolicyMode::Manual)
+            .expect("controls");
+        trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &matrix,
+                &CpuBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("fit")
+    };
+    let float = fit(None, 1);
+    let quantized = fit(Some(4), 1);
+    let again = fit(Some(4), 1);
+    let other_seed = fit(Some(4), 2);
+    let final_loss = |summary: &alloygbm_engine::IterationRunSummary| {
+        *summary.loss_per_completed_round.last().expect("rounds")
+    };
+    assert_eq!(final_loss(&quantized), final_loss(&again));
+    assert_ne!(final_loss(&quantized), final_loss(&other_seed));
+    let ratio = final_loss(&quantized) / final_loss(&float);
+    assert!(
+        (0.8..1.25).contains(&ratio),
+        "quantized {} vs float {}",
+        final_loss(&quantized),
+        final_loss(&float)
+    );
 }

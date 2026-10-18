@@ -411,6 +411,8 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             f"glm_hessian='{self.glm_hessian}', "
             f"grn_strength={self.grn_strength}, "
             f"grn_form='{self.grn_form}', "
+            f"quantized_grad={self.quantized_grad}, "
+            f"quantized_grad_bits={self.quantized_grad_bits}, "
             f"multiclass_sketch='{self.multiclass_sketch}', "
             f"multiclass_sketch_dim={self.multiclass_sketch_dim}"
             ")"

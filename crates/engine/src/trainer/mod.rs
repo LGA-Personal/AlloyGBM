@@ -44,6 +44,7 @@ pub(crate) use validate::{
 // future task.
 use crate::grn::{add_grn_to_row_hessians, grn_round_lambda};
 use crate::profiling::{RoundProfile, Stage as ProfileStage};
+use crate::quantized_grad::{QuantizedHistogramBackend, quantize_tree_gradients};
 use crate::*;
 use alloygbm_core::GrnForm;
 use multiclass_build::{
@@ -1603,6 +1604,15 @@ impl Trainer {
                         total_iterations,
                         class_idx: class_k,
                     });
+                    let quantized = quantize_tree_gradients(
+                        &self.params,
+                        gradients,
+                        sampling_seed_base,
+                        effective_round,
+                        class_k as u64,
+                    )?;
+                    let backend =
+                        &QuantizedHistogramBackend::new(backend, gradients, quantized.as_ref());
 
                     let (round_stumps, _round_stop) =
                         if self.params.tree_growth == TreeGrowth::Leaf {
@@ -1665,12 +1675,38 @@ impl Trainer {
                     &root_row_indices,
                     mixed_hash(sampling_seed_base ^ 0x5C3E_7C40_57B0_0571 ^ effective_round as u64),
                 );
+                // Quantized gradients score the splits (the sketched columns
+                // when a sketch is set); the leaves still solve on the float
+                // gradients.
+                let quantized_split_columns = if self.params.quantized_grad_bits.is_some() {
+                    Some(
+                        sketch
+                            .as_deref()
+                            .unwrap_or(&class_gradient_buffers)
+                            .iter()
+                            .enumerate()
+                            .map(|(column, gradients)| {
+                                Ok(quantize_tree_gradients(
+                                    &self.params,
+                                    gradients,
+                                    sampling_seed_base,
+                                    effective_round,
+                                    column as u64,
+                                )?
+                                .map(|quantized| quantized.dequantize_all())
+                                .unwrap_or_default())
+                            })
+                            .collect::<EngineResult<Vec<_>>>()?,
+                    )
+                } else {
+                    None
+                };
                 let inputs = VectorLeafTreeInputs {
                     binned_matrix,
                     layout,
                     gradients: VectorLeafGradients {
                         leaf: &class_gradient_buffers,
-                        split: sketch.as_deref(),
+                        split: quantized_split_columns.as_deref().or(sketch.as_deref()),
                     },
                     root_rows: root_row_indices.clone(),
                     features: feature_tiles
@@ -3050,6 +3086,15 @@ impl Trainer {
                 });
             let (mut candidate_round_stumps, round_rejection_reason) =
                 profile.time(ProfileStage::TreeBuild, || -> EngineResult<_> {
+                    let quantized = quantize_tree_gradients(
+                        &self.params,
+                        gradients,
+                        sampling_seed_base,
+                        effective_round_index,
+                        0,
+                    )?;
+                    let backend =
+                        &QuantizedHistogramBackend::new(backend, gradients, quantized.as_ref());
                     Ok(if self.params.tree_growth == TreeGrowth::Leaf {
                         build_tree_leaf_wise(
                             backend,

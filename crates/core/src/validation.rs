@@ -116,6 +116,32 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if let Some(bits) = params.quantized_grad_bits {
+        if !(2..=8).contains(&bits) {
+            return Err(CoreError::InvalidConfig(format!(
+                "quantized_grad_bits must be in 2..=8 (got {bits})"
+            )));
+        }
+        let unsupported = if params.leaf_solver == LeafSolverKind::Dro {
+            Some("leaf_solver='dro'")
+        } else if params.leaf_model == LeafModelKind::Linear {
+            Some("leaf_model='linear'")
+        } else if params.morph_config.is_some() {
+            Some("training_mode='morph'")
+        } else if params
+            .neutralization_config
+            .is_some_and(|config| config.kind == NeutralizationKind::SplitPenalty)
+        {
+            Some("neutralization='split_penalty'")
+        } else {
+            None
+        };
+        if let Some(mode) = unsupported {
+            return Err(CoreError::InvalidConfig(format!(
+                "quantized gradients are not supported with {mode}"
+            )));
+        }
+    }
     if params.multiclass_sketch != crate::MulticlassSketch::None
         && params.multiclass_sketch_dim == 0
     {

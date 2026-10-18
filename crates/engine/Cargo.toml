@@ -19,3 +19,7 @@ serde_json = "1"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "quantize_bench"
+harness = false

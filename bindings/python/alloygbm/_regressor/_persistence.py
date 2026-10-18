@@ -92,6 +92,10 @@ class _PersistenceMixin:
             self.grn_strength = 0.0
         if not hasattr(self, "grn_form"):
             self.grn_form = "per_leaf"
+        if not hasattr(self, "quantized_grad"):
+            self.quantized_grad = False
+        if not hasattr(self, "quantized_grad_bits"):
+            self.quantized_grad_bits = 4
         if not hasattr(self, "multiclass_sketch"):
             self.multiclass_sketch = "none"
         if not hasattr(self, "multiclass_sketch_dim"):

@@ -2201,6 +2201,7 @@ mod tests {
             glm_hessian: alloygbm_core::GlmHessian::Exact,
             grn_strength: 0.0,
             grn_form: alloygbm_core::GrnForm::PerLeaf,
+            quantized_grad_bits: None,
             multiclass_sketch: alloygbm_core::MulticlassSketch::None,
             multiclass_sketch_dim: 5,
         }
