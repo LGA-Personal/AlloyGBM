@@ -58,6 +58,20 @@
 
 ### Changed
 
+- **`n_estimators="auto"` picks the round count on the newest periods when
+  `fit` gets `time_index`.** Before, a fit given `time_index` (without
+  `eval_set`) fell back to the fixed 100 rounds at `0.1`. It now holds out
+  the latest whole periods (at least 10% of rows) instead of random rows,
+  then refits on every row. A random holdout of time-ordered rows leaks,
+  because neighbouring periods look alike, and it picked 9 to 36 times too
+  many trees. On rolling-origin tests (5 seeds × 5 folds) elec2 log loss
+  fell 24% and Beijing PM2.5 MSE fell 9.2%, both 25/25 folds with 95%
+  intervals clear of zero and fits 8 to 22 times faster. Weather, household
+  power and i.i.d. synthetic panels were unchanged within noise.
+  `auto_rounds_["holdout_split"]` records `"random"` or `"latest_periods"`.
+  `categorical_time_aware=True` fits keep the fixed defaults. See
+  `docs/benchmarks/time_holdout_v1.md`.
+
 - **`ranking_objective="yetirank"` is now the published YetiRank; the old
   objective is `rank:ndcg_smoothed`.** Retraining with `"yetirank"` gives
   different models from v1.0.0. The new objective follows Gulin et al. as

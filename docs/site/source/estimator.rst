@@ -22,7 +22,8 @@ Core parameters
   - boosting rounds; ``"auto"`` chooses the count by early stopping on
     ``eval_set`` or, without one, on a seeded 10% holdout (stratified for
     classifiers, whole groups for rankers) followed by a refit on every row.
-    ``auto_rounds_`` records the choice. ``training_policy="manual"``,
+    When ``fit`` gets ``time_index``, that holdout is the newest periods
+    instead of random rows. ``auto_rounds_`` records the choice. ``training_policy="manual"``,
     continued training, DART, MorphBoost, learning-rate schedules, custom
     objectives and fits under 50 rows keep the fixed 100 rounds at ``0.1``.
     See ``docs/benchmarks/auto_rounds_v1.md``.
