@@ -116,12 +116,15 @@ Rules:
 
 ## When To Pass `time_index` Into `fit(...)`
 
-Pass `time_index=` to `fit(...)` when you are using:
+Pass `time_index=` to `fit(...)` whenever rows are ordered in time and you
+will predict later periods. With the default `n_estimators="auto"` and no
+`eval_set`, the round count is then chosen on the newest periods instead of
+random rows (see `auto_rounds_["holdout_split"]`).
 
-- `categorical_feature_index` or `categorical_feature_indices`
-- `categorical_time_aware=True`
-
-That combination enables time-aware categorical handling during training.
+With `categorical_feature_index` or `categorical_feature_indices` and
+`categorical_time_aware=True`, `time_index` also enables time-aware
+categorical handling during training (and the fit keeps the fixed legacy
+round count).
 
 If you also pass `eval_set` with `categorical_time_aware=True`, you must pass
 `eval_time_index=` for the validation rows as well.

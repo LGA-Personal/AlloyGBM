@@ -59,6 +59,31 @@ pub enum MulticlassHessian {
     AbsResidual,
 }
 
+/// How a vector-leaf multiclass fit scores its splits (SketchBoost,
+/// Iosipoi & Vakhrushev, NeurIPS 2022).
+///
+/// `None` (default) scores splits on all K class gradients. The other modes
+/// score them on a sketch of [`TrainParams::multiclass_sketch_dim`] columns
+/// derived from the K gradients, which cuts histogram building and split
+/// scanning from K columns to the sketch's width. Leaves still solve on all K
+/// classes. Only applies with [`MulticlassStrategy::VectorLeaves`].
+///
+/// - `TopOutputs`: the columns with the largest gradient norms, each with
+///   its own Hessian.
+/// - `RandomSampling`: columns drawn with probability proportional to their
+///   gradient norm, rescaled so the sketched gain is unbiased; Hessians are
+///   the per-row mean over classes.
+/// - `RandomProjection`: the gradient matrix times a Gaussian `K x d`
+///   matrix scaled by `1/sqrt(d)`; Hessians are the per-row mean.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MulticlassSketch {
+    #[default]
+    None,
+    TopOutputs,
+    RandomSampling,
+    RandomProjection,
+}
+
 /// Leaf representation strategy for tree models.
 ///
 /// `Constant` (default) is identical to current behavior: each leaf stores a
@@ -364,6 +389,12 @@ pub struct TrainParams {
     /// with DRO leaves, linear leaves, MorphBoost and split-penalty
     /// neutralization.
     pub quantized_grad_bits: Option<u8>,
+    /// Split-scoring sketch for vector-leaf multiclass; see
+    /// [`MulticlassSketch`]. `None` (default) leaves training unchanged.
+    pub multiclass_sketch: MulticlassSketch,
+    /// Sketch width (columns that score splits). Must be at least 1 when a
+    /// sketch is set; a width of K or more scores on all K classes.
+    pub multiclass_sketch_dim: usize,
 }
 
 impl Default for TrainParams {
@@ -407,6 +438,8 @@ impl Default for TrainParams {
             grn_strength: 0.0,
             grn_form: GrnForm::PerLeaf,
             quantized_grad_bits: None,
+            multiclass_sketch: MulticlassSketch::None,
+            multiclass_sketch_dim: 5,
         }
     }
 }

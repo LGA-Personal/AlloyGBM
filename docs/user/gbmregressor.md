@@ -71,6 +71,20 @@ one-dimensional inputs are rejected before native training.
     `lambda_l2` on the diagonal; splits are still scored on the diagonal.
     `"abs_residual"` replaces the Hessian with `|p_k - y_k|`, which bounds
     each row's step.
+- `multiclass_sketch: str = "none"`, `multiclass_sketch_dim: int = 5`
+  - SketchBoost (Iosipoi & Vakhrushev, NeurIPS 2022): vector-leaf trees score
+    their splits on `multiclass_sketch_dim` columns derived from the K class
+    gradients instead of all K, so histograms and split scans cost about
+    `multiclass_sketch_dim / K` of the full ones. Leaves still solve on all K
+    classes. `"random_projection"` multiplies the gradients by a Gaussian
+    `K x d` matrix (scaled by `1/sqrt(d)`), `"random_sampling"` draws `d`
+    classes with probability proportional to their squared gradient norm
+    (rescaled to stay unbiased), and `"top_outputs"` keeps the `d` classes
+    with the largest gradient norms. The first two score with the per-row
+    mean Hessian over classes; `"top_outputs"` keeps each class's own. A
+    sketch needs vector leaves, which `multiclass_strategy="auto"` then
+    picks; it raises with `"per_class_trees"`, and a width of K or more
+    scores on all classes. Ignored by every other objective.
 - `glm_hessian: str = "exact"`
   - Curvature for the log-link objectives (`"poisson"`, `"gamma"`,
     `"tweedie"`); ignored by every other objective. `"exact"` keeps today's
@@ -213,6 +227,13 @@ many small steps, stopped by validation.
   improvement in validation loss. It is then refit on every row for the
   chosen count scaled by `1 / (1 - share held out)` (usually `1 / 0.9`),
   because the refit sees more rows per round.
+- With `time_index` passed to `fit` (and no `eval_set`): the holdout is the
+  newest periods instead of random rows, whole periods at a time, until at
+  least 10% of the rows are held out. Rows close in time look alike, so a
+  random holdout of time-ordered data rewards rounds that only fit the
+  neighbours of the held-out rows, and picks too many. If every row shares one
+  period, or a `GBMRanker` query group spans the cut, the fit uses the fixed
+  defaults below.
 - With `eval_set`: that set drives early stopping directly (same learning
   rate, cap and patience) and there is no refit.
 - `early_stopping_rounds` sets the patience in both cases, and an explicit
@@ -220,16 +241,16 @@ many small steps, stopped by validation.
 
 `auto_rounds_` records what happened: the `mode` (`"holdout"`,
 `"eval_set"`, `"explicit"` or `"legacy"`), the learning rate, and for the
-holdout the validation rows, chosen round, refit rounds and the holdout fit's
-seconds. `learning_rate_` is the rate actually used.
+holdout the validation rows, chosen round, refit rounds, the holdout fit's
+seconds and `holdout_split` (`"random"` or `"latest_periods"`). `learning_rate_` is the rate actually used.
 
 A fit uses the old fixed defaults, 100 rounds at learning rate `0.1`
 (`mode="legacy"`), with `training_policy="manual"`, when continuing training
 (`warm_start` or `init_model`; the continuation reuses the earlier fit's
 learning rate), with `boosting_mode="dart"`, `training_mode="morph"`,
 `lr_schedule="warmup_cosine"` or a custom objective, and, when no `eval_set`
-is given, with factor neutralization, `time_index` / time-aware categorical
-encoding, or fewer than 50 rows. Pass `n_estimators=100, learning_rate=0.1`
+is given, with factor neutralization, time-aware categorical encoding
+(`categorical_time_aware=True`), or fewer than 50 rows. Pass `n_estimators=100, learning_rate=0.1`
 to reproduce the old defaults exactly.
 
 On the default-quality suite this lowers AlloyGBM's geometric-mean test loss
@@ -761,6 +782,7 @@ shaping, and depth/iteration leaf shrinkage. See
 - `load_model(path)` (classmethod)
 - `artifact_bytes` -- property returning the raw artifact bytes
 - `score(X, y)` -- returns R-squared (sklearn `RegressorMixin` convention)
+- `apply(X)` -- returns an `(n_samples, n_trees)` int32 array with the leaf each row reaches in each tree (single-output models; see [Prediction intervals](#prediction-intervals))
 
 Important `fit(...)` rules:
 
@@ -868,6 +890,46 @@ from alloygbm.evaluation import (
     poisson_deviance, gamma_deviance, tweedie_deviance
 )
 ```
+
+## Prediction intervals
+
+`alloygbm.conformal` wraps a fitted regressor and turns its point predictions
+into intervals with a finite-sample coverage guarantee. Fit the model on one
+part of the training data, calibrate on rows the model never saw, then ask for
+intervals:
+
+```python
+from alloygbm import GBMRegressor
+from alloygbm.conformal import LoBoost
+
+model = GBMRegressor().fit(X_fit, y_fit)
+intervals = LoBoost(model).calibrate(X_cal, y_cal, alpha=0.1)
+lower, upper = intervals.predict_interval(X_test)        # ~90% coverage
+lower, upper = intervals.predict_interval(X_test, alpha=0.2)  # re-use for 80%
+```
+
+- `SplitConformal(model)` -- classic split conformal: one quantile of
+  `|y - predict(X)|` over the calibration rows, so every interval has the same
+  width.
+- `LoBoost(model, n_part=50, p_min=0.005)` -- local conformal intervals from
+  the model's own trees (Santos et al., arXiv 2602.22432). Calibration rows are
+  grouped by the leaves they share, one tree at a time, while a group keeps at
+  least `max(n_part, ceil(p_min * n_cal))` rows; smaller groups are merged into
+  the group with the closest leaf path. Each group gets its own residual
+  quantile, so the width adapts to the region a row falls in. A row that
+  reaches a leaf no calibration row reached gets the quantile of the deepest
+  group it matched. With fewer than about `2 * n_part` calibration rows
+  there is one group and LoBoost is plain split conformal.
+
+Both work with `GBMRegressor` and `GBMRanker` (any single-output regression
+objective), pickle with the model they wrap, and do not change training or
+the model artifact. Coverage is marginal: about `1 - alpha` of new rows from
+the same distribution are covered. Neither wraps a classifier.
+
+`model.apply(X)` exposes the leaf indices LoBoost uses. Leaves are numbered
+`0..n_leaves - 1` within each tree, like LightGBM's `pred_leaf`; it is
+available on `GBMRegressor`, `GBMRanker` and binary `GBMClassifier`, not on
+multiclass models yet.
 
 ## SHAP interaction values (v0.11.0+)
 

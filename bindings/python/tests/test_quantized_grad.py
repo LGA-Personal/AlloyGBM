@@ -149,3 +149,15 @@ def test_rounding_noise_does_not_grow_extra_splits():
     base = GBMClassifier(**common).fit(X, labels)
     quantized = GBMClassifier(**common, quantized_grad=True, quantized_grad_bits=2).fit(X, labels)
     assert len(quantized.artifact_bytes) < 1.1 * len(base.artifact_bytes)
+
+
+def test_composes_with_multiclass_sketch():
+    X, y = _regression_data()
+    labels = np.digitize(y, np.quantile(y, [0.2, 0.4, 0.6, 0.8]))
+    common = dict(n_estimators=20, multiclass_sketch="random_projection", multiclass_sketch_dim=2, seed=0)
+    sketched = GBMClassifier(**common).fit(X, labels)
+    both = GBMClassifier(**common, quantized_grad=True).fit(X, labels)
+    again = GBMClassifier(**common, quantized_grad=True).fit(X, labels)
+    assert both.artifact_bytes != sketched.artifact_bytes
+    assert both.artifact_bytes == again.artifact_bytes
+    assert np.mean(both.predict(X) == labels) > np.mean(sketched.predict(X) == labels) - 0.05

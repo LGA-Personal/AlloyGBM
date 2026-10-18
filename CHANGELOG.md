@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+
+- **Prediction intervals: `alloygbm.conformal.LoBoost` and `SplitConformal`.**
+  Wrap a fitted regressor, `calibrate(X_cal, y_cal, alpha)` on held-out rows,
+  then `predict_interval(X)` returns `(lower, upper)` with finite-sample
+  marginal coverage. LoBoost (Santos et al., arXiv 2602.22432) groups
+  calibration rows by the leaves they share along the boosting path, so widths
+  adapt to the region a row falls in. On the 33 dev-suite regression tasks
+  (3 seeds, alpha = 0.1) it covers 90.5% of test rows, cuts the mean interval
+  score to 0.94x split conformal's (lower on 23 of 33 tasks) and raises
+  worst-slab coverage from 0.84 to 0.88; against conformalized quantile
+  regression with two `objective="quantile"` models its pooled interval score
+  is 0.95x, but CQR is lower on 22 of 33 tasks, so LoBoost's edge is cost
+  (about 0.05 s of calibration instead of two extra fits) and small or
+  irregular data. New API only; training and the artifact are unchanged.
+- **`apply(X)` on single-output estimators** returns the leaf index each row
+  reaches in every tree (`(n_samples, n_trees)` int32, numbered per tree like
+  LightGBM's `pred_leaf`), backed by a new `Predictor::predict_leaf_dense`.
+
 ### Performance
 
 - **Wide data with mostly-constant columns fits about twice as fast.** When
@@ -38,6 +57,20 @@
   loss identical to the previous build. See `docs/benchmarks/fit_speed_v1.md`.
 
 ### Changed
+
+- **`n_estimators="auto"` picks the round count on the newest periods when
+  `fit` gets `time_index`.** Before, a fit given `time_index` (without
+  `eval_set`) fell back to the fixed 100 rounds at `0.1`. It now holds out
+  the latest whole periods (at least 10% of rows) instead of random rows,
+  then refits on every row. A random holdout of time-ordered rows leaks,
+  because neighbouring periods look alike, and it picked 9 to 36 times too
+  many trees. On rolling-origin tests (5 seeds × 5 folds) elec2 log loss
+  fell 24% and Beijing PM2.5 MSE fell 9.2%, both 25/25 folds with 95%
+  intervals clear of zero and fits 8 to 22 times faster. Weather, household
+  power and i.i.d. synthetic panels were unchanged within noise.
+  `auto_rounds_["holdout_split"]` records `"random"` or `"latest_periods"`.
+  `categorical_time_aware=True` fits keep the fixed defaults. See
+  `docs/benchmarks/time_holdout_v1.md`.
 
 - **`ranking_objective="yetirank"` is now the published YetiRank; the old
   objective is `rank:ndcg_smoothed`.** Retraining with `"yetirank"` gives
@@ -175,6 +208,18 @@
   binary and multiclass and is 1% lower on regression, with fits 1.06x slower;
   on wide five-level data (Numerai-like, 200k x 300) fits take 0.92x the time.
   Off by default and byte-identical when off.
+- **SketchBoost split scoring for vector leaves: `multiclass_sketch` and
+  `multiclass_sketch_dim` on `GBMClassifier`.** Vector-leaf trees can score
+  their splits on a few columns derived from the K class gradients
+  (`"random_projection"`, `"random_sampling"` or `"top_outputs"`, Iosipoi &
+  Vakhrushev 2022) instead of all K, while leaves still solve on every class.
+  Off by default; setting it selects vector leaves. On 8 many-class datasets
+  (10 to 100 classes, defaults regime, 5-fold) a one-column random projection
+  lowered log loss 5.8% against the current default (shifted geometric mean),
+  with the largest gains on small many-class data (movement_libras −21%,
+  soybean −16%, micro-mass −11%, each also ahead of plain vector leaves) and
+  helena (100 classes) −0.8% at 31% less fit time; mnist fit 50% faster at
+  equal loss. It lost on krkopt (+4.7%) and volkert (+0.9%).
 - **`multiclass_strategy` (`"auto"`, `"per_class_trees"`, `"vector_leaves"`)
   and `multiclass_hessian` on `GBMClassifier`.** Vector leaves grow one tree
   per round for multiclass softmax, scoring splits on the sum of per-class

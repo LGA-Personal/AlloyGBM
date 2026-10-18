@@ -10,8 +10,8 @@ use crate::errors::engine_error_to_pyerr;
 use crate::params::{
     build_train_params, parse_boosting_mode, parse_dro_config, parse_factor_exposure_matrix,
     parse_leaf_model, parse_leaf_solver, parse_morph_config_from_pydict, parse_multiclass_hessian,
-    parse_multiclass_strategy, parse_neutralization_config, parse_training_policy,
-    parse_tree_growth, validate_neutralization_leaf_model,
+    parse_multiclass_sketch, parse_multiclass_strategy, parse_neutralization_config,
+    parse_training_policy, parse_tree_growth, validate_neutralization_leaf_model,
 };
 use crate::pyclasses::{
     NativeFeatureBundlingDiagnostics, NativeResolvedTrainingPolicy, NativeTrainingResult,
@@ -1497,7 +1497,9 @@ pub(crate) fn train_regression_artifact_dense(
     glm_hessian="exact",
     grn_strength=0.0,
     grn_form="per_leaf",
-    quantized_grad_bits=None::<u8>
+    quantized_grad_bits=None::<u8>,
+    multiclass_sketch="none",
+    multiclass_sketch_dim=5
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1590,6 +1592,8 @@ pub(crate) fn train_regression_artifact_with_summary(
     grn_strength: f32,
     grn_form: &str,
     quantized_grad_bits: Option<u8>,
+    multiclass_sketch: &str,
+    multiclass_sketch_dim: usize,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -1669,6 +1673,9 @@ pub(crate) fn train_regression_artifact_with_summary(
         grn_form,
         quantized_grad_bits,
     )?;
+    params.multiclass_sketch =
+        parse_multiclass_sketch(multiclass_sketch).map_err(engine_error_to_pyerr)?;
+    params.multiclass_sketch_dim = multiclass_sketch_dim;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -1906,7 +1913,9 @@ mod tests {
     glm_hessian="exact",
     grn_strength=0.0,
     grn_form="per_leaf",
-    quantized_grad_bits=None::<u8>
+    quantized_grad_bits=None::<u8>,
+    multiclass_sketch="none",
+    multiclass_sketch_dim=5
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -2002,6 +2011,8 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     grn_strength: f32,
     grn_form: &str,
     quantized_grad_bits: Option<u8>,
+    multiclass_sketch: &str,
+    multiclass_sketch_dim: usize,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
@@ -2081,6 +2092,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         grn_form,
         quantized_grad_bits,
     )?;
+    params.multiclass_sketch =
+        parse_multiclass_sketch(multiclass_sketch).map_err(engine_error_to_pyerr)?;
+    params.multiclass_sketch_dim = multiclass_sketch_dim;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,
@@ -2260,7 +2274,9 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     glm_hessian="exact",
     grn_strength=0.0,
     grn_form="per_leaf",
-    quantized_grad_bits=None::<u8>
+    quantized_grad_bits=None::<u8>,
+    multiclass_sketch="none",
+    multiclass_sketch_dim=5
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -2356,6 +2372,8 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     grn_strength: f32,
     grn_form: &str,
     quantized_grad_bits: Option<u8>,
+    multiclass_sketch: &str,
+    multiclass_sketch_dim: usize,
 ) -> PyResult<NativeTrainingResult> {
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let values = dense_input_to_f32_vec(values_bytes)?;
@@ -2441,6 +2459,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         grn_form,
         quantized_grad_bits,
     )?;
+    params.multiclass_sketch =
+        parse_multiclass_sketch(multiclass_sketch).map_err(engine_error_to_pyerr)?;
+    params.multiclass_sketch_dim = multiclass_sketch_dim;
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
             categorical_feature_index,

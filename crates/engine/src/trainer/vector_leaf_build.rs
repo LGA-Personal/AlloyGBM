@@ -1215,6 +1215,18 @@ pub(crate) fn validate_multiclass_hessian(
     Ok(())
 }
 
+/// A split-scoring sketch only has a vector-leaf tree to score.
+pub(crate) fn validate_multiclass_sketch(params: &TrainParams) -> EngineResult<()> {
+    if params.multiclass_sketch != alloygbm_core::MulticlassSketch::None
+        && params.multiclass_strategy != alloygbm_core::MulticlassStrategy::VectorLeaves
+    {
+        return Err(EngineError::InvalidConfig(
+            "multiclass_sketch requires multiclass_strategy='vector_leaves'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[inline]
 fn l1_threshold(grad: f64, l1_alpha: f64) -> f64 {
     if l1_alpha <= 0.0 {

@@ -77,6 +77,24 @@ def _prefers_vector_leaves(rows: int, features: int, classes: int) -> bool:
     return classes >= _AUTO_VECTOR_MIN_CLASSES and rows >= _AUTO_VECTOR_MIN_ROWS
 
 
+_MULTICLASS_SKETCHES = ("none", "top_outputs", "random_sampling", "random_projection")
+
+
+def _validate_multiclass_sketch(value: object) -> str:
+    if not isinstance(value, str) or value not in _MULTICLASS_SKETCHES:
+        raise ValueError(
+            "multiclass_sketch must be 'none', 'top_outputs', 'random_sampling' "
+            "or 'random_projection'"
+        )
+    return value
+
+
+def _validate_multiclass_sketch_dim(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+        raise ValueError("multiclass_sketch_dim must be an integer >= 1")
+    return int(value)
+
+
 def _validate_multiclass_strategy(value: object) -> str:
     if not isinstance(value, str) or value not in _MULTICLASS_STRATEGIES:
         raise ValueError(
@@ -238,6 +256,8 @@ class _GBMEstimatorCore(
         grn_form: str = "per_leaf",
         quantized_grad: bool = False,
         quantized_grad_bits: int = 4,
+        multiclass_sketch: str = "none",
+        multiclass_sketch_dim: int = 5,
     ) -> None:
         learning_rate = _auto_rounds.validate_learning_rate(learning_rate)
         if max_depth <= 0:
@@ -635,6 +655,8 @@ class _GBMEstimatorCore(
         self.grn_form = _validate_grn_form(grn_form)
         self.quantized_grad = _validate_quantized_grad(quantized_grad)
         self.quantized_grad_bits = _validate_quantized_grad_bits(quantized_grad_bits)
+        self.multiclass_sketch = _validate_multiclass_sketch(multiclass_sketch)
+        self.multiclass_sketch_dim = _validate_multiclass_sketch_dim(multiclass_sketch_dim)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -727,6 +749,8 @@ class _GBMEstimatorCore(
         grn_form: str = "per_leaf",
         quantized_grad: bool = False,
         quantized_grad_bits: int = 4,
+        multiclass_sketch: str = "none",
+        multiclass_sketch_dim: int = 5,
     ) -> None:
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -800,6 +824,8 @@ class _GBMEstimatorCore(
         self.grn_form = grn_form
         self.quantized_grad = quantized_grad
         self.quantized_grad_bits = quantized_grad_bits
+        self.multiclass_sketch = multiclass_sketch
+        self.multiclass_sketch_dim = multiclass_sketch_dim
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -890,7 +916,9 @@ class _GBMEstimatorCore(
             f"grn_strength={self.grn_strength}, "
             f"grn_form='{self.grn_form}', "
             f"quantized_grad={self.quantized_grad}, "
-            f"quantized_grad_bits={self.quantized_grad_bits}"
+            f"quantized_grad_bits={self.quantized_grad_bits}, "
+            f"multiclass_sketch='{self.multiclass_sketch}', "
+            f"multiclass_sketch_dim={self.multiclass_sketch_dim}"
             ")"
         )
 
@@ -970,6 +998,8 @@ class _GBMEstimatorCore(
             "grn_form": self.grn_form,
             "quantized_grad": self.quantized_grad,
             "quantized_grad_bits": self.quantized_grad_bits,
+            "multiclass_sketch": self.multiclass_sketch,
+            "multiclass_sketch_dim": self.multiclass_sketch_dim,
         }
 
     def _validate_parameter_updates(self, **params: object) -> "_GBMEstimatorCore":
@@ -1047,6 +1077,8 @@ class _GBMEstimatorCore(
             "grn_form",
             "quantized_grad",
             "quantized_grad_bits",
+            "multiclass_sketch",
+            "multiclass_sketch_dim",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1159,6 +1191,13 @@ class _GBMEstimatorCore(
         if "quantized_grad_bits" in params:
             self.quantized_grad_bits = _validate_quantized_grad_bits(
                 params["quantized_grad_bits"]
+            )
+
+        if "multiclass_sketch" in params:
+            self.multiclass_sketch = _validate_multiclass_sketch(params["multiclass_sketch"])
+        if "multiclass_sketch_dim" in params:
+            self.multiclass_sketch_dim = _validate_multiclass_sketch_dim(
+                params["multiclass_sketch_dim"]
             )
 
         if "row_subsample" in params:
@@ -1738,6 +1777,11 @@ class _GBMEstimatorCore(
 
         Parameters
         ----------
+        time_index : array-like of int or None, optional
+            Period of each row (era, day, week...). With
+            ``n_estimators="auto"``, the holdout that picks the round count
+            becomes the newest periods instead of random rows. Also feeds
+            ``categorical_time_aware`` encoding.
         init_model : GBMRegressor or None, optional
             A previously fitted model to continue training from (warm-start).
             When provided, training resumes from this model's trees and
@@ -1775,7 +1819,7 @@ class _GBMEstimatorCore(
         mode = self._auto_rounds_mode(targets, fit_kwargs)
         if mode == _auto_rounds.MODE_HOLDOUT:
             self._check_holdout_inputs(X, targets, fit_kwargs)
-            split = self._auto_rounds_split(targets, group)
+            split = self._auto_rounds_split(targets, group, time_index)
             if split is not None and not self._split_has_weight_on_both_sides(
                 sample_weight, split
             ):
@@ -1827,21 +1871,31 @@ class _GBMEstimatorCore(
         holdout_unsupported = (
             self.neutralization != "none"
             or fit_kwargs["factor_exposures"] is not None
-            or fit_kwargs["time_index"] is not None
             or self.categorical_time_aware
             or len(targets) < _auto_rounds.AUTO_MIN_ROWS
         )
         return _auto_rounds.MODE_LEGACY if holdout_unsupported else _auto_rounds.MODE_HOLDOUT
 
     def _auto_rounds_split(
-        self, targets: np.ndarray, group: object | None
+        self, targets: np.ndarray, group: object | None, time_index: object | None = None
     ) -> tuple[np.ndarray, np.ndarray] | None:
         row_count = len(targets)
         class_labels = None
         group_ids = None
         if group is not None:
             group_ids = np.asarray(self._validate_group(group, row_count))
-        elif self._objective_name() in ("binary_crossentropy", "multiclass_softmax"):
+        if time_index is not None:
+            # The fit is a forecast of later periods, so its round count is
+            # tuned on the newest ones, not on a random sample of the past.
+            return _auto_rounds.time_holdout_split(
+                np.asarray(self._validate_time_index(time_index, row_count)),
+                _auto_rounds.AUTO_VALIDATION_FRACTION,
+                group_ids=group_ids,
+            )
+        if group_ids is None and self._objective_name() in (
+            "binary_crossentropy",
+            "multiclass_softmax",
+        ):
             class_labels = targets
         return _auto_rounds.holdout_split(
             row_count,
@@ -1932,6 +1986,9 @@ class _GBMEstimatorCore(
             kwargs["multiclass_strategy"] = strategy
         if self.multiclass_hessian != "diagonal":
             kwargs["multiclass_hessian"] = self.multiclass_hessian
+        if strategy == "vector_leaves" and self.multiclass_sketch != "none":
+            kwargs["multiclass_sketch"] = self.multiclass_sketch
+            kwargs["multiclass_sketch_dim"] = int(self.multiclass_sketch_dim)
         return kwargs
 
     def _auto_round_cap(self) -> int:
@@ -1953,9 +2010,14 @@ class _GBMEstimatorCore(
         fit uses nothing vector leaves do not support, and when the data is
         large enough for one shared tree per round to beat per-class trees
         (see ``_prefers_vector_leaves``). ``multiclass_hessian=
-        "full"`` needs vector leaves, so it selects them whenever they are
-        supported.
+        "full"`` and a ``multiclass_sketch`` need vector leaves, so they
+        select them whenever they are supported.
         """
+        if self.multiclass_strategy == "per_class_trees" and self.multiclass_sketch != "none":
+            raise ValueError(
+                "multiclass_sketch scores the splits of vector-leaf trees; use "
+                "multiclass_strategy='vector_leaves' or 'auto', or multiclass_sketch='none'"
+            )
         if self.multiclass_strategy != "auto":
             return self.multiclass_strategy
         supported = not (
@@ -1968,7 +2030,7 @@ class _GBMEstimatorCore(
         )
         if not supported:
             return "per_class_trees"
-        if self.multiclass_hessian == "full":
+        if self.multiclass_hessian == "full" or self.multiclass_sketch != "none":
             return "vector_leaves"
         if self.training_policy != "auto":
             return "per_class_trees"
@@ -2069,6 +2131,8 @@ class _GBMEstimatorCore(
         if fit_kwargs["group"] is not None:
             holdout_kwargs["group"] = take(fit_kwargs["group"], train_idx)
             holdout_kwargs["eval_group"] = take(fit_kwargs["group"], valid_idx)
+        if fit_kwargs["time_index"] is not None:
+            holdout_kwargs["time_index"] = take(fit_kwargs["time_index"], train_idx)
         if fit_kwargs["categorical_feature_values"] is not None:
             holdout_kwargs["categorical_feature_values"] = take(
                 fit_kwargs["categorical_feature_values"], train_idx
@@ -2123,6 +2187,9 @@ class _GBMEstimatorCore(
             "holdout_best_round": best_round,
             "refit_rounds": rounds,
             "holdout_fit_seconds": holdout_seconds,
+            "holdout_split": (
+                "latest_periods" if fit_kwargs["time_index"] is not None else "random"
+            ),
         }
         return self
 
@@ -3874,6 +3941,65 @@ class _GBMEstimatorCore(
         return self._prediction_array(
             predictor_predict_batch_canonical(self._artifact_bytes, rows)
         )
+
+    def apply(self, X: object) -> np.ndarray:
+        """Return the leaf each row lands in, for every tree.
+
+        The result is an ``(n_samples, n_trees)`` int32 array. Leaf indices
+        are numbered ``0..n_leaves - 1`` within each tree, like LightGBM's
+        ``pred_leaf`` and scikit-learn's ``apply``. Single-output models only
+        (regression, binary classification and ranking).
+        """
+        leaf_indices, _ = self._leaf_assignments(X)
+        return leaf_indices.astype(np.int32, copy=False)
+
+    def _leaf_assignments(self, X: object) -> tuple[np.ndarray, np.ndarray]:
+        """Leaf indices and per-tree raw-score contributions, both ``(n, n_trees)``."""
+        self._require_fitted()
+        if self._artifact_bytes is None:
+            raise RuntimeError(f"{type(self).__name__} native artifact is not available")
+        if getattr(self, "n_classes_", 2) > 2:
+            raise NotImplementedError(
+                "apply() is not supported for multi-class models yet"
+            )
+        if self._native_predictor_handle is None:
+            self._predictor_needs_rebuild = False
+            self._native_predictor_handle = self._build_native_predictor_handle(
+                self._artifact_bytes, required=True
+            )
+            self._convert_predictor_thresholds_to_float()
+        predict_leaf = getattr(self._native_predictor_handle, "predict_leaf_numpy", None)
+        if not callable(predict_leaf):
+            raise RuntimeError("leaf indices require the native AlloyGBM predictor")
+        X = self._apply_native_cat_mappings_for_predict(X)
+        X = self._validate_numeric_features(X)
+        # Mirror predict(): float thresholds take raw values; otherwise rows
+        # are quantized into the bin space the trees were trained in.
+        if self._float_thresholds_converted:
+            candidate = self._native_matrix_fast_path_candidate(X)
+            rows = candidate if candidate is not None else self._validate_rows(X)
+        elif self._uses_continuous_binning:
+            payload = self._native_matrix_flat_payload(X)
+            if payload is not None:
+                flat_values, row_count, feature_count = payload
+                self._check_prediction_feature_count(feature_count)
+                rows = np.asarray(
+                    self._quantize_dense_values_for_prediction(
+                        flat_values, row_count, feature_count
+                    ),
+                    dtype=np.float32,
+                ).reshape(row_count, feature_count)
+            else:
+                rows = self._quantize_rows_for_prediction(self._validate_rows(X))
+        else:
+            candidate = self._native_matrix_fast_path_candidate(X)
+            rows = candidate if candidate is not None else self._validate_rows(X)
+        matrix = np.ascontiguousarray(rows, dtype=np.float32)
+        if matrix.ndim != 2:
+            raise ValueError("X must be a 2D matrix of feature rows")
+        self._check_prediction_feature_count(matrix.shape[1])
+        leaf_indices, leaf_outputs = predict_leaf(matrix)
+        return np.asarray(leaf_indices), np.asarray(leaf_outputs)
 
     def score(self, X: object, y: object, sample_weight: object = None) -> float:
         """Return R² score for the given test data and labels."""
