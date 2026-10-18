@@ -3,7 +3,7 @@
 
 use super::main::MockBackend;
 use super::*;
-use alloygbm_core::{MISSING_BIN_U8, MulticlassHessian, MulticlassStrategy};
+use alloygbm_core::{MISSING_BIN_U8, MulticlassHessian, MulticlassSketch, MulticlassStrategy};
 
 /// The builders' Newton-step denominator epsilon.
 const LEAF_EPSILON: f64 = 1e-6;
@@ -343,6 +343,16 @@ fn vector_leaves_reject_unsupported_options() {
             ..vector_params(TreeGrowth::Level)
         },
         TrainParams {
+            multiclass_strategy: MulticlassStrategy::PerClassTrees,
+            multiclass_sketch: MulticlassSketch::RandomProjection,
+            ..vector_params(TreeGrowth::Level)
+        },
+        TrainParams {
+            multiclass_sketch: MulticlassSketch::TopOutputs,
+            multiclass_sketch_dim: 0,
+            ..vector_params(TreeGrowth::Level)
+        },
+        TrainParams {
             multiclass_hessian: MulticlassHessian::Full,
             grn_strength: 1.0,
             grn_form: alloygbm_core::GrnForm::PerRow,
@@ -352,7 +362,14 @@ fn vector_leaves_reject_unsupported_options() {
     for params in rejected {
         let error = fit(params, controls(2, TreeGrowth::Level), &dataset, &binned)
             .expect_err("unsupported option must be rejected");
-        assert!(matches!(error, EngineError::InvalidConfig(_)), "{error:?}");
+        assert!(
+            matches!(
+                error,
+                EngineError::InvalidConfig(_)
+                    | EngineError::Core(alloygbm_core::CoreError::InvalidConfig(_))
+            ),
+            "{error:?}"
+        );
     }
 }
 
@@ -459,4 +476,81 @@ fn full_hessian_leaves_are_centred_across_classes() {
             );
         }
     }
+}
+
+#[test]
+fn sketched_vector_leaves_share_one_structure_and_replay() {
+    let (dataset, binned) = vector_leaf_fixture(240);
+    let sketches = [
+        MulticlassSketch::TopOutputs,
+        MulticlassSketch::RandomSampling,
+        MulticlassSketch::RandomProjection,
+    ];
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        for sketch in sketches {
+            let params = TrainParams {
+                multiclass_sketch: sketch,
+                multiclass_sketch_dim: 2,
+                ..vector_params(tree_growth)
+            };
+            let summary = fit(params.clone(), controls(8, tree_growth), &dataset, &binned)
+                .expect("sketched fit");
+            assert_eq!(summary.rounds_completed, 8);
+            assert_shared_structure(&summary.model);
+            assert_tracked_loss_matches_replay(&summary, &dataset, &binned);
+            let again =
+                fit(params, controls(8, tree_growth), &dataset, &binned).expect("sketched fit");
+            assert_eq!(summary.model.class_stumps, again.model.class_stumps);
+        }
+    }
+}
+
+#[test]
+fn sketch_at_least_as_wide_as_the_classes_changes_nothing() {
+    let (dataset, binned) = vector_leaf_fixture(240);
+    let plain = fit(
+        vector_params(TreeGrowth::Level),
+        controls(6, TreeGrowth::Level),
+        &dataset,
+        &binned,
+    )
+    .expect("plain fit");
+    for sketch in [
+        MulticlassSketch::TopOutputs,
+        MulticlassSketch::RandomSampling,
+        MulticlassSketch::RandomProjection,
+    ] {
+        let params = TrainParams {
+            multiclass_sketch: sketch,
+            multiclass_sketch_dim: CLASSES,
+            ..vector_params(TreeGrowth::Level)
+        };
+        let wide = fit(params, controls(6, TreeGrowth::Level), &dataset, &binned)
+            .expect("wide sketch fit");
+        assert_eq!(plain.model.class_stumps, wide.model.class_stumps);
+    }
+}
+
+#[test]
+fn sketches_change_the_tree() {
+    let (dataset, binned) = vector_leaf_fixture(240);
+    let plain = fit(
+        vector_params(TreeGrowth::Level),
+        controls(6, TreeGrowth::Level),
+        &dataset,
+        &binned,
+    )
+    .expect("plain fit");
+    let sketched = fit(
+        TrainParams {
+            multiclass_sketch: MulticlassSketch::RandomProjection,
+            multiclass_sketch_dim: 1,
+            ..vector_params(TreeGrowth::Level)
+        },
+        controls(6, TreeGrowth::Level),
+        &dataset,
+        &binned,
+    )
+    .expect("sketched fit");
+    assert_ne!(plain.model.class_stumps, sketched.model.class_stumps);
 }

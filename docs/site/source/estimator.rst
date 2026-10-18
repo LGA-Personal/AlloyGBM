@@ -66,6 +66,16 @@ Core parameters
   which ``"auto"`` then picks; at most 16 classes: each leaf solves with the
   full softmax Hessian ``diag(p) - p p^T``; splits are still scored on the
   diagonal) or ``"abs_residual"`` (``|p_k - y_k|``).
+- ``multiclass_sketch: str = "none"``, ``multiclass_sketch_dim: int = 5`` --
+  SketchBoost split scoring for vector leaves: splits are scored on
+  ``multiclass_sketch_dim`` columns derived from the K class gradients instead
+  of all K, while leaves still solve on all K classes.
+  ``"random_projection"`` (Gaussian ``K x d`` projection), ``"random_sampling"``
+  (``d`` classes drawn by squared gradient norm, rescaled) and
+  ``"top_outputs"`` (the ``d`` classes with the largest gradient norms). A
+  sketch selects vector leaves under ``multiclass_strategy="auto"`` and is
+  rejected with ``"per_class_trees"``; a width of K or more scores on all
+  classes.
 - ``glm_hessian: str = "exact"`` -- curvature for the log-link objectives
   (``"poisson"``, ``"gamma"``, ``"tweedie"``). ``"bounded"`` uses XGBoost's
   bounded-step pseudo-Hessians, which cap each Newton leaf step and replace

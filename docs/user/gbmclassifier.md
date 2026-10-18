@@ -84,6 +84,11 @@ All parameters from `GBMRegressor` are accepted, including:
   with fewer classes or under 1,000 rows. See
   [GBMRegressor — Parameters](gbmregressor.md#parameters) for the details and
   the options they do not support yet.
+- `multiclass_sketch` (multi-class only, off by default) scores vector-leaf
+  splits on `multiclass_sketch_dim` columns derived from the class gradients
+  instead of all of them (SketchBoost); leaves still solve on every class.
+  `"random_projection"` with `multiclass_sketch_dim=1` is the setting to try
+  first. Setting a sketch selects vector leaves.
 
 The objective is always binary cross-entropy and is not configurable.
 

@@ -200,6 +200,18 @@
 
 ### Added
 
+- **SketchBoost split scoring for vector leaves: `multiclass_sketch` and
+  `multiclass_sketch_dim` on `GBMClassifier`.** Vector-leaf trees can score
+  their splits on a few columns derived from the K class gradients
+  (`"random_projection"`, `"random_sampling"` or `"top_outputs"`, Iosipoi &
+  Vakhrushev 2022) instead of all K, while leaves still solve on every class.
+  Off by default; setting it selects vector leaves. On 8 many-class datasets
+  (10 to 100 classes, defaults regime, 5-fold) a one-column random projection
+  lowered log loss 5.8% against the current default (shifted geometric mean),
+  with the largest gains on small many-class data (movement_libras −21%,
+  soybean −16%, micro-mass −11%, each also ahead of plain vector leaves) and
+  helena (100 classes) −0.8% at 31% less fit time; mnist fit 50% faster at
+  equal loss. It lost on krkopt (+4.7%) and volkert (+0.9%).
 - **`multiclass_strategy` (`"auto"`, `"per_class_trees"`, `"vector_leaves"`)
   and `multiclass_hessian` on `GBMClassifier`.** Vector leaves grow one tree
   per round for multiclass softmax, scoring splits on the sum of per-class

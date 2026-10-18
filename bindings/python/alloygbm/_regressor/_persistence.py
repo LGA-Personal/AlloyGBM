@@ -92,6 +92,10 @@ class _PersistenceMixin:
             self.grn_strength = 0.0
         if not hasattr(self, "grn_form"):
             self.grn_form = "per_leaf"
+        if not hasattr(self, "multiclass_sketch"):
+            self.multiclass_sketch = "none"
+        if not hasattr(self, "multiclass_sketch_dim"):
+            self.multiclass_sketch_dim = 5
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
         if self._is_fitted and not hasattr(self, "feature_bundling_diagnostics_"):
