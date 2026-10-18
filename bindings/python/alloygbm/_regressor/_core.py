@@ -3821,6 +3821,65 @@ class _GBMEstimatorCore(
             predictor_predict_batch_canonical(self._artifact_bytes, rows)
         )
 
+    def apply(self, X: object) -> np.ndarray:
+        """Return the leaf each row lands in, for every tree.
+
+        The result is an ``(n_samples, n_trees)`` int32 array. Leaf indices
+        are numbered ``0..n_leaves - 1`` within each tree, like LightGBM's
+        ``pred_leaf`` and scikit-learn's ``apply``. Single-output models only
+        (regression, binary classification and ranking).
+        """
+        leaf_indices, _ = self._leaf_assignments(X)
+        return leaf_indices.astype(np.int32, copy=False)
+
+    def _leaf_assignments(self, X: object) -> tuple[np.ndarray, np.ndarray]:
+        """Leaf indices and per-tree raw-score contributions, both ``(n, n_trees)``."""
+        self._require_fitted()
+        if self._artifact_bytes is None:
+            raise RuntimeError(f"{type(self).__name__} native artifact is not available")
+        if getattr(self, "n_classes_", 2) > 2:
+            raise NotImplementedError(
+                "apply() is not supported for multi-class models yet"
+            )
+        if self._native_predictor_handle is None:
+            self._predictor_needs_rebuild = False
+            self._native_predictor_handle = self._build_native_predictor_handle(
+                self._artifact_bytes, required=True
+            )
+            self._convert_predictor_thresholds_to_float()
+        predict_leaf = getattr(self._native_predictor_handle, "predict_leaf_numpy", None)
+        if not callable(predict_leaf):
+            raise RuntimeError("leaf indices require the native AlloyGBM predictor")
+        X = self._apply_native_cat_mappings_for_predict(X)
+        X = self._validate_numeric_features(X)
+        # Mirror predict(): float thresholds take raw values; otherwise rows
+        # are quantized into the bin space the trees were trained in.
+        if self._float_thresholds_converted:
+            candidate = self._native_matrix_fast_path_candidate(X)
+            rows = candidate if candidate is not None else self._validate_rows(X)
+        elif self._uses_continuous_binning:
+            payload = self._native_matrix_flat_payload(X)
+            if payload is not None:
+                flat_values, row_count, feature_count = payload
+                self._check_prediction_feature_count(feature_count)
+                rows = np.asarray(
+                    self._quantize_dense_values_for_prediction(
+                        flat_values, row_count, feature_count
+                    ),
+                    dtype=np.float32,
+                ).reshape(row_count, feature_count)
+            else:
+                rows = self._quantize_rows_for_prediction(self._validate_rows(X))
+        else:
+            candidate = self._native_matrix_fast_path_candidate(X)
+            rows = candidate if candidate is not None else self._validate_rows(X)
+        matrix = np.ascontiguousarray(rows, dtype=np.float32)
+        if matrix.ndim != 2:
+            raise ValueError("X must be a 2D matrix of feature rows")
+        self._check_prediction_feature_count(matrix.shape[1])
+        leaf_indices, leaf_outputs = predict_leaf(matrix)
+        return np.asarray(leaf_indices), np.asarray(leaf_outputs)
+
     def score(self, X: object, y: object, sample_weight: object = None) -> float:
         """Return R² score for the given test data and labels."""
         from alloygbm.evaluation import r2_score

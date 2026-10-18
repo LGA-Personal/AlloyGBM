@@ -6,8 +6,8 @@ use crate::quantization::{
 };
 use alloygbm_core::checked_dense_element_count;
 use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel};
-use alloygbm_predictor::{Predictor, PredictorError};
-use numpy::{PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use alloygbm_predictor::{LeafAssignments, Predictor, PredictorError};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -340,6 +340,46 @@ impl NativePredictorHandle {
         })
     }
 
+    // -- Leaf indices ---------------------------------------------------------
+
+    /// Leaf index and per-tree contribution for each row, from a C-contiguous
+    /// float32 matrix already in the predictor's threshold space. Returns two
+    /// `(n_rows, n_trees)` arrays: uint32 leaf indices and float32 outputs.
+    fn predict_leaf_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        array: PyReadonlyArray2<f32>,
+    ) -> PyResult<LeafArrays<'py>> {
+        let shape = array.shape();
+        let (row_count, feature_count) = (shape[0], shape[1]);
+        let array_view = array.as_array();
+        let values = array_view.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
+        })?;
+        let leaves = py.detach(|| {
+            self.predictor
+                .predict_leaf_dense(values, row_count, feature_count)
+                .map_err(predictor_error_to_pyerr)
+        })?;
+        leaf_arrays(py, leaves, row_count)
+    }
+
+    /// Same as `predict_leaf_numpy` for a flat row-major list of values.
+    fn predict_leaf_dense<'py>(
+        &self,
+        py: Python<'py>,
+        values: Vec<f32>,
+        row_count: usize,
+        feature_count: usize,
+    ) -> PyResult<LeafArrays<'py>> {
+        let leaves = py.detach(|| {
+            self.predictor
+                .predict_leaf_dense(&values, row_count, feature_count)
+                .map_err(predictor_error_to_pyerr)
+        })?;
+        leaf_arrays(py, leaves, row_count)
+    }
+
     // -- Multi-class prediction -----------------------------------------------
 
     fn is_multiclass(&self) -> bool {
@@ -396,6 +436,19 @@ impl NativePredictorHandle {
 }
 
 // -- Piece B: predict/shap implementation functions --------------------------
+
+type LeafArrays<'py> = (Bound<'py, PyArray2<u32>>, Bound<'py, PyArray2<f32>>);
+
+fn leaf_arrays(
+    py: Python<'_>,
+    leaves: LeafAssignments,
+    row_count: usize,
+) -> PyResult<LeafArrays<'_>> {
+    let shape = [row_count, leaves.tree_count];
+    let indices = PyArray1::from_vec(py, leaves.leaf_indices).reshape(shape)?;
+    let outputs = PyArray1::from_vec(py, leaves.leaf_outputs).reshape(shape)?;
+    Ok((indices, outputs))
+}
 
 fn load_predictor_from_artifact_impl(
     artifact_bytes: &[u8],

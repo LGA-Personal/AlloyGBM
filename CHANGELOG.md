@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+
+- **Prediction intervals: `alloygbm.conformal.LoBoost` and `SplitConformal`.**
+  Wrap a fitted regressor, `calibrate(X_cal, y_cal, alpha)` on held-out rows,
+  then `predict_interval(X)` returns `(lower, upper)` with finite-sample
+  marginal coverage. LoBoost (Santos et al., arXiv 2602.22432) groups
+  calibration rows by the leaves they share along the boosting path, so widths
+  adapt to the region a row falls in. On the 33 dev-suite regression tasks
+  (3 seeds, alpha = 0.1) it covers 90.5% of test rows, cuts the mean interval
+  score to 0.94x split conformal's (lower on 23 of 33 tasks) and raises
+  worst-slab coverage from 0.84 to 0.88; against conformalized quantile
+  regression with two `objective="quantile"` models its pooled interval score
+  is 0.95x, but CQR is lower on 22 of 33 tasks, so LoBoost's edge is cost
+  (about 0.05 s of calibration instead of two extra fits) and small or
+  irregular data. New API only; training and the artifact are unchanged.
+- **`apply(X)` on single-output estimators** returns the leaf index each row
+  reaches in every tree (`(n_samples, n_trees)` int32, numbered per tree like
+  LightGBM's `pred_leaf`), backed by a new `Predictor::predict_leaf_dense`.
+
 ### Performance
 
 - **Wide data with mostly-constant columns fits about twice as fast.** When

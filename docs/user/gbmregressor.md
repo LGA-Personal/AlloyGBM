@@ -749,6 +749,7 @@ shaping, and depth/iteration leaf shrinkage. See
 - `load_model(path)` (classmethod)
 - `artifact_bytes` -- property returning the raw artifact bytes
 - `score(X, y)` -- returns R-squared (sklearn `RegressorMixin` convention)
+- `apply(X)` -- returns an `(n_samples, n_trees)` int32 array with the leaf each row reaches in each tree (single-output models; see [Prediction intervals](#prediction-intervals))
 
 Important `fit(...)` rules:
 
@@ -856,6 +857,46 @@ from alloygbm.evaluation import (
     poisson_deviance, gamma_deviance, tweedie_deviance
 )
 ```
+
+## Prediction intervals
+
+`alloygbm.conformal` wraps a fitted regressor and turns its point predictions
+into intervals with a finite-sample coverage guarantee. Fit the model on one
+part of the training data, calibrate on rows the model never saw, then ask for
+intervals:
+
+```python
+from alloygbm import GBMRegressor
+from alloygbm.conformal import LoBoost
+
+model = GBMRegressor().fit(X_fit, y_fit)
+intervals = LoBoost(model).calibrate(X_cal, y_cal, alpha=0.1)
+lower, upper = intervals.predict_interval(X_test)        # ~90% coverage
+lower, upper = intervals.predict_interval(X_test, alpha=0.2)  # re-use for 80%
+```
+
+- `SplitConformal(model)` -- classic split conformal: one quantile of
+  `|y - predict(X)|` over the calibration rows, so every interval has the same
+  width.
+- `LoBoost(model, n_part=50, p_min=0.005)` -- local conformal intervals from
+  the model's own trees (Santos et al., arXiv 2602.22432). Calibration rows are
+  grouped by the leaves they share, one tree at a time, while a group keeps at
+  least `max(n_part, ceil(p_min * n_cal))` rows; smaller groups are merged into
+  the group with the closest leaf path. Each group gets its own residual
+  quantile, so the width adapts to the region a row falls in. A row that
+  reaches a leaf no calibration row reached gets the quantile of the deepest
+  group it matched. With fewer than about `2 * n_part` calibration rows
+  there is one group and LoBoost is plain split conformal.
+
+Both work with `GBMRegressor` and `GBMRanker` (any single-output regression
+objective), pickle with the model they wrap, and do not change training or
+the model artifact. Coverage is marginal: about `1 - alpha` of new rows from
+the same distribution are covered. Neither wraps a classifier.
+
+`model.apply(X)` exposes the leaf indices LoBoost uses. Leaves are numbered
+`0..n_leaves - 1` within each tree, like LightGBM's `pred_leaf`; it is
+available on `GBMRegressor`, `GBMRanker` and binary `GBMClassifier`, not on
+multiclass models yet.
 
 ## SHAP interaction values (v0.11.0+)
 
