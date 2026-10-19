@@ -32,6 +32,35 @@ pub(crate) fn experiment_binary_leaf_newton_steps() -> Option<usize> {
         .and_then(|value| value.trim().parse::<usize>().ok())
 }
 
+pub(crate) const AUTO_ROW_SUBSAMPLE_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_AUTO_ROW_SUBSAMPLE";
+pub(crate) const AUTO_COL_SUBSAMPLE_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_AUTO_COL_SUBSAMPLE";
+pub(crate) const AUTO_MIN_ROWS_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_AUTO_MIN_ROWS";
+
+/// Auto-policy overrides for calibration runs: row subsample, column
+/// subsample and minimum rows per leaf, replacing whatever the auto rules
+/// pick (at every dataset size). Each is `None` when unset or invalid.
+pub(crate) fn experiment_auto_row_subsample() -> Option<f32> {
+    parse_unit_interval_env(AUTO_ROW_SUBSAMPLE_ENV_VAR)
+}
+
+pub(crate) fn experiment_auto_col_subsample() -> Option<f32> {
+    parse_unit_interval_env(AUTO_COL_SUBSAMPLE_ENV_VAR)
+}
+
+pub(crate) fn experiment_auto_min_rows() -> Option<usize> {
+    std::env::var(AUTO_MIN_ROWS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+}
+
+fn parse_unit_interval_env(env_name: &str) -> Option<f32> {
+    std::env::var(env_name)
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| *value > 0.0 && *value <= 1.0)
+}
+
 pub(crate) const SPLIT_NOISE_STRENGTH_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_NOISE_STRENGTH";
 
 /// Split-score noise strength overriding the auto policy's choice, for any

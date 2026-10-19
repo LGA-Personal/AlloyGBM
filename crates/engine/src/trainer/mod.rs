@@ -797,9 +797,9 @@ impl Trainer {
         } else {
             match policy_mode {
                 TrainingPolicyMode::Manual => self.default_iteration_controls(rounds),
-                TrainingPolicyMode::Auto => {
-                    self.auto_iteration_controls(dataset, binned_matrix, rounds, family)
-                }
+                TrainingPolicyMode::Auto => self
+                    .auto_iteration_controls(dataset, binned_matrix, rounds, family)
+                    .map(|controls| self.apply_auto_experiment_overrides(controls, dataset)),
             }?
         };
         Ok(controls.with_policy_request(rounds, policy_mode))
@@ -2369,6 +2369,31 @@ impl Trainer {
         }
         controls = controls.with_max_leaves(self.params.max_leaves)?;
         Ok(controls)
+    }
+
+    /// Calibration-only overrides of the auto rules, read from
+    /// `ALLOYGBM_EXPERIMENT_AUTO_*`; values the caller set explicitly win.
+    fn apply_auto_experiment_overrides(
+        &self,
+        mut controls: IterationControls,
+        dataset: &TrainingDataset,
+    ) -> IterationControls {
+        if self.params.row_subsample == 1.0
+            && let Some(rate) = crate::env::experiment_auto_row_subsample()
+        {
+            controls.row_subsample = rate;
+        }
+        if self.params.col_subsample == 1.0
+            && let Some(rate) = crate::env::experiment_auto_col_subsample()
+        {
+            controls.col_subsample = rate;
+        }
+        if self.params.min_data_in_leaf <= 1
+            && let Some(min_rows) = crate::env::experiment_auto_min_rows()
+        {
+            controls.min_rows_per_leaf = min_rows.min(dataset.row_count().saturating_div(2).max(1));
+        }
+        controls
     }
 
     fn auto_iteration_controls(
