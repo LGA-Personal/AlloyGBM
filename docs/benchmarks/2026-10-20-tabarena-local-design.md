@@ -1,5 +1,7 @@
 # TabArena benchmark replacement design
 
+> Review follow-up supersedes the initial execution/report choices below: upstream Ray is the default, acceptance uses the chosen Linux 16-vCPU / nominal 64-GB policy, default RF supplies matched local calibration/fallback, and published context adds only AlloyGBM over the planned task scope. Cooperative partial models are retained. See [resolutions](../reviews/2026-10-20-tabarena-resolutions.md) and the [droplet runbook](../../benchmarks/tabarena/DROPLET.md). Full Lite HPO now includes RF: 5,355 outer jobs / 42,840 children.
+
 Date: 2026-10-20. Status: implementation in progress; see the operational addendum below for executed evidence.
 
 ## Purpose and scope
