@@ -41,4 +41,47 @@ The retirement gate requires the published-context report with unchanged upstrea
 
 ## Acceptance status
 
-The frozen smoke run is in progress. Full Lite HPO acceptance, complete official submission scope and maintainer approval have **not** been established. The separate retirement PR must remain a draft until the documented acceptance audit passes. Generated raw caches and manifests remain ignored local artifacts; no leaderboard upload is performed.
+The earlier settings above describe the initial development runs. They are
+superseded by the review follow-up below. Full Lite HPO acceptance, complete
+official submission scope and maintainer approval have **not** been established.
+The retirement PR remains a draft. Generated caches/manifests remain ignored;
+no leaderboard upload is performed.
+
+## Review follow-up: standard resources, calibration and disposable Linux runs
+
+See [resolutions](../reviews/2026-10-20-tabarena-resolutions.md) and the
+[droplet runbook](../../benchmarks/tabarena/DROPLET.md). Upstream Ray is now the
+default; retirement requires the chosen Linux 16-vCPU / nominal 64-GB resource
+policy. Local debug execution remains diagnostic. The matched pool adds a
+default-only RF calibrator; published comparisons add only AlloyGBM and preserve
+the planned task scope even when an entire task has failed AlloyGBM fits.
+The complete Lite HPO plan now has 5,355 jobs / 42,840 children, including RF.
+
+The adapter uses AutoGluon's resolved stopping metric. At this pin, AUC evaluation
+defaults to log-loss stopping; explicit AUC stopping is supported. Completed
+cooperative fits are retained, and native deadlines without early stopping keep
+the completed prefix. These changes supersede the earlier post-fit rejection.
+
+Verified follow-up evidence:
+
+- Rust before/after native fixes: 909 passed, 3 ignored; formatting and Clippy
+  with warnings denied passed.
+- Python baseline on the retirement tree: 1,251 + 64 subtests. After native fixes,
+  the integration tree: 1,259 + 64 subtests; deadline-specific suite: 27 passed.
+- Benchmark/cloud contracts: 50 passed. Registered upstream tests: 2 passed,
+  102 unrelated cases deselected. Ruff lint/format and shell syntax passed.
+- Run `4d176b4128ab175d`, official binary task, upstream Ray, development CPU
+  budget 2: 9/9 jobs completed, 72 children validated. Resume made no fits or
+  ledger additions: 18 original start/completion events remain.
+- Cached report generation and regeneration passed. Local report: 13 variants,
+  RF Elo calibration exactly 1000. Published: 106 rows, 60 method metadata records,
+  only AlloyGBM added locally, exactly the one planned dataset/split. Both reports
+  bind the same ledger and current processor hash; sampled-candidate count is 1.
+- Portable export tests recover source and predictions after removing a
+  simulated server checkout and reject a corrupted transfer. Session tests cover
+  successful fits, failed fits and timeouts while preserving exit codes and
+  exporting diagnostics. They require no cloud account or heavy model packages.
+
+No droplet was provisioned. A fresh Ubuntu bootstrap and full Linux Ray pilot
+remain unexecuted; full Lite acceptance remains pending. This macOS binary smoke
+does not establish competitive rank or satisfy the migration resource gate.

@@ -5,11 +5,21 @@ on:
   workflow_dispatch:
     inputs:
       live_smoke:
-        description: 'Run the official three-task, four-model smoke (downloads OpenML data)'
+        description: 'Run three-task development smoke: four boosters plus RF (downloads OpenML data)'
         type: boolean
         default: false
 
 jobs:
+  portable-cloud-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Test evidence transfer and bounded-session workflow without cloud resources
+        run: |
+          uv run --no-project --with pytest python -m pytest benchmarks/tests/test_tabarena_cloud.py -q
+          bash -n benchmarks/tabarena/remote/bootstrap-ubuntu.sh benchmarks/tabarena/remote/run-session.sh
   contracts:
     runs-on: macos-latest
     timeout-minutes: 90
@@ -34,18 +44,18 @@ jobs:
           .venv-tabarena/bin/python -m benchmarks.tabarena.provenance record-build
       - name: Local contracts and upstream model tests
         run: |
-          .venv-tabarena/bin/ruff check benchmarks/tabarena benchmarks/tests/tabarena
-          .venv-tabarena/bin/ruff format --check benchmarks/tabarena benchmarks/tests/tabarena
-          .venv-tabarena/bin/python -m pytest benchmarks/tests/tabarena -q
+          .venv-tabarena/bin/ruff check benchmarks/tabarena benchmarks/tests/tabarena benchmarks/tests/test_tabarena_cloud.py
+          .venv-tabarena/bin/ruff format --check benchmarks/tabarena benchmarks/tests/tabarena benchmarks/tests/test_tabarena_cloud.py
+          .venv-tabarena/bin/python -m pytest benchmarks/tests/tabarena benchmarks/tests/test_tabarena_cloud.py -q
           .venv-tabarena/bin/python -m pytest -o addopts='' -m models \
             .cache/tabarena/upstream/tests/tabarena/models/test_all_models.py \
             .cache/tabarena/upstream/tests/tabarena/models/test_warmup_coverage.py -k AlloyGBM -q
       - name: Plan official scope without fitting
-        run: .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile smoke --threads 1 --plan-only
-      - name: Live official smoke
+        run: .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile smoke --execution local --threads 1 --plan-only
+      - name: Live development smoke
         if: github.event_name == 'workflow_dispatch' && inputs.live_smoke
         run: |
-          .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile smoke --threads 1
+          .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile smoke --execution local --threads 1
           run_dir=$(find benchmarks/results/tabarena -name run_manifest.json -print -quit)
           .venv-tabarena/bin/python -m benchmarks.tabarena.report "$(dirname "$run_dir")"
       - name: Upload run evidence

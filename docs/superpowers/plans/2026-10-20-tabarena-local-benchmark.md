@@ -1,5 +1,9 @@
 # TabArena Benchmark Replacement Implementation Plan
 
+> **2026-10-20 review addendum:** the implementation decisions in the follow-up
+> below supersede the original post-fit-overrun rejection and uncalibrated local
+> pool. See `docs/reviews/2026-10-20-tabarena-resolutions.md` for evidence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the existing benchmark system with standard TabArena evaluation of AlloyGBM defaults, tuned models and tuned ensembles, then archive the legacy system.
@@ -340,3 +344,40 @@ Stage the manifest-listed moves, new migration tests and updated consumers expli
 Spec coverage: environment/build (Task 1), required cooperative native fit deadlines (Task 2), default-preserving model integration and upstream capability conventions (Task 3), standard protocol/search/data metadata (Task 4), upstream run/cache handling (Task 5), upstream three-variant reporting (Task 6), real smoke/Lite acceptance (Task 7), and mandatory CI/docs/archive cutover (Task 8). All Review Focus conditions have owning tests. Deadline capability and full registered-template tests are mandatory gates; no custom holdout protocol, replacement scoring engine or parallel legacy benchmark system survives completion.
 
 Recommended execution: **Native**, because the eight tasks share the same upstream integration and the final archive depends on measured replacement acceptance. Use a fresh whole-branch reviewer after implementation. The user has clarified replacement scope but has not yet chosen an execution method; this revision remains a plan, and legacy files have not moved.
+
+## Review follow-up and on-demand Linux workflow
+
+The user authorized fixing the remaining findings and preparing disposable
+infrastructure documentation; actual provisioning is outside this execution.
+Implement inline, preserving the existing stacked PRs and author-owned review.
+
+- [x] Native deadline correctness: reproduce completed-prefix truncation and
+  classifier refit-state corruption; fix in trainer/classifier; verify all four
+  estimator paths and full Rust/Python suites; commit to PR #172.
+- [x] Adapter fidelity: honor AutoGluon's resolved stopping scorer on raw margins,
+  retain cooperative partial fits, leave public defaults unchanged; test against
+  upstream metrics, serialization, timeout and warmup contracts.
+- [x] Execution/acceptance: default to upstream Ray; gate retirement on Linux
+  x86_64, >=16 available/allocated CPUs, nominal 64-GB RAM and no smaller thread
+  caps. Reject diagnostic resources without preventing local smoke work.
+- [x] Matched reporting: add default-only RF, use standard calibration/fallback,
+  refuse uncalibrated incomplete rankings, add only AlloyGBM to published
+  comparisons, scope to planned tasks, and record actual candidate budgets.
+- [x] Disposable workflow: add `cloud.py` preflight/export/verify and Ubuntu
+  bootstrap/bounded-session scripts. Test archive recovery/corruption and shell
+  exit/export behavior; document console provisioning, exact-commit setup,
+  same-host resume, verified download and manual destruction. Never destroy a
+  droplet before off-server evidence verification. Add portable Ubuntu CI tests.
+- [x] Ruling: missing-class folds stay explicit failures; no fabricated training
+  samples. Keep public-default rounds. Defer a static memory estimate until Linux
+  measurements can support it; inspect this during the pilot.
+- [ ] Next operational gate, when a droplet is requested: verify bootstrap on a
+  fresh selected Linux host, run the full three-task Ray pilot, inspect CPU/RAM,
+  choose a measured budget, then run substantive Lite. Full Lite remains required
+  before merging retirement; local smoke does not satisfy it.
+
+File ownership: `resources.py` defines the project's acceptance resource policy;
+`protocol.py` adds only the RF default; `report.py` delegates imputation and
+scoring to upstream; `cloud.py` handles provider-independent evidence lifecycle;
+`remote/*.sh` bootstrap/run on an existing host; `DROPLET.md` describes provider
+creation/destruction. No cloud tokens, API clients or public leaderboard uploads.
