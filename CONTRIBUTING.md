@@ -34,7 +34,7 @@ The repo is:
   by the Sphinx site under `docs/site/source/`), release history in
   `CHANGELOG.md` and `docs/site/source/release.rst`, current roadmap in
   `docs/roadmap/`.
-- **Benchmarks** (`benchmarks/`) — cross-library comparison harness.
+- **Benchmarks** (`benchmarks/`) — standard TabArena integration and its tests.
 
 ## Dev setup
 
@@ -115,8 +115,9 @@ serialized structs:
 3. Add a post-transform entry to the predictor table.
 4. Add Python-side estimator support (a new estimator class or a new
    `ranking_objective`/`objective` value).
-5. Add a benchmark arm under `benchmarks/run_model_comparison.py` if
-   it's a generally useful objective.
+5. Extend the registered TabArena adapter only for supported benchmark task types;
+   preserve the official protocol and add integration coverage. Ranking and special
+   objectives require separate future benchmark coverage.
 
 ## Commit hygiene
 

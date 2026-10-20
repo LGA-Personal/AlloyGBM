@@ -9,7 +9,7 @@
 
 AlloyGBM is a Rust-first gradient boosting library with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is built for fast native execution, deterministic training, and time-aware tabular workflows.
 
-AlloyGBM is strongest on panel and finance-style problems where leakage-aware validation and practical iteration speed matter. It also performs competitively on general tabular benchmarks and includes native artifact prediction, TreeSHAP explanations, and purged time-series split helpers.
+AlloyGBM is strongest on panel and finance-style problems where leakage-aware validation and practical iteration speed matter. It also supports general tabular tasks and includes native artifact prediction, TreeSHAP explanations, and purged time-series split helpers.
 
 ## When To Use AlloyGBM
 
@@ -40,7 +40,7 @@ semantic versioning covers:
 
 Not covered: the Rust crates (internal, not published to crates.io), exact
 floating-point model values across releases (algorithmic fixes may shift
-predictions; quality is guarded by benchmark gates), and parameters documented
+predictions; library correctness is covered by tests), and parameters documented
 as experimental.
 
 ## Installation
@@ -440,32 +440,11 @@ artifact_bytes = model.artifact_bytes
 - Ranking: `ndcg`
 - Finance: `pearson_correlation`, `rank_ic`, `hit_rate`, `icir`
 
-## Benchmark Snapshot
+## Benchmarks
 
-Measured for v1.0.0 against XGBoost 3.2, LightGBM 4.6, and CatBoost 1.2 with
-an equal thread budget and matched hyperparameters for every library. Full
-tables, methodology, and the fairness controls are in
-[docs/benchmarks/v1.0.0_comparison.md](docs/benchmarks/v1.0.0_comparison.md).
+Use [standard TabArena](benchmarks/tabarena/README.md) for reproducible local comparisons of public defaults, tuned models and tuned + ensemble variants against LightGBM, XGBoost and CatBoost. The workflow uses official splits and enforced eight-fold bagging; its reports disclose scope, failures, resource budgets and provenance. Completed standard competitiveness results have not yet been established.
 
-**Accuracy** — across 15 curated scenarios AlloyGBM wins 5 and is top-two on 11:
-
-- Strongest on `histogram_stress` (0.180 RMSE vs 0.360–0.365 for all three peers)
-- Leads on `bike_sharing`, `dow_jones_financial`, and both ranking scenarios
-- Trails on `panel_time_series`, `california_housing`, `breast_cancer`, `adult_income`
-- At 200k–1M rows accuracy is effectively tied with all three peers
-
-**Speed** — this is AlloyGBM's weak axis, and we report it plainly:
-
-- Fixed per-round overhead dominates on small data: LightGBM and XGBoost fit
-  ~3–4x faster per core on the curated suite (median 5.6k rows). That shrinks
-  to ~1.3x at 200k rows and 1.5–1.8x at 1M — the per-row work is competitive,
-  the constant is not.
-- Parallel scaling is the larger gap: AlloyGBM reaches 1.6–1.8x on 10 cores
-  where LightGBM reaches 2.5–2.8x and CatBoost 4.0–4.2x. This is the headline
-  post-1.0 performance theme.
-- Prediction is competitive, and markedly faster than LightGBM single-threaded.
-
-Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/README.md).
+The [v1.0.0 comparison](docs/benchmarks/v1.0.0_comparison.md) is historical evidence from the retired bespoke harness. Its curated scenarios, parameter matching and speed ratios are not TabArena leaderboard results. The [archive](docs/archive/benchmarks/pre-tabarena-2026-10-20/README.md) preserves that harness and its evidence.
 
 ## Current Limitations
 

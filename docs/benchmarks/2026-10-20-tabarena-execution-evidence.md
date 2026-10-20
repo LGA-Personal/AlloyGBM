@@ -68,6 +68,8 @@ Verified follow-up evidence:
   with warnings denied passed.
 - Python baseline on the retirement tree: 1,251 + 64 subtests. After native fixes,
   the integration tree: 1,259 + 64 subtests; deadline-specific suite: 27 passed.
+  Final rebased retirement tree: 1,256 + 64 subtests. Sphinx with warnings as
+  errors and Clippy across all targets with warnings denied passed.
 - Benchmark/cloud contracts: 50 passed. Registered upstream tests: 2 passed,
   102 unrelated cases deselected. Ruff lint/format and shell syntax passed.
 - Run `4d176b4128ab175d`, official binary task, upstream Ray, development CPU

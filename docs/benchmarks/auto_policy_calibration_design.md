@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Auto-Policy Calibration and Diagnostics Design
 
 Date: 2026-07-25

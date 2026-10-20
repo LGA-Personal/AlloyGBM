@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Bounded log-link Hessians and gradient-regularized Newton (v1)
 
 Dev-suite evidence for the opt-in `glm_hessian="bounded"`, `grn_strength` and

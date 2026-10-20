@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Fit Speed v4: Skip Each Sparse Feature's Dominant Bin
 
 - Harness: default fits on the 14 dev-suite tasks with the most features

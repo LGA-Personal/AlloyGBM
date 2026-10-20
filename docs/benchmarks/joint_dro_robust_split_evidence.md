@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Joint-DRO Robust Split-Gain Evidence
 
 This records the evidence collected for the opt-in `dro_robust_split` flag
@@ -22,7 +24,7 @@ states the measured numbers plainly.
 
 ## Method
 
-- Benchmark script: [`benchmarks/joint_dro_robust_split_benchmark.py`](../../benchmarks/joint_dro_robust_split_benchmark.py).
+- Benchmark script: [`benchmarks/joint_dro_robust_split_benchmark.py`](../archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/joint_dro_robust_split_benchmark.py).
 - Three fixed-seed (`seed=13`) synthetic fixtures, each fit twice (same seed,
   `dro_radius=0.4`, `leaf_solver="dro"`) with `dro_robust_split=False` vs.
   `True`:

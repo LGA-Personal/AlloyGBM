@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Auto-Policy Calibration Benchmark
 
 - Command: `/Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/auto_policy_benchmark.py --gate --output-json /tmp/auto-policy-calibration-final.json --output-report docs/benchmarks/auto_policy_calibration_v1.md`

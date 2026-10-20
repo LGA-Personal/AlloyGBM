@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Default Quality v1: Objective-Aware, Scale-Free Auto Policy
 
 - Harness: `benchmarks/default_quality.py` (every library at its own defaults,

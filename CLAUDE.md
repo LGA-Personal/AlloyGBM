@@ -140,7 +140,7 @@ AlloyGBM/
     roadmap/current.md     # Active roadmap and per-release history
     user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
     site/                  # Sphinx site (Read the Docs)
-  benchmarks/              # Cross-library comparison (regression, classification, ranking)
+  benchmarks/tabarena/     # Standard TabArena CPU regression/binary/multiclass benchmarking
 ```
 
 ## Build & Test Commands
@@ -233,3 +233,7 @@ Periodic deep-dive reviews (design/efficiency/accuracy) live in `docs/reviews/` 
 ## Cutting A Release
 
 Follow [`docs/reference/release_checklist.md`](docs/reference/release_checklist.md) top-to-bottom. It's the authoritative inventory of every file that needs a version bump or content update (3 version-pin files + CHANGELOG + 14+ doc files), the stale-content `git grep` queries, the local + CI verification matrix, the tag/publish commands, and post-release bookkeeping. Skipping it is what made v0.7.1 docs drift; don't.
+
+## Standard benchmark workflow
+
+Use `benchmarks/tabarena/README.md` and the isolated pinned `.venv-tabarena` environment. Preserve the pinned upstream model contribution, official tasks/splits and enforced 8x1 protocol. Run integration tests in `benchmarks/tests/tabarena/`; do not import or execute archived harnesses. Benchmark results must identify source/native/dependencies/resources, coverage and local versus published context. Smoke is not competitiveness evidence; local results are not official leaderboard placements. Ranking, temporal and special-mode comparisons remain outside the new suite. Historical tooling is under `docs/archive/benchmarks/pre-tabarena-2026-10-20/` and is excluded from active tests.

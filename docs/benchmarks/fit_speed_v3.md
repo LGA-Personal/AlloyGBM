@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Fit Speed v3: Per-Round Costs on Dense Data and Multiclass
 
 - Harness: fixed-round timing on the synthetic shapes from
