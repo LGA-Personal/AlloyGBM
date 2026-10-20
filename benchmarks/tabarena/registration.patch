@@ -1,0 +1,22 @@
+diff --git a/packages/tabarena/pyproject.toml b/packages/tabarena/pyproject.toml
+index cffa309..ba5678b 100644
+--- a/packages/tabarena/pyproject.toml
++++ b/packages/tabarena/pyproject.toml
+@@ -71,0 +72 @@ dependencies = [
++alloygbm = ["alloygbm @ git+https://github.com/LGA-Personal/AlloyGBM.git@ecbafa1fb06130d5fe8e481e87d6aaa9fbb79a09"]
+@@ -210,0 +212 @@ extended = [
++  "tabarena[alloygbm]",
+diff --git a/packages/tabarena/src/tabarena/models/__init__.py b/packages/tabarena/src/tabarena/models/__init__.py
+index 7e6e1d8..fe5a76a 100644
+--- a/packages/tabarena/src/tabarena/models/__init__.py
++++ b/packages/tabarena/src/tabarena/models/__init__.py
+@@ -12,0 +13 @@ if TYPE_CHECKING:
++    from tabarena.models.alloygbm.model import AlloyGBMModel
+@@ -55,0 +57 @@ _LAZY_CLASSES: dict[str, str] = {
++    "AlloyGBMModel": "tabarena.models.alloygbm.model",
+diff --git a/packages/tabarena/src/tabarena/website/website_format.py b/packages/tabarena/src/tabarena/website/website_format.py
+index 437a1dc..6b2a4b9 100644
+--- a/packages/tabarena/src/tabarena/website/website_format.py
++++ b/packages/tabarena/src/tabarena/website/website_format.py
+@@ -129,0 +130 @@ def get_model_family(model_name: str, system_names: Container[str] = frozenset()
++            "ALLOYGBM",

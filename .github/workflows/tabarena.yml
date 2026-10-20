@@ -1,0 +1,59 @@
+name: TabArena integration
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live_smoke:
+        description: 'Run the official three-task, four-model smoke (downloads OpenML data)'
+        type: boolean
+        default: false
+
+jobs:
+  contracts:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: benchmarks/tabarena/requirements.lock
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - name: Install isolated pinned environment
+        run: |
+          uv venv --python 3.12 .venv-tabarena
+          uv pip install --python .venv-tabarena/bin/python --prerelease=allow -r benchmarks/tabarena/requirements.lock
+          .venv-tabarena/bin/python -m benchmarks.tabarena.prepare_upstream
+          uv pip install --python .venv-tabarena/bin/python --no-deps -e .cache/tabarena/upstream/packages/tabarena -e .cache/tabarena/upstream/packages/bencheval
+      - name: Build selected source and attest actual extension
+        run: |
+          VIRTUAL_ENV="$PWD/.venv-tabarena" .venv-tabarena/bin/maturin develop --release
+          .venv-tabarena/bin/python -m benchmarks.tabarena.provenance record-build
+      - name: Local contracts and upstream model tests
+        run: |
+          .venv-tabarena/bin/ruff check benchmarks/tabarena benchmarks/tests/tabarena
+          .venv-tabarena/bin/ruff format --check benchmarks/tabarena benchmarks/tests/tabarena
+          .venv-tabarena/bin/python -m pytest benchmarks/tests/tabarena -q
+          .venv-tabarena/bin/python -m pytest -o addopts='' -m models \
+            .cache/tabarena/upstream/tests/tabarena/models/test_all_models.py \
+            .cache/tabarena/upstream/tests/tabarena/models/test_warmup_coverage.py -k AlloyGBM -q
+      - name: Plan official scope without fitting
+        run: .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile smoke --threads 1 --plan-only
+      - name: Live official smoke
+        if: github.event_name == 'workflow_dispatch' && inputs.live_smoke
+        run: |
+          .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile smoke --threads 1
+          run_dir=$(find benchmarks/results/tabarena -name run_manifest.json -print -quit)
+          .venv-tabarena/bin/python -m benchmarks.tabarena.report "$(dirname "$run_dir")"
+      - name: Upload run evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tabarena-integration-${{ github.run_id }}
+          path: |
+            benchmarks/results/tabarena/**
+            .cache/tabarena/build-receipt.json
+          if-no-files-found: ignore
