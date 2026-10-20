@@ -32,14 +32,21 @@ def validate_local_coverage(manifest, latest):
     return False
 
 
-def comparison_context(methods, backend, *, published=False, calibrated=False):
+def comparison_context(
+    methods, backend, *, published=False, calibrated=False, task_metadata=None
+):
     from tabarena.contexts import TabArenaContext
 
+    scope = (
+        {"task_metadata": task_metadata, "only_valid_tasks": False}
+        if task_metadata is not None
+        else {"only_valid_tasks": True}
+    )
     if published:
         return TabArenaContext(
             extra_methods=[m for m in methods if m.method == "[Local] AlloyGBM"],
             backend=backend,
-            only_valid_tasks=True,
+            **scope,
         )
     calibration = "[Local] RF (default)" if calibrated else None
     return TabArenaContext(
@@ -48,7 +55,7 @@ def comparison_context(methods, backend, *, published=False, calibrated=False):
         backend=backend,
         fillna_method=calibration,
         calibration_method=calibration,
-        only_valid_tasks=True,
+        **scope,
     )
 
 
@@ -204,7 +211,7 @@ def process_standard_results(run_dir):
 def _write_report(run_dir, *, published_context=False):
     import pandas as pd
 
-    from benchmarks.tabarena.protocol import COUNTS
+    from benchmarks.tabarena.protocol import COUNTS, RunSpec, resolve_run
     from benchmarks.tabarena.provenance import file_hash
     from benchmarks.tabarena.run import load_latest
 
@@ -222,7 +229,15 @@ def _write_report(run_dir, *, published_context=False):
             "no successful configurations for entrants; refusing incomplete ranking: "
             + str(sorted(missing))
         )
-    context = comparison_context(methods, backend, calibrated=calibrated)
+    resolved = resolve_run(RunSpec(**manifest["spec"]))
+    planned_tasks = resolved.context.task_metadata_collection.subset_to_jobs(
+        resolved.jobs
+    )
+    # Scope by planned tasks, never only successful AlloyGBM tasks: otherwise
+    # failures on entire datasets could disappear before upstream RF imputation.
+    context = comparison_context(
+        methods, backend, calibrated=calibrated, task_metadata=planned_tasks
+    )
     output = run_dir / "report-local"
     leaderboard = context.compare(output_dir=output)
     leaderboard.to_csv(output / "leaderboard.csv", index=False)
@@ -255,7 +270,9 @@ def _write_report(run_dir, *, published_context=False):
         + "\n```\n"
     )
     if published_context:
-        published = comparison_context(methods, backend, published=True)
+        published = comparison_context(
+            methods, backend, published=True, task_metadata=planned_tasks
+        )
         published.compare(output_dir=run_dir / "report-published")
         sources = [
             {

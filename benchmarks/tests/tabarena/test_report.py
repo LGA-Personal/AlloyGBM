@@ -20,9 +20,14 @@ def test_comparison_uses_local_rf_and_only_adds_alloy_to_published_pool(monkeypa
     assert (
         local["fillna_method"] == local["calibration_method"] == "[Local] RF (default)"
     )
-    published = comparison_context(methods, "native", published=True)
+    planned_tasks = object()
+    published = comparison_context(
+        methods, "native", published=True, task_metadata=planned_tasks
+    )
     assert [m.method for m in published["extra_methods"]] == ["[Local] AlloyGBM"]
     assert "fillna_method" not in published
+    assert published["task_metadata"] is planned_tasks
+    assert published["only_valid_tasks"] is False
 
 
 def test_failures_cannot_escape_local_calibration():
@@ -46,6 +51,43 @@ def test_failures_cannot_escape_local_calibration():
     manifest["spec"]["models"] = ["AlloyGBM"]
     with pytest.raises(ValueError, match="complete coverage"):
         validate_local_coverage(manifest, latest)
+
+
+def test_upstream_rf_fallback_penalizes_a_missing_task():
+    from tabarena.contexts import TabArenaContext
+
+    rf = pd.DataFrame(
+        [
+            {
+                "dataset": "easy",
+                "fold": 0,
+                "method": "[Local] RF (default)",
+                "metric_error": 0.3,
+            },
+            {
+                "dataset": "hard",
+                "fold": 0,
+                "method": "[Local] RF (default)",
+                "metric_error": 0.8,
+            },
+        ]
+    )
+    alloy = pd.DataFrame(
+        [
+            {
+                "dataset": "easy",
+                "fold": 0,
+                "method": "[Local] ALLOYGBM (default)",
+                "metric_error": 0.1,
+            }
+        ]
+    )
+    filled = TabArenaContext.fillna_metrics(pd.concat([rf, alloy]), rf)
+    hard = filled[
+        (filled.method == "[Local] ALLOYGBM (default)") & (filled.dataset == "hard")
+    ].iloc[0]
+    assert hard.imputed
+    assert hard.metric_error == 0.8
 
 
 def test_coverage_never_turns_failure_into_measurement(tmp_path):
