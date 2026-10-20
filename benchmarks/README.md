@@ -293,6 +293,14 @@ Additional lighter-weight scripts target specific features:
 - `benchmarks/numerai_benchmark.py` — Numerai-tournament-style residualized
   regression at scale, evaluating numerai_corr, Sharpe, and MMC. Includes
   the `alloygbm_morph` and `alloygbm_morph_cosine` arms.
+- `benchmarks/numerai_scale.py` — special at-scale benchmark on Numerai's
+  large, low signal-to-noise data. Reads three chronological era chunks
+  (train, validation for early stopping, test) straight from the parquet
+  files, separated by a 4-era embargo, and fits Alloy, LightGBM, XGBoost and
+  CatBoost with one deep, heavily regularised configuration (`--profile deep`:
+  lr 0.005, up to 30,000 trees, depth 12 / 1024 leaves, 10,000 rows per leaf,
+  early stopping 500; `--profile quick` is the same shape at lr 0.05). Reports
+  test RMSE, per-era Numerai correlation, Sharpe and fit time.
 - `benchmarks/pl_trees_benchmark.py` — piecewise-linear-leaf
   convergence-curve and λ-sweep analysis across regression, classification,
   and ranking scenarios. Report at `docs/benchmarks/pl_trees_v1.md`.
@@ -453,6 +461,10 @@ python3 -m benchmarks.architectural_backlog.run \
 # Numerai benchmark (slow; downloads data on first run)
 python3 benchmarks/numerai_benchmark.py --feature-set small \
   --rounds 1200 --learning-rate 0.05 --max-depth 6 --col-subsample 0.3
+
+# Numerai at-scale benchmark (needs pyarrow; one arm per run keeps memory down)
+python3 benchmarks/numerai_scale.py --profile quick
+python3 benchmarks/numerai_scale.py --profile deep --arms alloygbm
 ```
 
 The allocation-reuse manifest is strict JSON written by the declared runtime

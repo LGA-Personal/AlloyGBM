@@ -63,11 +63,12 @@ def _local_path(key: str) -> Path:
     return DATA_DIR / filename
 
 
-def ensure_numerai_data() -> None:
-    """Download Numerai v5.2 data files if not already present."""
+def ensure_numerai_data(keys: tuple[str, ...] | None = None) -> None:
+    """Download Numerai v5.2 data files (all, or just ``keys``) if not already present."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    missing = [key for key in NUMERAI_DATASET_FILES if not _local_path(key).exists()]
+    wanted = keys if keys is not None else tuple(NUMERAI_DATASET_FILES)
+    missing = [key for key in wanted if not _local_path(key).exists()]
     if not missing:
         logger.info("All Numerai data files present in %s", DATA_DIR)
         return
@@ -794,7 +795,8 @@ def _log_alloygbm_build_info() -> None:
             ["git", "log", "-1", "--format=%cI", "HEAD"],
             cwd=str(repo_root), stderr=_subprocess.DEVNULL,
         ).decode().strip()
-        commit_time = _dt.datetime.fromisoformat(commit_iso).replace(tzinfo=None)
+        # Local wall time, to compare with the extension's local-time mtime.
+        commit_time = _dt.datetime.fromisoformat(commit_iso).astimezone().replace(tzinfo=None)
     except Exception as exc:
         logger.warning("could not read git HEAD: %s", exc)
         return

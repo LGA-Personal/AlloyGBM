@@ -73,7 +73,9 @@ It also includes additional AlloyGBM variants as separate arms:
 
 A focused MorphBoost-vs-peers comparison script is also provided at
 `benchmarks/morph_report.py`, with a Numerai-specific harness at
-`benchmarks/numerai_benchmark.py`. A dedicated PL-trees benchmark with
+`benchmarks/numerai_benchmark.py` and a special at-scale benchmark at
+`benchmarks/numerai_scale.py` (chronological train / early-stopping / test era
+chunks of Numerai data, deep heavily regularised trees for every library). A dedicated PL-trees benchmark with
 convergence-curve and λ-sweep analysis lives at `benchmarks/pl_trees_benchmark.py`;
 results are reported in `docs/benchmarks/pl_trees_v1.md`.
 The experimental PL split-shortlist harness lives at
