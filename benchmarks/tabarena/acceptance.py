@@ -15,13 +15,17 @@ def validate_scope_and_outcomes(manifest, jobs, latest, explanations):
     if (
         spec["profile"] != "lite-hpo"
         or spec.get("dataset_names")
-        or set(spec["models"]) != {"AlloyGBM", "LightGBM", "XGBoost", "CatBoost"}
+        or set(spec["models"])
+        != {"AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest"}
         or len(manifest["tasks"]) != 51
-        or len(jobs) != 5304
+        or len(jobs) != 5355
     ):
         raise ValueError(
-            "acceptance requires the full four-method, 51-dataset Lite HPO run"
+            "acceptance requires the full four-method comparison plus RF calibration, 51-dataset Lite HPO run"
         )
+    from benchmarks.tabarena.resources import validate_acceptance_resources
+
+    validate_acceptance_resources(spec, manifest["runtime"])
     keys = {fingerprint(job) for job in jobs}
     if set(latest) != keys or any(
         row["status"] not in {"completed", "failed"} for row in latest.values()
@@ -43,6 +47,12 @@ def validate_report_evidence(manifest, summary, sources, ledger_hash):
     if not summary.get("published_context"):
         raise ValueError(
             "acceptance requires --published-context with standard calibration/fallback"
+        )
+    if summary.get("local_pool_calibration") != "[Local] RF (default)":
+        raise ValueError("acceptance requires local RF calibration/fallback")
+    if sources.get("local_entrants") != ["[Local] AlloyGBM"]:
+        raise ValueError(
+            "published comparison must add only AlloyGBM to the upstream pool"
         )
     for record in (summary, sources):
         if (
@@ -86,7 +96,12 @@ def audit_acceptance(run_dir, explanations_path=None):
         )
         for method in manifest["spec"]["models"]:
             variants = pd.read_csv(run_dir / (method + "-variants.csv"))
-            if set(variants.method_subtype) != {"default", "tuned", "tuned_ensemble"}:
+            expected_variants = (
+                {"default"}
+                if method == "RandomForest"
+                else {"default", "tuned", "tuned_ensemble"}
+            )
+            if set(variants.method_subtype) != expected_variants:
                 raise ValueError("missing standard variants: " + method)
         result = {
             "run_fingerprint": manifest["fingerprint"],

@@ -291,12 +291,14 @@ def main():
     parser.add_argument(
         "--execution",
         choices=["local", "upstream"],
-        default="local",
+        default="upstream",
         help="local is the upstream quickstart native/debug runner; upstream uses Ray defaults",
     )
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument(
-        "--models", nargs="+", default=["AlloyGBM", "LightGBM", "XGBoost", "CatBoost"]
+        "--models",
+        nargs="+",
+        default=["AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest"],
     )
     parser.add_argument(
         "--output-root", type=Path, default=ROOT / "benchmarks/results/tabarena"

@@ -9,6 +9,49 @@ from dataclasses import replace
 from pathlib import Path
 
 
+def validate_local_coverage(manifest, latest):
+    if "RandomForest" in manifest["spec"]["models"]:
+        rf = [
+            r
+            for r in latest.values()
+            if r.get("experiment", "").startswith("RandomForest_")
+        ]
+        if len(rf) != len(manifest["tasks"]) or any(
+            r["status"] != "completed" for r in rf
+        ):
+            raise ValueError(
+                "local RF calibration must complete every scoped task before ranking; see coverage.csv"
+            )
+        return True
+    if len(latest) != manifest["expected_jobs"] or any(
+        r["status"] != "completed" for r in latest.values()
+    ):
+        raise ValueError(
+            "local ranking without RF requires complete coverage; see coverage.csv"
+        )
+    return False
+
+
+def comparison_context(methods, backend, *, published=False, calibrated=False):
+    from tabarena.contexts import TabArenaContext
+
+    if published:
+        return TabArenaContext(
+            extra_methods=[m for m in methods if m.method == "[Local] AlloyGBM"],
+            backend=backend,
+            only_valid_tasks=True,
+        )
+    calibration = "[Local] RF (default)" if calibrated else None
+    return TabArenaContext(
+        methods=[],
+        extra_methods=methods,
+        backend=backend,
+        fillna_method=calibration,
+        calibration_method=calibration,
+        only_valid_tasks=True,
+    )
+
+
 def write_coverage(run_dir):
     import pandas as pd
 
@@ -130,10 +173,26 @@ def process_standard_results(run_dir):
         collected.extend(processed.method_results_lst)
     results = EndToEndResults(method_results_lst=collected)
     for method in results.method_results_lst:
+        if (
+            method.method_metadata.method == "RandomForest"
+            and method.hpo_results is not None
+        ):
+            method.hpo_results = method.hpo_results[
+                method.hpo_results.method_subtype.eq("default")
+            ].copy()
         method.model_results.to_csv(
             run_dir / (method.method_metadata.method + "-configs.csv"), index=False
         )
         if method.hpo_results is not None:
+            expected = (
+                {"default"}
+                if method.method_metadata.method == "RandomForest"
+                else {"default", "tuned", "tuned_ensemble"}
+            )
+            if set(method.hpo_results.method_subtype) != expected:
+                raise ValueError(
+                    "an entire variant has no successful result; refusing incomplete ranking"
+                )
             write_selection_weights(method, run_dir)
             method.hpo_results.to_csv(
                 run_dir / (method.method_metadata.method + "-variants.csv"), index=False
@@ -145,24 +204,25 @@ def process_standard_results(run_dir):
 def _write_report(run_dir, *, published_context=False):
     import pandas as pd
 
+    from benchmarks.tabarena.protocol import COUNTS
     from benchmarks.tabarena.provenance import file_hash
-    from tabarena.contexts import TabArenaContext
+    from benchmarks.tabarena.run import load_latest
 
     run_dir = Path(run_dir).resolve()
     write_coverage(run_dir)
     methods = process_standard_results(run_dir)
     manifest = json.loads((run_dir / "run_manifest.json").read_text())
     backend = "native" if manifest["spec"]["execution"] == "local" else "ray"
-    # A local-only entrant pool has no RF calibration/fallback entrant. The
-    # ranking engine is still TabArena's; this choice is explicit in report metadata.
-    context = TabArenaContext(
-        methods=[],
-        extra_methods=methods,
-        backend=backend,
-        fillna_method=None,
-        calibration_method=None,
-        only_valid_tasks=True,
-    )
+    calibrated = validate_local_coverage(manifest, load_latest(run_dir))
+    missing = {"[Local] " + name for name in manifest["spec"]["models"]} - {
+        m.method for m in methods
+    }
+    if missing:
+        raise ValueError(
+            "no successful configurations for entrants; refusing incomplete ranking: "
+            + str(sorted(missing))
+        )
+    context = comparison_context(methods, backend, calibrated=calibrated)
     output = run_dir / "report-local"
     leaderboard = context.compare(output_dir=output)
     leaderboard.to_csv(output / "leaderboard.csv", index=False)
@@ -172,12 +232,13 @@ def _write_report(run_dir, *, published_context=False):
         "report_code_sha256": file_hash(Path(__file__)),
         "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
         "profile": manifest["spec"]["profile"],
+        "sampled_candidates_per_booster": COUNTS[manifest["spec"]["profile"]],
         "expected_jobs": manifest["expected_jobs"],
         "outcomes": coverage.status.value_counts().to_dict(),
         "partial": not coverage.status.eq("completed").all(),
         "protocol": "TabArena-v0.1 8x1",
         "execution": manifest["spec"]["execution"],
-        "local_pool_calibration": None,
+        "local_pool_calibration": context.calibration_method,
         "public_defaults": "current constructor defaults with supplied validation",
         "source_commit": manifest["provenance"]["source_commit"],
         "upstream_revision": manifest["upstream"],
@@ -187,16 +248,14 @@ def _write_report(run_dir, *, published_context=False):
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     (output / "summary.md").write_text(
         "# Local standard TabArena results\n\n"
-        + "Protocol: official TabArena-v0.1, 8 folds × 1 set. Local entrant pool; no RF calibration/fallback.\n\n"
+        + "Protocol: official TabArena-v0.1, 8 folds × 1 set. Local entrant pool; calibration/fallback recorded below.\n\n"
         + "Scope and missing outcomes must be read alongside ranks. These are not official leaderboard placements.\n\n"
         + "```json\n"
         + json.dumps(summary, indent=2)
         + "\n```\n"
     )
     if published_context:
-        published = TabArenaContext(
-            extra_methods=methods, backend=backend, only_valid_tasks=True
-        )
+        published = comparison_context(methods, backend, published=True)
         published.compare(output_dir=run_dir / "report-published")
         sources = [
             {
@@ -216,6 +275,13 @@ def _write_report(run_dir, *, published_context=False):
                     "run_fingerprint": manifest["fingerprint"],
                     "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
                     "report_code_sha256": file_hash(Path(__file__)),
+                    "local_entrants": [
+                        m.method for m in methods if m.method == "[Local] AlloyGBM"
+                    ],
+                    "sampled_candidates_per_booster": COUNTS[
+                        manifest["spec"]["profile"]
+                    ],
+                    "candidate_budget_note": "See recorded local candidate count (additional to default); published baselines generally use 200. Full profile uses the pinned upstream all budget. See each method's source metadata.",
                 },
                 indent=2,
                 default=str,
@@ -227,6 +293,8 @@ def _write_report(run_dir, *, published_context=False):
             "Published results use their source hardware/library versions and candidate budgets; local results use this run manifest. "
             "The published Pareto/timing outputs are mixed-hardware context, not local speedup evidence. "
             "See report-local for the matched local entrant pool.\n"
+            "Only AlloyGBM is added to the published pool. "
+            f"Local sampled candidates per booster: {COUNTS[manifest['spec']['profile']]} (additional to default); published tuned baselines generally use 200.\n"
         )
     return output
 

@@ -148,10 +148,23 @@ def collect_provenance(source_root: Path, receipt_path: Path):
         ).strip()
     else:
         cpu_model = platform.processor()
+        cpuinfo = Path("/proc/cpuinfo")
+        if cpuinfo.exists():
+            cpu_model = next(
+                (
+                    line.split(":", 1)[1].strip()
+                    for line in cpuinfo.read_text().splitlines()
+                    if line.startswith("model name")
+                ),
+                cpu_model,
+            )
     hardware = {
         "cpu_model": cpu_model,
         "physical_cpus": psutil.cpu_count(logical=False),
         "memory_total_bytes": psutil.virtual_memory().total,
+        "effective_cpus": len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else os.cpu_count(),
     }
     versions = {
         d.metadata["Name"]: d.version

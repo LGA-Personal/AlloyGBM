@@ -3,6 +3,51 @@ import pandas as pd
 from benchmarks.tabarena.report import write_coverage
 
 
+def test_comparison_uses_local_rf_and_only_adds_alloy_to_published_pool(monkeypatch):
+    from types import SimpleNamespace
+
+    import tabarena.contexts
+
+    from benchmarks.tabarena.report import comparison_context
+
+    monkeypatch.setattr(tabarena.contexts, "TabArenaContext", lambda **kwargs: kwargs)
+    methods = [
+        SimpleNamespace(method="[Local] " + name)
+        for name in ("AlloyGBM", "LightGBM", "RandomForest")
+    ]
+    local = comparison_context(methods, "native", calibrated=True)
+    assert local["methods"] == []
+    assert (
+        local["fillna_method"] == local["calibration_method"] == "[Local] RF (default)"
+    )
+    published = comparison_context(methods, "native", published=True)
+    assert [m.method for m in published["extra_methods"]] == ["[Local] AlloyGBM"]
+    assert "fillna_method" not in published
+
+
+def test_failures_cannot_escape_local_calibration():
+    import pytest
+
+    from benchmarks.tabarena.report import validate_local_coverage
+
+    manifest = {
+        "spec": {"models": ["AlloyGBM", "RandomForest"]},
+        "tasks": ["task"],
+        "expected_jobs": 2,
+    }
+    latest = {
+        "a": {"experiment": "TA-AlloyGBM_c1", "status": "failed"},
+        "rf": {"experiment": "RandomForest_c1", "status": "completed"},
+    }
+    assert validate_local_coverage(manifest, latest)
+    latest["rf"]["status"] = "failed"
+    with pytest.raises(ValueError, match="calibration"):
+        validate_local_coverage(manifest, latest)
+    manifest["spec"]["models"] = ["AlloyGBM"]
+    with pytest.raises(ValueError, match="complete coverage"):
+        validate_local_coverage(manifest, latest)
+
+
 def test_coverage_never_turns_failure_into_measurement(tmp_path):
     import json
 

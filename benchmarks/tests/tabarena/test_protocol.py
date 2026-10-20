@@ -20,7 +20,7 @@ def test_search_space_stability_and_public_default():
 
 def test_official_smoke_grid_and_default_passthrough():
     run = resolve_run(RunSpec())
-    assert len(run.jobs) == 24
+    assert len(run.jobs) == 27  # Four boosters plus the default RF calibrator.
     assert len(run.tasks) == 3
     assert run.context.validation_protocol.key() == "8x1"
     assert run.context.enforces_validation_protocol
@@ -52,8 +52,10 @@ def test_official_lite_scope_and_author_default_identity():
     defaults = resolve_run(RunSpec(profile="lite-defaults"))
     tuned = resolve_run(RunSpec(profile="lite-hpo"))
     assert len(defaults.tasks) == len(tuned.tasks) == 51
-    assert len(defaults.jobs) == 204
-    assert len(tuned.jobs) == 5304
+    assert len(defaults.jobs) == 255
+    assert len(tuned.jobs) == 5355
+    assert sum("RandomForest" in j.experiment.name for j in tuned.jobs) == 51
+    assert RunSpec().execution == "upstream"
     metadata = get_model_registry()["AlloyGBM"].method_metadata
     default = next(e for e in defaults.experiments if e.name == metadata.config_default)
     params = default.to_yaml_dict()["model_hyperparameters"]

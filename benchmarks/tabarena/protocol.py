@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 SMOKE = ("blood-transfusion-service-center", "QSAR_fish_toxicity", "anneal")
-MODELS = ("AlloyGBM", "LightGBM", "XGBoost", "CatBoost")
+MODELS = ("AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest")
 COUNTS = {"smoke": 1, "lite-defaults": 0, "lite-hpo": 25, "full": "all"}
 
 
@@ -15,7 +15,7 @@ class RunSpec:
     num_cpus: int | None = None
     dataset_names: tuple[str, ...] | None = None
     models: tuple[str, ...] = MODELS
-    execution: str = "local"
+    execution: str = "upstream"
 
     def __post_init__(self):
         if self.execution not in ("local", "upstream"):
@@ -51,7 +51,10 @@ def resolve_run(spec: RunSpec) -> ResolvedRun:
     # No custom splitting, preprocessing, fold-fitting, stopping, or scoring settings.
     context = TabArenaContext(backend="native" if spec.execution == "local" else "ray")
     bundle = TabArenaV0pt1ExperimentBundle(
-        models=[(name, COUNTS[spec.profile]) for name in spec.models]
+        models=[
+            (name, 0 if name == "RandomForest" else COUNTS[spec.profile])
+            for name in spec.models
+        ]
     )
     experiments = bundle.build_experiments(num_cpus=spec.num_cpus, num_gpus=0)
     names = spec.dataset_names or (SMOKE if spec.profile == "smoke" else None)
