@@ -22,7 +22,7 @@ aiosignal==1.4.0
     # via
     #   -c benchmarks/tabarena/requirements.lock
     #   aiohttp
-alloygbm @ git+https://github.com/LGA-Personal/AlloyGBM.git@ecbafa1fb06130d5fe8e481e87d6aaa9fbb79a09
+alloygbm @ git+https://github.com/LGA-Personal/AlloyGBM.git@a8e2da28fa9428b764d7ed0d598a55590ed1ed08
     # via
     #   -c benchmarks/tabarena/requirements.lock
     #   -r benchmarks/tabarena/requirements.in

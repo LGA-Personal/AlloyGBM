@@ -6,7 +6,7 @@ from tabarena.models.alloygbm.hpo import gen_alloygbm
 from tabarena.models.alloygbm.model import AlloyGBMModel
 
 # Updated to the measured deadline-support commit before the integration is run.
-ALLOYGBM_REQUIREMENT = "alloygbm @ git+https://github.com/LGA-Personal/AlloyGBM.git@ecbafa1fb06130d5fe8e481e87d6aaa9fbb79a09"
+ALLOYGBM_REQUIREMENT = "alloygbm @ git+https://github.com/LGA-Personal/AlloyGBM.git@a8e2da28fa9428b764d7ed0d598a55590ed1ed08"
 alloygbm_method_metadata = MethodMetadata.config(
     method="AlloyGBM",
     ag_key="TA-ALLOYGBM",

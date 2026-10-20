@@ -7,11 +7,41 @@ License: MIT. No associated research paper is claimed.
 from __future__ import annotations
 
 import time
+from functools import partial
 from typing import ClassVar
 
 import numpy as np
 from autogluon.core.models import AbstractModel
 from autogluon.core.utils.exceptions import TimeLimitExceeded
+
+
+def _evaluate_margin(y_true, margins, *, metric, problem_type):
+    # AlloyGBM callbacks receive raw margins, whereas AutoGluon scorers expect
+    # transformed predictions. AUC can use margins directly without sigmoid ties.
+    if metric.name == "roc_auc" and np.unique(y_true).size < 2:
+        # The native callback constructor probes with two all-zero dummy rows.
+        # Actual AUC validation partitions are checked before training below.
+        return metric.name, 0.5, False
+    predictions = margins
+    if problem_type == "binary" and metric.name != "roc_auc":
+        from scipy.special import expit
+
+        predictions = expit(np.asarray(margins, dtype=np.float64))
+    return metric.name, float(metric.error(y_true, predictions)), False
+
+
+def stopping_callback(problem_type, metric):
+    """Use the task scorer; multiclass already stops on native softmax log loss."""
+    supported = {
+        "binary": {"roc_auc", "log_loss"},
+        "regression": {"root_mean_squared_error", "rmse"},
+        "multiclass": {"log_loss"},
+    }
+    if metric.name not in supported.get(problem_type, set()):
+        raise ValueError(f"unsupported stopping metric: {problem_type}/{metric.name}")
+    if problem_type == "multiclass":
+        return None
+    return partial(_evaluate_margin, metric=metric, problem_type=problem_type)
 
 
 class AlloyGBMModel(AbstractModel):
@@ -76,6 +106,15 @@ class AlloyGBMModel(AbstractModel):
         eval_set = None
         if X_val is not None and y_val is not None:
             eval_set = (self.preprocess(X_val), y_val)
+        metric = stopping_callback(self.problem_type, self.stopping_metric)
+        if (
+            self.stopping_metric.name == "roc_auc"
+            and y_val is not None
+            and np.unique(y_val).size < 2
+        ):
+            raise ValueError(
+                "ROC AUC requires both classes in the validation partition"
+            )
         remaining = None
         if time_limit is not None:
             remaining = (time_limit - (time.monotonic() - started)) * 0.95
@@ -84,13 +123,16 @@ class AlloyGBMModel(AbstractModel):
         model_cls = GBMRegressor if self.problem_type == "regression" else GBMClassifier
         self.model = model_cls(**params)
         try:
-            self.model.fit(X, y, eval_set=eval_set, time_limit=remaining)
+            self.model.fit(
+                X,
+                y,
+                eval_set=eval_set,
+                time_limit=remaining,
+                eval_metric=metric if eval_set is not None else None,
+            )
         except TimeoutError as exc:
             self.model = None
             raise TimeLimitExceeded from exc
-        if time_limit is not None and time.monotonic() - started >= time_limit:
-            self.model = None
-            raise TimeLimitExceeded
         if (
             self.problem_type != "regression"
             and len(self.model.classes_) != self.num_classes
@@ -105,6 +147,7 @@ class AlloyGBMModel(AbstractModel):
             "stop_reason": self.model.stop_reason_,
             "auto_rounds": getattr(self.model, "auto_rounds_", None),
             "policy": getattr(self.model, "resolved_training_policy_", None),
+            "stopping_metric": self.stopping_metric.name,
         }
 
     def _predict_proba(self, X, **kwargs):
