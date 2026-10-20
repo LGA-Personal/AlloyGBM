@@ -45,3 +45,17 @@ def test_duplicate_driver_cannot_own_run(tmp_path):
         pass
     with exclusive_run(tmp_path):
         pass
+
+
+def test_worker_failure_retains_actual_traceback(tmp_path):
+    import subprocess
+
+    from benchmarks.tabarena.run import execute_worker
+
+    job = tmp_path / "invalid.json"
+    job.write_text("{broken")
+    with pytest.raises(subprocess.CalledProcessError):
+        execute_worker(job, tmp_path, "local")
+    log = (tmp_path / "job_logs/invalid.log").read_text()
+    assert "JSONDecodeError" in log
+    assert "attempt_started" in log

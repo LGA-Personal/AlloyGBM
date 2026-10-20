@@ -95,6 +95,34 @@ def exclusive_run(run_dir):
             fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+def execute_worker(job_file, run_dir, execution):
+    """Keep complete worker diagnostics with the immutable run, including crashes."""
+    log = run_dir / "job_logs" / (job_file.stem + ".log")
+    log.parent.mkdir(exist_ok=True)
+    with log.open("a") as stream:
+        stream.write("\n" + json.dumps({"attempt_started": time.time()}) + "\n")
+        stream.flush()
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "benchmarks.tabarena.run",
+                "--worker-job-file",
+                str(job_file),
+                "--worker-run-dir",
+                str(run_dir),
+                "--execution",
+                execution,
+            ],
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            check=True,
+            cwd=ROOT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+    return log
+
+
 def run_experiments(
     resolved,
     *,
@@ -213,6 +241,7 @@ def run_experiments(
                 run_dir,
                 key,
                 "started",
+                log_path="job_logs/" + key + ".log",
                 experiment=job.experiment.name,
                 task=job.task.as_triple(),
             )
@@ -220,21 +249,7 @@ def run_experiments(
                 job_file = run_dir / "job_specs" / (key + ".json")
                 job_file.parent.mkdir(exist_ok=True)
                 job_file.write_text(json.dumps(job.to_dict(), indent=2))
-                subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "benchmarks.tabarena.run",
-                        "--worker-job-file",
-                        str(job_file),
-                        "--worker-run-dir",
-                        str(run_dir),
-                        "--execution",
-                        resolved.spec.execution,
-                    ],
-                    check=True,
-                    cwd=ROOT,
-                )
+                execute_worker(job_file, run_dir, resolved.spec.execution)
                 from benchmarks.tabarena.artifacts import result_cacher, validate_result
 
                 cacher = result_cacher(run_dir, job, meta)
@@ -248,6 +263,7 @@ def run_experiments(
                     task=job.task.as_triple(),
                     elapsed_seconds=time.monotonic() - started,
                     error=f"{type(exc).__name__}: {exc}",
+                    log_path="job_logs/" + key + ".log",
                 )
                 print(f"Failed: {exc}", file=sys.stderr, flush=True)
             else:

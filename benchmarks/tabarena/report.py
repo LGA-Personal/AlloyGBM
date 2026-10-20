@@ -157,6 +157,25 @@ def _write_report(run_dir, *, published_context=False):
             extra_methods=methods, backend=backend, only_valid_tasks=True
         )
         published.compare(output_dir=run_dir / "report-published")
+        sources = [
+            {
+                "metadata": method.to_info_dict(),
+                "artifact_sha256": {
+                    str(path): file_hash(path)
+                    for path in sorted(method.path_results.glob("*.parquet"))
+                },
+            }
+            for method in published.method_metadata_collection.method_metadata_lst
+        ]
+        (run_dir / "report-published" / "sources.json").write_text(
+            json.dumps(
+                {"upstream_revision": manifest["upstream"], "methods": sources},
+                indent=2,
+                default=str,
+                allow_nan=False,
+            )
+            + "\n"
+        )
         (run_dir / "report-published" / "SOURCE_NOTE.md").write_text(
             "Published results use their source hardware/library versions and candidate budgets; local results use this run manifest. "
             "The published Pareto/timing outputs are mixed-hardware context, not local speedup evidence. "

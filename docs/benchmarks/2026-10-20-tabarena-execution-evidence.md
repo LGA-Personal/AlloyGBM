@@ -10,7 +10,7 @@ Date: 2026-10-20. This is implementation evidence, not an official leaderboard r
 ## Completed checks
 
 - Native deadline change: full Rust workspace **909 passed / 3 ignored**, full bindings suite **1,254 passed / 64 subtests**, clippy all targets with warnings denied. All PR #172 GitHub CI checks passed.
-- Registered adapter (29 local integration tests): regression/binary/multiclass fit, NaNs/categories (including unseen and missing values), prediction shape/finite checks, save/load equivalence, CPU forwarding, rejection of hidden validation, native timeout translation, and fresh-interpreter registered-class serialization.
+- Registered adapter (30 local integration tests): regression/binary/multiclass fit, NaNs/categories (including unseen and missing values), prediction shape/finite checks, save/load equivalence, CPU forwarding, rejection of hidden validation, native timeout translation, and fresh-interpreter registered-class serialization. Complete worker stdout/stderr is retained per job, including an actual malformed-job traceback test.
 - Protocol: official enforced 8×1, three example tasks / 24 smoke jobs, 51 Lite tasks / 204 default jobs / 5,304 HPO jobs, immutable default identity and deterministic search-prefix stability.
 - Execution/report contracts: changed-identity rejection, torn-write recovery, exclusive driver ownership, failure/pending coverage, checksum/conformance verification, full-scope acceptance guard, and adversarial upstream selection test (changing test targets does not change validation-selected weights).
 - Actual upstream registered tests: `test_all_models.py` and `test_warmup_coverage.py`, `-m models -k AlloyGBM`: **2 passed / 102 deselected**. No AlloyGBM case skipped.
@@ -19,6 +19,9 @@ Date: 2026-10-20. This is implementation evidence, not an official leaderboard r
 
 - Real upstream/Ray execution: both AlloyGBM default and sampled configurations completed on official `blood-transfusion-service-center` task 363621, first outer split, with eight fitted children each. Run identity `c0055a5d5437fc4bd42103b0c6d5bede799fb2de8fe31cf9542d9d7178a1f69c`. Upstream Ray processing regenerated all three variants and standard local-pool reports. This is one-task worker evidence, not a full Ray benchmark.
 - The isolated TabArena GitHub CI job passed a clean pinned environment install, release build/attestation, integration contracts and registered upstream tests. The complete first integration PR CI matrix passed.
+
+- Current runner regression execution: public default and sampled AlloyGBM completed the official `QSAR_fish_toxicity` first split with eight children each (`18a702bd83340d48`). Current-code resume skipped both completed jobs with an unchanged ledger; per-job logs persisted. Standard cached report regeneration passed.
+- Published-context comparison passed on the matching binary task with upstream default RF calibration/fallback. Its 60 source-method metadata records and 110 downloaded result-artifact hashes are recorded in `report-published/sources.json`; timings are explicitly mixed hardware and budgets. This one-task comparison is a workflow check, not a competitive ranking claim.
 
 ## Measured issues and scope limits
 
