@@ -42,7 +42,9 @@ Local native/debug execution isolates each outer job to avoid a reproduced
 macOS cross-library warmup crash. Explicit upstream/Ray execution is available.
 Timings apply to recorded hardware/resources/execution. Local ranks are
 pool-relative, not official leaderboard placements; these commands do not upload
-results or certify submission acceptance.
+results or certify submission acceptance. Full Lite cutover acceptance requires
+``report --published-context`` with upstream calibration/fallback and evidence
+bound to the terminal run ledger.
 
 The `historical archive
 <https://github.com/LGA-Personal/AlloyGBM/tree/main/docs/archive/benchmarks/pre-tabarena-2026-10-20>`_
