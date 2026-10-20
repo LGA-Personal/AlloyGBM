@@ -254,7 +254,12 @@ def _write_report(run_dir, *, published_context=False):
         "protocol": "TabArena-v0.1 8x1",
         "execution": manifest["spec"]["execution"],
         "local_pool_calibration": context.calibration_method,
-        "public_defaults": "current constructor defaults with supplied validation",
+        "public_defaults": "current constructor parameters with framework-supplied validation and stopping metric",
+        "alloygbm_stopping_policy": {
+            "binary_and_regression": "metric callback uses absolute improvement and configured patience; public relative-improvement tolerance is not applied",
+            "multiclass": "native softmax log loss retains public relative-improvement stopping",
+            "interpretation": "default-arm training lengths can differ from a direct public estimator fit with eval_set",
+        },
         "source_commit": manifest["provenance"]["source_commit"],
         "upstream_revision": manifest["upstream"],
         "official_submission_verified": False,

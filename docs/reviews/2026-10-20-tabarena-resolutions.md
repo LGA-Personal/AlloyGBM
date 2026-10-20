@@ -61,6 +61,14 @@
    could make Ray scheduling less reliable. Upstream permits submission without
    it. Inspect RAM and parallel-fold behavior during the Linux pilot before HPO.
 
+8. **Documented, with reviewed training behavior retained:** the binary/regression
+   metric callback uses absolute improvement and configured patience, bypassing
+   the native relative-improvement plateau rule. Multiclass retains the native
+   rule. “Public defaults” therefore means constructor defaults with the
+   framework's validation/stopping overrides, not identical stopping to a direct
+   public estimator fit. The README and JSON/Markdown report summary disclose
+   this distinction. No native or wrapper training behavior changes for this note.
+
 Adding the RF default makes the complete Lite HPO plan **5,355 outer jobs /
 42,840 child fits**: 5,304 booster jobs plus 51 calibration jobs, all using the
 enforced 8x1 protocol. RF receives no sampled search configurations.

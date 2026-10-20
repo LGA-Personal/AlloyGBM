@@ -4,6 +4,8 @@ This integration uses pinned TabArena model contributions, official tasks/splits
 
 AlloyGBM's declared default is the current public constructor configuration, including automatic rounds and policy, with TabArena's supplied validation partition. The sampled configurations use the frozen author search space in `submission/alloygbm/hpo.py`. TabArena selects the tuned model from validation predictions and produces its usual tuned + ensemble result. Neither selection uses outer test scores. Internal training stopping follows AutoGluon’s resolved stopping metric. At this pin, ROC AUC evaluation defaults to log-loss stopping, just as for the peer wrappers; explicit AUC stopping is supported. Regression uses RMSE, and multiclass uses native softmax log loss. Candidate selection uses the official task metric. Do not optimize this search space against observed outer test scores.
 
+“Public defaults” refers to constructor parameters. TabArena supplies validation and the stopping metric: binary and regression callbacks use absolute improvement with the configured patience, and do **not** apply the public `1e-3` relative-improvement stopping tolerance. Multiclass uses native softmax log loss and retains that relative stopping rule. Consequently, the default arm can choose different training lengths from a direct public estimator fit with `eval_set`. Reports disclose this stopping-policy distinction; the library's public behavior is unchanged.
+
 For an on-demand dedicated Linux machine, use the [disposable droplet workflow](DROPLET.md): create, bootstrap, run with an explicit cap, copy and verify evidence, then destroy.
 
 ## Install and build
