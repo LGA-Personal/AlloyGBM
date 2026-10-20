@@ -6,7 +6,7 @@ Date: 2026-10-20. Scope: source/documentation audit of the replacement design, n
 
 The source audit confirmed the planned validation, Lite scope, tuning, ensembling and evaluation approach, but found two material omissions: recording budget overruns is insufficient, and a quickstart-compatible custom wrapper is not the complete submission integration. Both are now explicit implementation gates. The plan also requires current declarative AutoGluon configuration, canonical metadata, exact dependency/config-default identity and the actual registered upstream model tests.
 
-No AlloyGBM benchmark wrapper or native deadline support has been implemented. No upstream AlloyGBM model test, warmup audit or Lite run has passed yet. The current library lacks fit-time deadline control. Therefore **the current implementation is not yet verified submission-ready**. The updated plan specifies the work and evidence required.
+The initial audit found missing wrapper integration and native deadline control. Those features and the actual registered tests are now implemented; see the execution addendum. Full Lite acceptance and official submission review remain outstanding, so **the implementation is not yet certified submission-ready**.
 
 ## Sources inspected
 
@@ -32,7 +32,7 @@ Local AlloyGBM revision inspected: `d1d706dd06d333cda2798258938fb4830e143dd3`. R
 | Submission integration | Model folder `{__init__,model,hpo,info}.py`, lazy class export, dependency extra/extended entry and tree-family classification. Local runs use these exact canonical bytes in a pinned clone. No duplicate local wrapper or modifications to protocol/shared tests. |
 | Class conventions | `TA-ALLOYGBM`, `TA-AlloyGBM`, method `AlloyGBM`, key `ALLOYGBM`; `_supported_problem_types` and `_default_auxiliary_params_extra`. Lazy optional imports; no mutation of resolved params. |
 | Default identity | Validate processed `_c1`, `TA-AlloyGBM_c1_default_BAG_L1`, against actual output and the intended frozen configuration. Do not confuse raw class/config names with processed IDs. |
-| Time budget | **Blocking current gap.** Implement cooperative fit-time deadlines for regression/binary/multiclass; subtract preprocessing, leave 5% headroom, preserve complete rounds and reject expired/over-budget outcomes through upstream timeout handling. Logging alone does not comply. |
+| Time budget | Implemented in PR #172. Verify cooperative fit-time deadlines for regression/binary/multiclass; subtract preprocessing, leave 5% headroom, preserve complete rounds and reject expired/over-budget outcomes through upstream timeout handling. Logging alone does not comply. |
 | Resources/seed | Forward actual child CPU allocation and framework seed. No all-core override, hidden GPU budget, extra internal holdout or global monkeypatch. |
 | Warmup/parallelism | Upstream data-independent warmup must pass. Verify actual Ray worker import/pickling, fit and save/load prediction equivalence; native/debug-only success is insufficient. |
 | Dependencies/provenance | Exact installable source commit/version, matching `pip_extra`, measured extension/build and dependency identity. A locally committed but remotely unavailable revision is not yet a reproducible submission dependency. |
@@ -41,7 +41,7 @@ Local AlloyGBM revision inspected: `d1d706dd06d333cda2798258938fb4830e143dd3`. R
 
 ## Public defaults and search space
 
-The framework permits method-author default configurations, while its booster guidance recommends a high iteration cap with validation early stopping. The user chose current AlloyGBM public defaults for the fixed arm. Declaring those as `_c1` is a deliberate author choice, not proof that a fixed 100-round configuration is the recommended or best-performing booster setup. Disclose this in later maintainer review. Sampled configurations use the high-cap/stopping approach. Never silently tune the fixed arm or add another internal holdout.
+The framework permits method-author default configurations, while its booster guidance recommends a high iteration cap with validation early stopping. The user chose current AlloyGBM public defaults for the fixed arm. Declaring those as `_c1` is a deliberate author choice, not proof that the public automatic-round configuration is the recommended or best-performing booster setup. Disclose this in later maintainer review. Sampled configurations use the high-cap/stopping approach. Never silently tune the fixed arm or add another internal holdout.
 
 Search-space distributions are model-author choices; TabArena supplies no universal AlloyGBM space. Freeze them before test evaluation, support the full sampling budget, and share the exact space between local and prospective submission runs. Standard protocol execution does not independently establish that the space is optimal.
 

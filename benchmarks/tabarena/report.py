@@ -36,6 +36,46 @@ def write_coverage(run_dir):
     return output
 
 
+def write_selection_weights(method, run_dir):
+    """Replay upstream selection to expose weights omitted by its summary frames."""
+    import pandas as pd
+
+    repo = method.method_metadata.load_processed(download=False)
+    for variant in ("tuned", "tuned_ensemble"):
+        expected = method.hpo_results[method.hpo_results.method_subtype.eq(variant)]
+        matrices = []
+        for row in expected.itertuples():
+            settings = row.method_metadata
+            configs = repo.configs(
+                tasks=[(row.dataset, row.fold)], config_types=[settings["config_type"]]
+            )
+            errors, weights = repo.evaluate_ensembles(
+                datasets=[row.dataset],
+                folds=[row.fold],
+                configs=configs,
+                ensemble_size=settings["n_iterations"],
+                fit_order=settings["fit_order"],
+                seed=0,
+                time_limit=settings["time_limit"],
+                backend="native",
+            )
+            # Diagnostics must reproduce the standard scores; they never replace them.
+            for metric in ("metric_error", "metric_error_val"):
+                pd.testing.assert_series_equal(
+                    pd.Series([getattr(row, metric)]),
+                    errors[metric].reset_index(drop=True),
+                    check_names=False,
+                    check_dtype=False,
+                )
+            matrices.append(weights.reset_index())
+        if matrices:
+            pd.concat(matrices, ignore_index=True).to_csv(
+                run_dir
+                / (method.method_metadata.method + "-" + variant + "-weights.csv"),
+                index=False,
+            )
+
+
 def process_standard_results(run_dir):
     from benchmarks.tabarena.artifacts import completed_result_paths
     from benchmarks.tabarena.protocol import RunSpec, resolve_run
@@ -94,6 +134,7 @@ def process_standard_results(run_dir):
             run_dir / (method.method_metadata.method + "-configs.csv"), index=False
         )
         if method.hpo_results is not None:
+            write_selection_weights(method, run_dir)
             method.hpo_results.to_csv(
                 run_dir / (method.method_metadata.method + "-variants.csv"), index=False
             )
@@ -169,7 +210,13 @@ def _write_report(run_dir, *, published_context=False):
         ]
         (run_dir / "report-published" / "sources.json").write_text(
             json.dumps(
-                {"upstream_revision": manifest["upstream"], "methods": sources},
+                {
+                    "upstream_revision": manifest["upstream"],
+                    "methods": sources,
+                    "run_fingerprint": manifest["fingerprint"],
+                    "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
+                    "report_code_sha256": file_hash(Path(__file__)),
+                },
                 indent=2,
                 default=str,
                 allow_nan=False,

@@ -30,3 +30,29 @@ def test_all_jobs_and_failure_explanations_are_required():
     assert validate_scope_and_outcomes(
         manifest, jobs, rows, {key: "resource exhaustion; examined error"}
     ) == {key}
+
+
+def test_acceptance_requires_standard_context_bound_to_same_ledger():
+    from benchmarks.tabarena.acceptance import validate_report_evidence
+
+    manifest = {"fingerprint": "fit"}
+    summary = {
+        "published_context": True,
+        "run_fingerprint": "fit",
+        "ledger_sha256": "ledger",
+        "report_code_sha256": "processor",
+    }
+    sources = dict(summary)
+    validate_report_evidence(manifest, summary, sources, "ledger")
+    with pytest.raises(ValueError, match="standard calibration"):
+        validate_report_evidence(
+            manifest, {**summary, "published_context": False}, sources, "ledger"
+        )
+    with pytest.raises(ValueError, match="terminal ledger"):
+        validate_report_evidence(
+            manifest, summary, {**sources, "ledger_sha256": "stale"}, "ledger"
+        )
+    with pytest.raises(ValueError, match="processor"):
+        validate_report_evidence(
+            manifest, summary, {**sources, "report_code_sha256": "old"}, "ledger"
+        )

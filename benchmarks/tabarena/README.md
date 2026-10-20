@@ -64,9 +64,9 @@ Supply the same profile/scope/resources/execution on resume. Changed source, ext
 .venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/run/directory --published-context
 ```
 
-Reporting never fits models. The local artifact root is carried explicitly in method metadata so Ray workers and the driver write to the same cache. Reports record their processor code hash as well as the original run identity. Only ledger-completed, conformant caches enter upstream `EndToEnd` processing. Normal outputs include per-split results, leaderboard, method info, win-rate/Pareto plots, and default/tuned/tuned + ensemble variants; configuration and variant CSVs are exported beside `coverage.csv`. The one-candidate smoke is a workflow check, not competitive evidence. A zero-candidate profile has no actual tuning, even if upstream emits the variant names.
+Reporting never fits models. The local artifact root is carried explicitly in method metadata so Ray workers and the driver write to the same cache. Reports record their processor code hash as well as the original run identity. Only ledger-completed, conformant caches enter upstream `EndToEnd` processing. Normal outputs include per-split results, leaderboard, method info, win-rate/Pareto plots, and default/tuned/tuned + ensemble variants; configuration and variant CSVs are exported beside `coverage.csv`. Tuned and ensemble weight CSVs replay upstream selection from cached predictions using each variant's recorded settings; their scores must match the standard output. This diagnostic never replaces the upstream scores. The one-candidate smoke is a workflow check, not competitive evidence. A zero-candidate profile has no actual tuning, even if upstream emits the variant names.
 
-The primary four-method local pool has no RandomForest calibration/fallback entrant. Its context explicitly sets `calibration_method=None` and `fillna_method=None`; the upstream comparison engine otherwise owns metrics, ranks, normalization, aggregation and ties. Coverage and `summary.json` disclose partial scope and failures; inspect upstream `imputed` fields and common-task scope before interpreting ranks. An entrant with no successful fit still appears in coverage. Local-pool Elo is pool-relative, not an official leaderboard position.
+The matched four-method local diagnostic pool has no RandomForest calibration/fallback entrant. Its context explicitly sets `calibration_method=None` and `fillna_method=None`; the upstream comparison engine otherwise owns metrics, ranks, normalization, aggregation and ties. Coverage and `summary.json` disclose partial scope and failures; inspect upstream `imputed` fields and common-task scope before interpreting ranks. An entrant with no successful fit still appears in coverage. Local-pool Elo is pool-relative, not an official leaderboard position.
 
 The optional published context preserves upstream's default calibration/fallback behavior and records source-method metadata and downloaded result-artifact hashes in `report-published/sources.json`. Its timings mix source hardware, package versions and candidate budgets; use them as context, never as matched local speedups. No result is uploaded or marked verified by these commands. A future official contribution requires the self-contained model payload, registration, dependency pin, audit evidence, complete requested scope and maintainer review/reruns.
 
@@ -74,9 +74,10 @@ The optional published context preserves upstream's default calibration/fallback
 
 The old harness remains active until standard Lite acceptance: all expected jobs have recorded terminal outcomes, all variants process, failures have explanations, resume does not refit completed jobs, and cached report regeneration works. The retirement PR is separate and must not merge before that evidence exists. Preserve library correctness tests when retiring benchmark-only assertions. Full-suite completion must never be inferred from smoke success.
 
-After the full Lite run and report regeneration:
+After the full Lite run, regenerate the standard published-context comparison before acceptance (the local diagnostic pool alone cannot satisfy the gate):
 
 ```bash
+.venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/lite-hpo/run --published-context
 .venv-tabarena/bin/python -m benchmarks.tabarena.acceptance /absolute/lite-hpo/run
 # If there were failures, supply a JSON object mapping each failed ledger key to
 # an examined explanation. Adapter/protocol defects must be fixed and rerun.

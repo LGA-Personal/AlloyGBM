@@ -154,3 +154,5 @@ The canonical implementation and commands are in `benchmarks/tabarena/README.md`
 - Upstream's report worker-count default calls Linux-only `os.sched_getaffinity`; passing an explicit report worker count avoids that macOS error without patching shared code.
 - Upstream's global dependency-extra checker fails on unrelated entries in an untouched clone as well as the registered clone. AlloyGBM's extra/pin/extended/family registration is checked directly. This does not constitute a passing global checker.
 - Retirement is a separate PR, prepared for review but gated from merge until the actual full Lite acceptance audit passes. This preserves the original acceptance requirement while making all migration changes reviewable.
+
+Final acceptance ruling: require `report --published-context` and bind its source-artifact manifest to the terminal ledger and processor revision. This preserves unchanged upstream calibration/fallback in acceptance evidence; the no-RF local entrant pool is an explicitly labeled diagnostic, never a substitute for that standard comparison. Cached tuned/ensemble weights are exported by replaying upstream selection and checking score agreement.

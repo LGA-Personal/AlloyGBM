@@ -10,7 +10,7 @@ Date: 2026-10-20. This is implementation evidence, not an official leaderboard r
 ## Completed checks
 
 - Native deadline change: full Rust workspace **909 passed / 3 ignored**, full bindings suite **1,254 passed / 64 subtests**, clippy all targets with warnings denied. All PR #172 GitHub CI checks passed.
-- Registered adapter (30 local integration tests): regression/binary/multiclass fit, NaNs/categories (including unseen and missing values), prediction shape/finite checks, save/load equivalence, CPU forwarding, rejection of hidden validation, native timeout translation, and fresh-interpreter registered-class serialization. Complete worker stdout/stderr is retained per job, including an actual malformed-job traceback test.
+- Registered adapter (31 local integration tests): regression/binary/multiclass fit, NaNs/categories (including unseen and missing values), prediction shape/finite checks, save/load equivalence, CPU forwarding, rejection of hidden validation, native timeout translation, and fresh-interpreter registered-class serialization. Complete worker stdout/stderr is retained per job, including an actual malformed-job traceback test.
 - Protocol: official enforced 8×1, three example tasks / 24 smoke jobs, 51 Lite tasks / 204 default jobs / 5,304 HPO jobs, immutable default identity and deterministic search-prefix stability.
 - Execution/report contracts: changed-identity rejection, torn-write recovery, exclusive driver ownership, failure/pending coverage, checksum/conformance verification, full-scope acceptance guard, and adversarial upstream selection test (changing test targets does not change validation-selected weights).
 - Actual upstream registered tests: `test_all_models.py` and `test_warmup_coverage.py`, `-m models -k AlloyGBM`: **2 passed / 102 deselected**. No AlloyGBM case skipped.
@@ -34,6 +34,10 @@ On macOS, upstream warns that a one-CPU allocation has a ten-CPU affinity mask. 
 The four-method local pool explicitly disables absent RF calibration/fallback. Its ranking engine remains upstream; published context preserves upstream defaults and is labeled mixed hardware/budgets. The fixed AlloyGBM default preserves public automatic rounds and stopping metric behavior; HPO configuration selection uses official task validation predictions. Neither arm adds an internal holdout.
 
 Ray result-processing workers do not inherit the driver's process-local TabArena cache setting. Passing the local cache root explicitly in serialized method metadata fixes a reproduced missing `model_predictions` failure without modifying upstream. Reports record their own code hash, allowing cached predictions from a recorded fit revision to be reprocessed transparently after a report-only fix. Resume still requires the recorded implementation identity.
+
+Cached selection diagnostics also export the tuned single-config and ensemble weights. They replay upstream selection per task using recorded variant settings and assert that validation/test scores match the standard processor output. Adversarial tests confirm test-target changes do not alter selected weights.
+
+The retirement gate requires the published-context report with unchanged upstream calibration/fallback, bound to the same terminal ledger and report-code revision. The four-method local diagnostic pool alone cannot satisfy acceptance.
 
 ## Acceptance status
 

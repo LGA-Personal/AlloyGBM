@@ -20,7 +20,7 @@ def test_coverage_never_turns_failure_into_measurement(tmp_path):
     assert len(rows[rows.status == "completed"]) == 1
 
 
-def test_upstream_selection_is_independent_of_test_scores():
+def test_upstream_selection_is_independent_of_test_scores(tmp_path):
     import numpy as np
     from tabarena.benchmark.result import BaselineResult
     from tabarena.repository.generate_repo import generate_repo_from_results_lst
@@ -84,6 +84,22 @@ def test_upstream_selection_is_independent_of_test_scores():
         )
         variants = RepoSimulator(repo, backend="native").run_minimal_single("DUMMY")
         assert set(variants.method_subtype) == {"default", "tuned", "tuned_ensemble"}
+        from types import SimpleNamespace
+
+        from benchmarks.tabarena.report import write_selection_weights
+
+        method = SimpleNamespace(
+            hpo_results=variants,
+            method_metadata=SimpleNamespace(
+                method="Dummy", load_processed=lambda **kwargs: repo
+            ),
+        )
+        write_selection_weights(method, tmp_path)
+        exported = pd.read_csv(tmp_path / "Dummy-tuned-weights.csv")
+        pd.testing.assert_frame_equal(
+            exported, weights.reset_index(), check_dtype=False
+        )
+        assert (tmp_path / "Dummy-tuned_ensemble-weights.csv").exists()
         return weights
 
     a = evaluate(np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float32))

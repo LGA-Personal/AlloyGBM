@@ -39,6 +39,23 @@ def validate_scope_and_outcomes(manifest, jobs, latest, explanations):
     return failures
 
 
+def validate_report_evidence(manifest, summary, sources, ledger_hash):
+    if not summary.get("published_context"):
+        raise ValueError(
+            "acceptance requires --published-context with standard calibration/fallback"
+        )
+    for record in (summary, sources):
+        if (
+            record.get("run_fingerprint") != manifest["fingerprint"]
+            or record.get("ledger_sha256") != ledger_hash
+        ):
+            raise ValueError("regenerate both reports from the current terminal ledger")
+    if sources.get("report_code_sha256") != summary.get("report_code_sha256"):
+        raise ValueError(
+            "local and published reports used different processor revisions"
+        )
+
+
 def audit_acceptance(run_dir, explanations_path=None):
     import pandas as pd
 
@@ -63,12 +80,10 @@ def audit_acceptance(run_dir, explanations_path=None):
         paths = completed_result_paths(run_dir, resolved)
         report = run_dir / "report-local"
         summary = json.loads((report / "summary.json").read_text())
-        if summary.get("run_fingerprint") != manifest["fingerprint"] or summary.get(
-            "ledger_sha256"
-        ) != file_hash(run_dir / "jobs.jsonl"):
-            raise ValueError(
-                "regenerate reports from the current terminal ledger before acceptance"
-            )
+        sources = json.loads((run_dir / "report-published/sources.json").read_text())
+        validate_report_evidence(
+            manifest, summary, sources, file_hash(run_dir / "jobs.jsonl")
+        )
         for method in manifest["spec"]["models"]:
             variants = pd.read_csv(run_dir / (method + "-variants.csv"))
             if set(variants.method_subtype) != {"default", "tuned", "tuned_ensemble"}:
@@ -81,6 +96,12 @@ def audit_acceptance(run_dir, explanations_path=None):
             "failure_explanations": explanations,
             "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
             "leaderboard_sha256": file_hash(report / "leaderboard.csv"),
+            "published_leaderboard_sha256": file_hash(
+                run_dir / "report-published/tabarena_leaderboard.csv"
+            ),
+            "published_sources_sha256": file_hash(
+                run_dir / "report-published/sources.json"
+            ),
             "official_submission_verified": False,
             "note": "Mechanical evidence audit; explanations and benchmark claims still need author review.",
         }
