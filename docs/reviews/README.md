@@ -38,6 +38,7 @@ link it both ways.
 
 | Review | Version | Reviewer | Status |
 |---|---|---|---|
+| [TabArena PR follow-up](2026-10-20-tabarena-resolutions.md) — deadlines, resource policy, RF calibration and disposable benchmark hosts | v1.0.0 development | Claude Code / Codex reviews | Code fixes verified; Linux pilot and full Lite pending |
 | [Competitiveness review](2026-09-06-v1.0.0-competitiveness.md) — quantile-budget accuracy diagnosis, three-seed peer comparison, ranked CPU experiments | v1.0.0 | Codex | Open; diagnostic evidence collected |
 | [Core review](2026-07-02-v0.12.10-core.md) — whole-workspace design/efficiency/accuracy | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-core-resolutions.md) |
 | [Special-modes review](2026-07-02-v0.12.10-special-modes.md) — MorphBoost, DRO, PL trees, neutralization, objectives, DART/GOSS (incl. 2 correctness bugs) | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-special-modes-resolutions.md) |

@@ -1,0 +1,52 @@
+diff --git a/packages/tabarena/pyproject.toml b/packages/tabarena/pyproject.toml
+index cffa309..d7b87ca 100644
+--- a/packages/tabarena/pyproject.toml
++++ b/packages/tabarena/pyproject.toml
+@@ -69,6 +69,7 @@ dependencies = [
+ ]
+ 
+ [project.optional-dependencies]
++alloygbm = ["alloygbm @ git+https://github.com/LGA-Personal/AlloyGBM.git@a8e2da28fa9428b764d7ed0d598a55590ed1ed08"]
+ 
+ # Requirements with a direct URL (`name @ git+https://...`) install from a git checkout but cannot
+ # be published to PyPI. `scripts/release/build_pypi_dists.py` strips them from the PyPI build, which
+@@ -208,6 +209,7 @@ benchmark = [
+ # Extended set: extra models layered on top of `benchmark` when needed.
+ # Note: `probmetrics` is intentionally excluded — install it explicitly via `tabarena[probmetrics]` or `tabarena[all]`.
+ extended = [
++  "tabarena[alloygbm]",
+   "tabarena[causilo]",
+   "tabarena[modernnca]",
+   "tabarena[xrfm]",
+diff --git a/packages/tabarena/src/tabarena/models/__init__.py b/packages/tabarena/src/tabarena/models/__init__.py
+index 7e6e1d8..fe5a76a 100644
+--- a/packages/tabarena/src/tabarena/models/__init__.py
++++ b/packages/tabarena/src/tabarena/models/__init__.py
+@@ -10,6 +10,7 @@ from tabarena.models._registry import (
+ )
+ 
+ if TYPE_CHECKING:
++    from tabarena.models.alloygbm.model import AlloyGBMModel
+     from tabarena.models._method_metadata import MethodMetadata
+     from tabarena.models.aplr.model import APLRModel
+     from tabarena.models.causilo.model import CausiloModel
+@@ -53,6 +54,7 @@ if TYPE_CHECKING:
+ # pull in heavy ML libraries, and `_method_metadata.py` carries S3 / paper /
+ # repository transitive imports we don't want to charge every consumer for.
+ _LAZY_CLASSES: dict[str, str] = {
++    "AlloyGBMModel": "tabarena.models.alloygbm.model",
+     "MethodMetadata": "tabarena.models._method_metadata",
+     "APLRModel": "tabarena.models.aplr.model",
+     "CausiloModel": "tabarena.models.causilo.model",
+diff --git a/packages/tabarena/src/tabarena/website/website_format.py b/packages/tabarena/src/tabarena/website/website_format.py
+index 437a1dc..6b2a4b9 100644
+--- a/packages/tabarena/src/tabarena/website/website_format.py
++++ b/packages/tabarena/src/tabarena/website/website_format.py
+@@ -127,6 +127,7 @@ def get_model_family(model_name: str, system_names: Container[str] = frozenset()
+             "TORCHMLP",
+         ],
+         Constants.tree: [
++            "ALLOYGBM",
+             "GBM",
+             "LIGHTGBM",
+             "CAT",

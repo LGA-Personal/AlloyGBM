@@ -1,0 +1,7 @@
+tabarena[benchmark,plot] @ git+https://github.com/autogluon/tabarena.git@041f9b3774d1191ffcdcf137cbe4e1e08159b972#subdirectory=packages/tabarena
+bencheval[plot] @ git+https://github.com/autogluon/tabarena.git@041f9b3774d1191ffcdcf137cbe4e1e08159b972#subdirectory=packages/bencheval
+alloygbm @ git+https://github.com/LGA-Personal/AlloyGBM.git@a8e2da28fa9428b764d7ed0d598a55590ed1ed08
+autogluon.tabular[lightgbm,xgboost,catboost]>=1.6.3b20260917,!=1.6.3,<1.7
+maturin>=1.7,<2
+pytest
+ruff

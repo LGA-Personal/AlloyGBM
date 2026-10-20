@@ -62,3 +62,8 @@ AGENTS.md
 
 # Debug symbol bundles (macOS) emitted next to the built extension
 *.dSYM/
+
+# Standard TabArena workspace and generated outputs
+.venv-tabarena/
+.cache/tabarena/
+benchmarks/results/tabarena/
