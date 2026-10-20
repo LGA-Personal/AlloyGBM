@@ -76,3 +76,34 @@ def test_budget_stop_keeps_a_complete_serializable_model(classes, strategy, tmp_
     model.save_model(str(path))
     restored = cls.load_model(str(path))
     np.testing.assert_array_equal(model.predict(x), restored.predict(x))
+
+
+@pytest.mark.parametrize("classes,strategy", [(0, "auto"), (2, "auto"), (3, "per_class_trees"), (3, "vector_leaves")])
+def test_deadline_without_early_stopping_retains_completed_rounds(classes, strategy):
+    x, y = data(classes)
+    # Validation rewards the initial constant prediction and penalizes training.
+    valid_y = -y if not classes else (y + 1) % classes
+    model = (GBMClassifier if classes else GBMRegressor)(
+        n_estimators=100000, n_jobs=1, training_policy="manual",
+        max_depth=3, learning_rate=0.001, early_stopping_rounds=None,
+        multiclass_strategy=strategy,
+    ).fit(x, y, eval_set=(x, valid_y), time_limit=0.1)
+    assert model.stop_reason_ == "TimeBudgetReached"
+    assert model.n_estimators_ > 0
+
+
+def test_refit_preprocessing_timeout_clears_old_classifier(monkeypatch):
+    import alloygbm.classifier as module
+
+    x, binary = data(2)
+    model = GBMClassifier(n_estimators=3, n_jobs=1).fit(x, binary)
+
+    def expired(*args):
+        raise TimeoutError("time limit expired during label preprocessing")
+
+    monkeypatch.setattr(module, "remaining_seconds", expired)
+    with pytest.raises(TimeoutError):
+        model.fit(x, np.arange(len(x)) % 3, time_limit=1)
+    assert not model._is_fitted
+    with pytest.raises((ValueError, RuntimeError), match="fitted"):
+        model.predict(x)

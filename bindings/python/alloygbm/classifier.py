@@ -197,6 +197,14 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             )
             eval_set = (_eval_X, eval_float_targets)
 
+        # Label preprocessing has already changed prediction routing. An expired
+        # budget here must invalidate a prior model, just as the base fit does.
+        try:
+            remaining = remaining_seconds(time_limit, fit_started)
+        except TimeoutError:
+            self._reset_fitted_state()
+            raise
+
         # Delegate to GBMRegressor.fit which calls self._objective_name()
         super().fit(
             X,
@@ -213,7 +221,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             init_model=init_model,
             eval_metric=eval_metric,
             factor_exposures=factor_exposures,
-            time_limit=remaining_seconds(time_limit, fit_started),
+            time_limit=remaining,
         )
         self.classes_ = np.asarray(sorted_classes)
         self.n_classes_ = n_classes

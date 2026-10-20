@@ -2258,10 +2258,10 @@ impl Trainer {
         }
 
         // Truncate to best validation round if early stopping triggered
-        if matches!(
-            stop_reason,
-            IterationStopReason::ValidationLossPlateau | IterationStopReason::TimeBudgetReached
-        ) && let Some(best_round) = best_validation_round
+        if (stop_reason == IterationStopReason::ValidationLossPlateau
+            || (stop_reason == IterationStopReason::TimeBudgetReached
+                && controls.early_stopping_rounds.is_some()))
+            && let Some(best_round) = best_validation_round
             && best_round < rounds_completed
         {
             // Compute how many stumps to keep per class (inherited + best new rounds)
@@ -3614,13 +3614,14 @@ impl Trainer {
         // Determine the best round for truncation: custom metric takes priority
         let truncation_round = if stop_reason == IterationStopReason::CustomMetricPlateau
             || (stop_reason == IterationStopReason::TimeBudgetReached
+                && controls.early_stopping_rounds.is_some()
                 && custom_metric_callback.is_some())
         {
             best_custom_metric_round
-        } else if matches!(
-            stop_reason,
-            IterationStopReason::ValidationLossPlateau | IterationStopReason::TimeBudgetReached
-        ) {
+        } else if stop_reason == IterationStopReason::ValidationLossPlateau
+            || (stop_reason == IterationStopReason::TimeBudgetReached
+                && controls.early_stopping_rounds.is_some())
+        {
             best_validation_round
         } else {
             None
