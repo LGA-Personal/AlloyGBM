@@ -106,9 +106,15 @@ class AlloyGBMModel(AbstractModel):
         eval_set = None
         if X_val is not None and y_val is not None:
             eval_set = (self.preprocess(X_val), y_val)
-        metric = stopping_callback(self.problem_type, self.stopping_metric)
+        needs_stopping = automatic or bool(params.get("early_stopping_rounds"))
+        metric = (
+            stopping_callback(self.problem_type, self.stopping_metric)
+            if eval_set is not None and needs_stopping
+            else None
+        )
         if (
-            self.stopping_metric.name == "roc_auc"
+            metric is not None
+            and self.stopping_metric.name == "roc_auc"
             and y_val is not None
             and np.unique(y_val).size < 2
         ):
