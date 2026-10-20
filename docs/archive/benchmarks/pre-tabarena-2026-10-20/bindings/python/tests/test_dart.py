@@ -1,0 +1,402 @@
+"""DART boosting-mode integration tests (v0.9.0).
+
+Covers regressor / binary classifier / ranker smoke, param validation,
+multiclass rejection, warm-start rejection, pickle round-trip, and a
+sanity check that DART produces different predictions from Standard
+(catches a regression where tree_weight is dropped at artifact I/O).
+"""
+
+from __future__ import annotations
+
+import pickle
+from pathlib import Path
+import importlib.util
+import sys
+
+import numpy as np
+import pytest
+from sklearn.base import clone
+
+from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+
+
+def _calibrated_selected_cap() -> int:
+    repo_root = Path(__file__).resolve().parents[3]
+    module_path = repo_root / "benchmarks" / "dart_policy_calibration.py"
+    spec = importlib.util.spec_from_file_location("pr137_dart_policy_calibration", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    fixture_specs, records = module.read_matrix(
+        repo_root / "benchmarks" / "results" / "pr137_dart_policy_matrix.json"
+    )
+    return module.evaluate_candidate_caps(records, specs=fixture_specs).selected_cap
+
+
+@pytest.mark.parametrize("estimator_type", [GBMRegressor, GBMClassifier, GBMRanker])
+def test_dart_default_surfaces_match_generated_selected_cap(estimator_type):
+    selected_cap = _calibrated_selected_cap()
+    model = estimator_type(boosting_mode="dart")
+
+    assert model.dart_max_drop == selected_cap
+    assert model.get_params()["dart_max_drop"] == selected_cap
+    assert f"dart_max_drop={selected_cap}" in repr(model)
+
+    cloned = clone(model)
+    assert cloned.dart_max_drop == selected_cap
+    assert cloned.get_params()["dart_max_drop"] == selected_cap
+
+    restored = pickle.loads(pickle.dumps(model))
+    assert restored.dart_max_drop == selected_cap
+    assert restored.get_params()["dart_max_drop"] == selected_cap
+
+    explicit_incumbent = estimator_type(boosting_mode="dart", dart_max_drop=50)
+    assert explicit_incumbent.dart_max_drop == 50
+    assert explicit_incumbent.get_params()["dart_max_drop"] == 50
+
+
+@pytest.mark.parametrize("task", ["regression", "multiclass", "ranking"])
+def test_explicit_50_artifact_and_prediction_are_repeatable(task):
+    rng = np.random.default_rng(1370)
+    X = rng.normal(size=(120, 4)).astype(np.float32)
+    if task == "regression":
+        y = (X[:, 0] - 0.5 * X[:, 1]).astype(np.float32)
+        fit_kwargs = {}
+    elif task == "multiclass":
+        y = np.arange(len(X), dtype=np.int64) % 3
+        fit_kwargs = {}
+    else:
+        y = (X[:, 0] + X[:, 1]).astype(np.float32)
+        fit_kwargs = {"group": np.repeat(np.arange(12), 10)}
+
+    common = dict(
+        n_estimators=8,
+        max_depth=3,
+        learning_rate=0.06,
+        training_policy="manual",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        dart_max_drop=50,
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=137,
+    )
+    if task == "regression":
+        estimator_type = GBMRegressor
+    elif task == "multiclass":
+        estimator_type = GBMClassifier
+    else:
+        estimator_type = GBMRanker
+
+    first = estimator_type(**common).fit(X, y, **fit_kwargs)
+    second = estimator_type(**common).fit(X, y, **fit_kwargs)
+    assert bytes(first.artifact_bytes) == bytes(second.artifact_bytes)
+    np.testing.assert_array_equal(first.predict(X), second.predict(X))
+
+
+@pytest.mark.parametrize("tree_growth", ["level", "leaf"])
+def test_selected_default_equals_explicit_selected_artifact(tree_growth):
+    rng = np.random.default_rng(1371)
+    X = rng.normal(size=(160, 5)).astype(np.float32)
+    y = (X[:, 0] - 0.7 * X[:, 1] + 0.15 * X[:, 2] ** 2).astype(np.float32)
+    common = dict(
+        n_estimators=12,
+        max_depth=3,
+        max_leaves=8 if tree_growth == "leaf" else None,
+        learning_rate=0.06,
+        training_policy="manual",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        tree_growth=tree_growth,
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=1371,
+    )
+    default = GBMRegressor(**common).fit(X, y)
+    explicit = GBMRegressor(
+        **common,
+        dart_max_drop=_calibrated_selected_cap(),
+    ).fit(X, y)
+    assert bytes(default.artifact_bytes) == bytes(explicit.artifact_bytes)
+    np.testing.assert_array_equal(default.predict(X), explicit.predict(X))
+
+
+def test_selected_explicit_cap_is_deterministic_across_n_jobs():
+    rng = np.random.default_rng(1372)
+    X = rng.normal(size=(192, 6)).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] * X[:, 2] - X[:, 3]).astype(np.float32)
+    common = dict(
+        n_estimators=12,
+        max_depth=3,
+        learning_rate=0.06,
+        training_policy="manual",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        dart_max_drop=_calibrated_selected_cap(),
+        continuous_binning_strategy="quantile",
+        deterministic=True,
+        seed=1372,
+    )
+    serial = GBMRegressor(**common, n_jobs=1).fit(X, y)
+    parallel = GBMRegressor(**common, n_jobs=2).fit(X, y)
+    assert bytes(serial.artifact_bytes) == bytes(parallel.artifact_bytes)
+    np.testing.assert_array_equal(serial.predict(X), parallel.predict(X))
+
+
+# ----- Smoke tests -----
+
+
+def test_dart_regressor_fits_and_predicts():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, 4)).astype(np.float32)
+    y = (
+        X @ np.array([1.0, -0.5, 0.25, 0.0], dtype=np.float32)
+        + 0.1 * rng.normal(size=200).astype(np.float32)
+    )
+    m = GBMRegressor(
+        n_estimators=50,
+        boosting_mode="dart",
+        dart_drop_rate=0.1,
+        dart_max_drop=5,
+        seed=42,
+    )
+    m.fit(X, y)
+    preds = np.asarray(m.predict(X))
+    assert preds.shape == (200,)
+    assert np.isfinite(preds).all()
+
+
+def test_dart_regressor_does_not_stop_at_first_dropout_round():
+    rng = np.random.default_rng(20260702)
+    X = rng.normal(size=(1_000, 6)).astype(np.float32)
+    y = (
+        1.5 * X[:, 0]
+        - 0.8 * X[:, 1]
+        + 0.25 * np.sin(2.0 * X[:, 2])
+        + 0.05 * rng.normal(size=X.shape[0])
+    ).astype(np.float32)
+
+    model = GBMRegressor(
+        n_estimators=80,
+        max_depth=4,
+        learning_rate=0.08,
+        boosting_mode="dart",
+        dart_drop_rate=0.5,
+        dart_max_drop=10,
+        continuous_binning_strategy="quantile",
+        training_policy="manual",
+        seed=17,
+    ).fit(X, y)
+
+    assert model.n_estimators_ > 10
+    assert model.stop_reason_ == "CompletedRequestedRounds"
+
+
+def test_dart_classifier_binary_predict_proba_in_range():
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(200, 4)).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] > 0).astype(int)
+    m = GBMClassifier(
+        n_estimators=50,
+        boosting_mode="dart",
+        dart_drop_rate=0.1,
+        seed=42,
+    )
+    m.fit(X, y)
+    proba = m.predict_proba(X)
+    assert proba.shape == (200, 2)
+    assert ((proba >= 0.0) & (proba <= 1.0)).all()
+
+
+def test_dart_ranker_fits_with_groups():
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(100, 3)).astype(np.float32)
+    y = (X[:, 0] > 0).astype(int)
+    groups = [10] * 10
+    m = GBMRanker(
+        n_estimators=30,
+        boosting_mode="dart",
+        dart_drop_rate=0.1,
+        ranking_objective="rank:pairwise",
+        seed=42,
+    )
+    m.fit(X, y, group=groups)
+    preds = np.asarray(m.predict(X))
+    assert preds.shape == (100,)
+    assert np.isfinite(preds).all()
+
+
+# ----- Param-validation tests -----
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"dart_drop_rate": -0.1}, "dart_drop_rate"),
+        ({"dart_drop_rate": 1.5}, "dart_drop_rate"),
+        ({"dart_max_drop": 0}, "dart_max_drop"),
+        ({"dart_normalize_type": "bad"}, "dart_normalize_type"),
+        ({"dart_sample_type": "bad"}, "dart_sample_type"),
+    ],
+)
+def test_dart_invalid_params_rejected(kwargs, match):
+    X = np.asarray([[0.0], [1.0]], dtype=np.float32)
+    y = np.asarray([0.0, 1.0], dtype=np.float32)
+    with pytest.raises(ValueError, match=match):
+        GBMRegressor(boosting_mode="dart", **kwargs).fit(X, y)
+
+
+# ----- Multiclass rejection -----
+
+
+def test_multiclass_dart_now_supported():
+    """v0.10.1 enabled multiclass DART. The v0.9.0 rejection test was
+    inverted in v0.10.1; the new positive coverage lives in
+    `test_multiclass_dart.py`."""
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(60, 3)).astype(np.float32)
+    y = rng.integers(0, 3, size=60).tolist()  # 3 classes -> softmax path
+    m = GBMClassifier(
+        n_estimators=4,
+        boosting_mode="dart",
+        dart_drop_rate=0.1,
+    )
+    m.fit(X, y)  # Should NOT raise.
+    assert m.predict_proba(X).shape == (60, 3)
+
+
+def test_multiclass_dart_leaf_wise_now_supported():
+    """v0.10.2 lifted the v0.10.1 `tree_growth='level'` restriction on
+    multiclass DART. Positive coverage lives in `test_multiclass_dart.py`;
+    this just confirms the public Python surface no longer raises.
+    """
+    rng = np.random.default_rng(33)
+    X = rng.normal(size=(80, 3)).astype(np.float32)
+    y = rng.integers(0, 3, size=80).tolist()  # 3 classes -> softmax path
+    m = GBMClassifier(
+        n_estimators=4,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=6,
+        dart_drop_rate=0.1,
+    )
+    m.fit(X, y)  # Should NOT raise.
+    assert m.predict_proba(X).shape == (80, 3)
+
+
+def test_multiclass_goss_now_supported():
+    """v0.10.1 enabled multiclass softmax + GOSS using per-row scoring
+    `s_i = sum_k |g_{i,k}|` (LightGBM convention). The v0.9.0 rejection
+    test was inverted in v0.10.1."""
+    rng = np.random.default_rng(31)
+    X = rng.normal(size=(60, 3)).astype(np.float32)
+    y = rng.integers(0, 3, size=60).tolist()  # 3 classes -> softmax path
+    m = GBMClassifier(
+        n_estimators=4,
+        boosting_mode="goss",
+        goss_top_rate=0.2,
+        goss_other_rate=0.1,
+    )
+    m.fit(X, y)  # Should NOT raise.
+    assert m.predict_proba(X).shape == (60, 3)
+
+
+# ----- Warm-start support (v0.10.0+) -----
+
+
+def test_dart_warm_start_continues_at_second_fit():
+    """v0.9.0 rejected this combination; v0.10.0 enables it."""
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(100, 3)).astype(np.float32)
+    y = rng.normal(size=100).astype(np.float32)
+    m = GBMRegressor(
+        n_estimators=10,
+        boosting_mode="dart",
+        dart_drop_rate=0.1,
+        warm_start=True,
+        seed=42,
+    )
+    m.fit(X, y)
+    # Second fit triggers the warm-start path. v0.10.0 accepts this
+    # combination — the engine seeds dart_state.tree_weights from the
+    # prior fit's per-stump weights and continues new rounds forward.
+    m.fit(X, y)
+    # Predictions should still be producible.
+    preds = m.predict(X)
+    assert len(preds) == X.shape[0]
+
+
+# ----- Persistence -----
+
+
+def test_dart_artifact_round_trips_through_pickle():
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(150, 4)).astype(np.float32)
+    y = rng.normal(size=150).astype(np.float32)
+    m = GBMRegressor(
+        n_estimators=30,
+        boosting_mode="dart",
+        dart_drop_rate=0.1,
+        dart_max_drop=5,
+        seed=42,
+    )
+    m.fit(X, y)
+    pred_before = np.asarray(m.predict(X))
+
+    blob = pickle.dumps(m)
+    m2 = pickle.loads(blob)
+    pred_after = np.asarray(m2.predict(X))
+
+    np.testing.assert_allclose(pred_before, pred_after, rtol=1e-5, atol=1e-6)
+
+
+# ----- Numerical sanity: DART != Standard -----
+
+
+def test_dart_produces_different_model_than_standard():
+    """If tree_weight is silently dropped at artifact I/O, predictions
+    from a DART-trained model would collapse to the corresponding
+    Standard model. This test guards against that regression."""
+    rng = np.random.default_rng(6)
+    X = rng.normal(size=(300, 5)).astype(np.float32)
+    y = X @ rng.normal(size=5).astype(np.float32) + 0.1 * rng.normal(size=300).astype(
+        np.float32
+    )
+
+    m_std = GBMRegressor(n_estimators=50, boosting_mode="standard", seed=42)
+    m_std.fit(X, y)
+    m_dart = GBMRegressor(
+        n_estimators=50,
+        boosting_mode="dart",
+        dart_drop_rate=0.15,
+        dart_max_drop=5,
+        seed=42,
+    )
+    m_dart.fit(X, y)
+
+    diff = np.abs(np.asarray(m_std.predict(X)) - np.asarray(m_dart.predict(X))).max()
+    assert diff > 1e-3, (
+        "DART and Standard should produce different predictions; "
+        f"max diff was {diff} (suggests tree_weight wasn't applied)"
+    )
+
+
+def test_dart_forest_normalize_works():
+    """Forest-normalize is the alternative to tree-normalize. Make sure
+    it doesn't crash and produces finite predictions."""
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(150, 3)).astype(np.float32)
+    y = rng.normal(size=150).astype(np.float32)
+    m = GBMRegressor(
+        n_estimators=30,
+        boosting_mode="dart",
+        dart_drop_rate=0.15,
+        dart_max_drop=5,
+        dart_normalize_type="forest",
+        seed=42,
+    )
+    m.fit(X, y)
+    preds = np.asarray(m.predict(X))
+    assert np.isfinite(preds).all()

@@ -1,234 +1,52 @@
 Benchmarks
 ==========
 
-This page summarizes how AlloyGBM is benchmarked and what the current public
-results say.
+AlloyGBM uses standard TabArena for local CPU regression, binary and multiclass
+benchmarking. The integration pins upstream source and dependencies, uses official
+task splits with enforced **8 folds × 1 set**, and delegates preprocessing,
+selection, ensembling, scoring and comparison to TabArena.
 
-Methodology
------------
+The declared default retains current public configuration, including automatic
+rounds, with supplied fold validation. A frozen author search space supplies
+sampled candidates; TabArena selects the tuned single model and tuned + ensemble
+from validation predictions. Outer test scores never drive selection. LightGBM,
+XGBoost and CatBoost retain their upstream wrappers and search spaces.
 
-The benchmark runner lives in ``benchmarks/run_model_comparison.py`` and
-compares AlloyGBM against:
+See the `complete installation and workflow guide
+<https://github.com/LGA-Personal/AlloyGBM/blob/main/benchmarks/tabarena/README.md>`_
+for the isolated Python 3.12 environment, release build and provenance receipt.
+Run from the repository root after setup:
 
-- XGBoost
-- LightGBM
-- CatBoost
+.. code-block:: bash
 
-It also includes additional AlloyGBM variants as separate arms by default
-per task type:
+   .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile smoke --threads 1
+   .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile lite-defaults --threads 1
+   .venv-tabarena/bin/python -m benchmarks.tabarena.run --profile lite-hpo --threads 1
+   .venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/run/directory
 
-- ``alloygbm_morph`` -- ``training_mode="morph"`` with constant LR
-- ``alloygbm_morph_cosine`` -- ``training_mode="morph"`` with
-  ``lr_schedule="warmup_cosine"``
-- ``alloygbm_linear`` -- ``leaf_model="linear"`` (piecewise-linear leaves)
-  with auto training mode
-- ``alloygbm_morph_linear`` -- ``leaf_model="linear"`` combined with
-  ``training_mode="morph"``
+Smoke uses the official example's three tasks and one sampled candidate. Lite
+defaults uses all 51 datasets with the default only; Lite HPO adds 25 sampled
+candidates per method (5,304 jobs / 42,432 child fits). Full scope uses the full
+official outer collection and upstream candidate budget. Every profile retains
+8×1 bagging. Smoke and filtered subsets do not establish competitiveness.
 
-Use the runner's ``--models`` flag to filter which arms run. Focused
-harnesses are also provided:
+Runs retain immutable build/dependency/resource identity, exact tasks/configs,
+raw upstream caches and a durable failure ledger. Resume requires identical
+identity; cached reports regenerate without fitting. Read failure/pending
+coverage, common-task scope and upstream imputation fields alongside ranks.
+The local four-method pool explicitly disables absent RF calibration/fallback;
+optional published context uses upstream defaults and labels mixed hardware and
+candidate budgets.
 
-- ``benchmarks/morph_report.py`` -- quick MorphBoost-vs-peers comparison
-- ``docs/benchmarks/morphboost_pr132.md`` -- exhaustive SIMD scanner,
-  quality-matrix, calibration, and secondary-cost evidence for PR #132
-- ``docs/benchmarks/dro_simd_pr135.md`` -- exhaustive scalar numeric DRO
-  scanner, fallback scope, seven-run scanner timings, nine-case fit matrix,
-  quality-equivalence checks, and rejected optimization trials for PR #135
-- ``benchmarks/numerai_benchmark.py`` -- Numerai tournament benchmark with
-  walk-forward CV, residualized targets, and Numerai-specific scoring
-- ``benchmarks/pl_trees_benchmark.py`` -- piecewise-linear-leaf
-  convergence-curve and λ-sweep analysis. Report at
-  ``docs/benchmarks/pl_trees_v1.md``.
-- ``benchmarks/pl_topk_performance.py`` -- isolated five-seed compatibility,
-  quality, RSS, and runtime matrix for experimental PL split shortlisting.
-  Report at ``docs/benchmarks/pl_topk_pr136.md``.
-- ``benchmarks/objective_benchmark.py`` -- deterministic large-query
-  LambdaMART and skewed-count GLM validation. Report at
-  ``docs/benchmarks/objective_benchmark_v1.md``.
-- ``benchmarks/review_guardrails.py`` -- deterministic July-review evidence
-  for smoothed-pinball split selection, GOSS rates, and DART dropout profiles.
-  The report is ``docs/benchmarks/review_guardrails_v1.md``. DART timing is
-  descriptive; the 1.50x RMSE gate applies only to explicit default-like
-  profiles with ``drop_rate <= 0.10``, while the stress profile remains
-  reported and contract-checked.
-- ``benchmarks/dart_policy_calibration.py`` -- fixed five-seed, ten-fixture
-  DART expected-drop calibration for PR #137. The committed matrix,
-  compatibility captures, rejected-cap reasons, and selected default are
-  recorded in ``docs/benchmarks/dart_policy_calibration_pr137.md``. The machine
-  comparator validates the fixed matrix/capture contract and hash parity;
-  warm-start and ``n_jobs`` are separate regression sentinels rather than JSON
-  compatibility records.
-- ``benchmarks/monotone_constraints_benchmark.py`` -- deterministic scalar
-  monotone-constraint acceptance evidence for regression and binary models.
-  The report is ``docs/benchmarks/monotone_constraints_v1.md``; finite numeric
-  sweeps and held-out quality are gated, while timing is descriptive.
-- ``benchmarks/multiclass_parallelism_benchmark.py`` -- deterministic
-  ``n_jobs`` and multiclass class-tree scaling evidence across matrix shapes,
-  class counts, and both growth strategies. The report is
-  ``docs/benchmarks/multiclass_parallelism_v1.md``; serial and parallel
-  artifacts and predictions must match exactly.
-- ``benchmarks/allocation_reuse_benchmark.py`` -- isolated, manifest-attested
-  baseline/candidate evidence for histogram and row-partition allocation reuse
-  across four matrix shapes and both growth strategies. The report is
-  ``docs/benchmarks/allocation_reuse_v1.md``; artifacts and predictions must
-  match exactly before aggregate native-time and RSS gates are applied.
+Local native/debug execution isolates each outer job to avoid a reproduced
+macOS cross-library warmup crash. Explicit upstream/Ray execution is available.
+Timings apply to recorded hardware/resources/execution. Local ranks are
+pool-relative, not official leaderboard placements; these commands do not upload
+results or certify submission acceptance.
 
-The suite spans three task types with the following scenarios:
-
-**Regression:** ``dense_numeric``, ``california_housing``, ``bike_sharing``,
-``panel_time_series``, ``dow_jones_financial``
-
-**Classification:** ``breast_cancer``, ``synthetic_classification``
-
-**Ranking:** ``synthetic_ranking``, ``california_ranking``
-
-Profiles are evaluated across shallow, mid, and deep configurations so the
-comparison is not tied to a single parameter shape.
-
-Current results
----------------
-
-Measured for v1.0.0 with an equal thread budget and matched hyperparameters
-for every library. Across the 15 curated scenarios AlloyGBM wins 5 and places
-top-two on 11.
-
-**Regression:**
-
-- Strongest on ``histogram_stress`` by a wide margin (0.1803 RMSE against
-  0.3600-0.3649 for all three peers)
-- Leads on ``bike_sharing`` and ``dow_jones_financial``
-- Second on ``abalone_regression`` and ``dense_numeric``
-- Trails on ``california_housing``; last of four on ``panel_time_series``
-
-**Classification:**
-
-- Second on ``synthetic_classification``, third on ``adult_income`` -- all four
-  libraries within 0.8 percentage points
-- Trails on the 455-row ``breast_cancer`` set
-- Multiclass: second on ``digits_multiclass`` and ``synthetic_multiclass``,
-  tied first on ``wine_multiclass``
-
-**Ranking:**
-
-- Leads ``synthetic_ranking`` (NDCG@10 1.0000); second on
-  ``california_ranking`` (0.7674), ahead of CatBoost and LightGBM
-
-**Fit speed:**
-
-- AlloyGBM's weak axis. LightGBM and XGBoost fit roughly 3-4x faster per core
-  on the curated suite, where AlloyGBM's fixed per-round overhead dominates;
-  the gap narrows to ~1.3x at 200k rows and 1.5-1.8x at 1M
-- Parallel scaling is the larger structural gap: 1.6-1.8x on 10 cores against
-  LightGBM's 2.5-2.8x and CatBoost's 4.0-4.2x
-- Prediction is competitive, and markedly faster than LightGBM
-  single-threaded
-
-**MorphBoost variants:**
-
-- On Numerai-style residualized regression at scale (~2.7M rows × 42 features
-  × 5000 rounds), AlloyGBM's MorphBoost variants lead all peer libraries on
-  validation MMC (Meta-Model Contribution) and Sharpe; numerai_corr trails by
-  a small margin (~0.0006-0.0009).
-- ``alloygbm_morph`` is typically the fastest of the three AlloyGBM variants
-  on this workload due to faster convergence under the EMA-shaped gain.
-
-**Piecewise-linear leaf variants:**
-
-- ``leaf_model="linear"`` shows ~10× faster convergence on linearly-structured
-  data, +3.5% RMSE on California Housing, and +1.75pp accuracy on Breast
-  Cancer vs constant-leaf baselines, at a 2–8× per-round training overhead.
-- See ``docs/benchmarks/pl_trees_v1.md`` for the full report.
-
-**DRO leaf variants:**
-
-- Active scalar numeric DRO split selection is exhaustive and safe-SIMD; native
-  categorical, factor-penalized, Morph+DRO, and joint-output paths retain their
-  documented scalar or standard-gain behavior.
-- See ``docs/benchmarks/dro_simd_pr135.md`` for the scanner gate, paired fit
-  matrix, exact quality-equivalence result, and remaining timing concerns.
-
-Metrics by task type
---------------------
-
-.. list-table::
-   :header-rows: 1
-
-   * - Task type
-     - Metrics
-   * - Regression
-     - RMSE, MAE, R2
-   * - Classification
-     - Accuracy, Log-Loss, AUC
-   * - Ranking
-     - NDCG@5, NDCG@10, NDCG
-
-How to run the suite
---------------------
-
-.. code-block:: console
-
-   python3 benchmarks/run_model_comparison.py --force-prepare
-
-Focused regression comparison:
-
-.. code-block:: console
-
-   python3 benchmarks/run_model_comparison.py \
-     --force-prepare \
-     --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial
-
-Review-evidence capture:
-
-.. code-block:: console
-
-   python3 benchmarks/review_guardrails.py --gate \
-     --output docs/benchmarks/review_guardrails_v1.md
-
-Scalar monotone-constraint acceptance:
-
-.. code-block:: console
-
-   python3 benchmarks/monotone_constraints_benchmark.py --quick --gate
-   python3 benchmarks/monotone_constraints_benchmark.py \
-     --gate \
-     --output docs/benchmarks/monotone_constraints_v1.md
-
-Classification only:
-
-.. code-block:: console
-
-   python3 benchmarks/run_model_comparison.py \
-     --force-prepare \
-     --scenarios breast_cancer synthetic_classification
-
-Ranking only:
-
-.. code-block:: console
-
-   python3 benchmarks/run_model_comparison.py \
-     --force-prepare \
-     --scenarios synthetic_ranking california_ranking
-
-Stage timing output
--------------------
-
-Per-record benchmark output includes:
-
-- ``input_adaptation_seconds``
-- ``native_bridge_prepare_seconds``
-- ``native_train_seconds``
-- ``fit_seconds``
-- ``predict_seconds``
-
-Use those timing columns to tell apart Python-side adaptation cost and native
-training cost.
-
-Interpretation
---------------
-
-The benchmark suite is designed to answer both of these questions:
-
-- Where is AlloyGBM already strong?
-- Where does it still lag established libraries?
-
-The second question matters. These docs intentionally preserve that honesty.
+The `historical archive
+<https://github.com/LGA-Personal/AlloyGBM/tree/main/docs/archive/benchmarks/pre-tabarena-2026-10-20>`_
+preserves retired runners, fixtures, custom gates and their tests. Reports under
+``docs/benchmarks/`` retain historical context and are not standard TabArena
+evidence. Library correctness tests remain active. Ranking, temporal and
+special-mode comparative benchmarking remain outside this integration.

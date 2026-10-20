@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # PR #137 DART Expected-Drop Calibration
 
 Status: implemented and revision-hardened on `codex/dart-drop-calibration`; the public default is `5`.

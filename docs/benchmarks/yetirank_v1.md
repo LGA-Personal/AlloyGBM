@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # YetiRank v1: the published objective, and what it changes
 
 **Date:** 2026-10-16 · **Base:** main at 6fb1866 · **Script:** `benchmarks/yetirank_comparison.py`

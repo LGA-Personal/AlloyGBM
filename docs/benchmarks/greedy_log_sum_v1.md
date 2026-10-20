@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # GreedyLogSum Quantile Borders v1
 
 - Question: does CatBoost's `GreedyLogSum` border selection beat the
@@ -50,7 +52,7 @@ Every dataset is within about one seed standard error of 1.0.
 
 ### Targeted feature shapes (4 fixtures, 10 seeds)
 
-[`benchmarks/greedy_log_sum_shapes.py`](../../benchmarks/greedy_log_sum_shapes.py)
+[`benchmarks/greedy_log_sum_shapes.py`](../archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/greedy_log_sum_shapes.py)
 builds one feature per fixture chosen to separate the two methods, 20,000
 rows each:
 

@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Greedy Quantile Borders v1
 
 - Harness: `benchmarks/default_quality.py` (every library at its own defaults,

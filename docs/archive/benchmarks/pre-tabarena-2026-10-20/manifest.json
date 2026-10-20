@@ -1,0 +1,967 @@
+{
+  "legacy_source_commit": "ecbafa1fb06130d5fe8e481e87d6aaa9fbb79a09",
+  "integration_parent": "d3a2eddb6078276f532705a65214e60c3c37b861",
+  "retirement_status": "DRAFT: merge gated on full Lite acceptance.json",
+  "files": [
+    {
+      "source": "benchmarks/.gitignore",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/.gitignore",
+      "sha256": "5e8e83ed9d5823854810d97a05a04686beac9784da89eea619d26b6dafa2ed80",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/README.md",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/README.md",
+      "sha256": "94bcbc78ea206ef20723b6549478a9fd460cd31a0158dae90e54cfbd9c0e4caa",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/abalone_regression/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/abalone_regression/manifest.yaml",
+      "sha256": "6098ac92a6d9ea2e669be2c3b32649ccab97e8daa2f28d966d529c6a775e0422",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/abalone_regression/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/abalone_regression/prepare.py",
+      "sha256": "5fab967ae1fcd76b6e8d28cf9ada9415cec8c44c044ff527433045cdf83d22e5",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/adult_income/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/adult_income/manifest.yaml",
+      "sha256": "c8a34cd4b5dfc37ed186a42c19533ffda64f3e27db76b127413394b256a0a702",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/adult_income/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/adult_income/prepare.py",
+      "sha256": "9b92d0751624f1300a0121dea5c9c43f67fa48bbe91b5fa78511c75ebd8c3dbf",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/allocation_reuse_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/allocation_reuse_benchmark.py",
+      "sha256": "ea8d1cf624f7f57e08c065a88568b48ced0125dbc9b8ab50a11b4d8bc714cb43",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/architectural_backlog/__init__.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/architectural_backlog/__init__.py",
+      "sha256": "a731b09335f697aaa9c2bbbc2ddd61ccf315af1c92d827c711bd8142ebef859f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/architectural_backlog/common.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/architectural_backlog/common.py",
+      "sha256": "dda7b539188308d406c4ee2c40ba510489a9567093281159500b25c8254e8668",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/architectural_backlog/fixtures.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/architectural_backlog/fixtures.py",
+      "sha256": "a6525073ab9d34a18a805371a4e23861e625beba5982001e6f19a9812d79c69e",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/architectural_backlog/run.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/architectural_backlog/run.py",
+      "sha256": "9841a2b909ba3ae0472b90ad39e81c3eedeb9a3b2b2a4a4aeaf76cc91b03781e",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/architectural_backlog/scenarios.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/architectural_backlog/scenarios.py",
+      "sha256": "fa6826e2b501d07de6bb03a5d939969d74cffed39d25d208a856725e6d4fa892",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/auto_policy_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/auto_policy_benchmark.py",
+      "sha256": "465b153c8b1561b8e732ebe7097af0fb178f06d357efd69a3f0ab6f6f915d60e",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/auto_rounds_variants.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/auto_rounds_variants.py",
+      "sha256": "5e7ed3fe72d5d023cb89363d85cf79d19cf805501660b1c92ff2450abbcc309d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/bike_sharing/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/bike_sharing/manifest.yaml",
+      "sha256": "99d28c6848fa136400e1e244b9b4c3c3f282c53f02d647a616ba229f80e11c90",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/bike_sharing/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/bike_sharing/prepare.py",
+      "sha256": "676ccf38563020c500689462423dbc44199f3aa1979fb967745cbcb46f4e126f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/binary_dev_suite.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/binary_dev_suite.py",
+      "sha256": "f1992c44a726bdaf6bc14f4ca7632f0e080970e17eaf8c0e682b0ccd8d7adeb0",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/breast_cancer/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/breast_cancer/manifest.yaml",
+      "sha256": "794d6408b2f0fa5c0420c7499b806e62c9008588af8d8deab0d9be301b9f6d96",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/breast_cancer/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/breast_cancer/prepare.py",
+      "sha256": "05539c5a869b21a2f3c98321e61a39518e6eeb482edefe5b4761f6371b6c520a",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/california_housing/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/california_housing/manifest.yaml",
+      "sha256": "8112386cb2044ae169694975c1cdd8d8258c01ca6b2d252bc04cd8c8b5de974f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/california_housing/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/california_housing/prepare.py",
+      "sha256": "c1e08ef49e47352a696281aeb0cfca021968e3c309f136819ea3ad8c7d9e7464",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/california_ranking/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/california_ranking/manifest.yaml",
+      "sha256": "7718d87e994368d6b1a99671d8e31ad9dfa76dea509bdb1a6e5e3521a6703da7",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/california_ranking/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/california_ranking/prepare.py",
+      "sha256": "08aeb60162d703b20e1fcb3218326ad1a3589ea06e9377fdc61a6cb3d3d0fba6",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/__init__.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/__init__.py",
+      "sha256": "e18f40a16ccaffa4eb6508f2fbe15a065106e56c8d7f613281a09b4012308691",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/adapters.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/adapters.py",
+      "sha256": "1eabe682b65ec6dca01a40b739b8f757ba8b42496e6d7d91e3ae748f02683088",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.jsonl",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.jsonl",
+      "sha256": "82320e104c0d2a9f042d22a230d4c985d1683c19b7a81e157f10de59de4e9641",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.run-metadata.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.run-metadata.json",
+      "sha256": "7709c65d0052c64be7a3d782462458ac0917a03e59facdb121c224f34cf53c0e",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.summary.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/baselines/adfa2c8-pr-smoke.summary.json",
+      "sha256": "528825bc9e3684f17ed83dd2e42450222f70e7efbde9074c0e32eefa5d6d735f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/baselines/adfa2c8-published-v1-crosscheck.jsonl",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/baselines/adfa2c8-published-v1-crosscheck.jsonl",
+      "sha256": "0e60d25d7b42ca1f977f3a15981e7c5e0812380e65c430f904d15622b2dde065",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/baselines/adfa2c8-published-v1-crosscheck.run-metadata.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/baselines/adfa2c8-published-v1-crosscheck.run-metadata.json",
+      "sha256": "d75e25135a9e24b254c53b2efef078a9c392b261bdc0271e8b7ffb221553b86d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/baselines/adfa2c8-published-v1-crosscheck.summary.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/baselines/adfa2c8-published-v1-crosscheck.summary.json",
+      "sha256": "4f24e9fe79a76d35936a81fb1e35166aaf32d2a936ce0bc061bfed2ce34f2e02",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/datasets.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/datasets.py",
+      "sha256": "8267be334493565bb994da4f78fd6d5a9696ea43b7ea733a6ea35146324ced89",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/gates.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/gates.py",
+      "sha256": "5884c0e7d97d3b6b69630f3c9ab3137e67e99de1f4b221c6a4133ed9dada2326",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/manifests/deep_scaling.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/manifests/deep_scaling.yaml",
+      "sha256": "8dfa484943ce5425c52ad226747c475379303d757ff89b45d46b0512cca88e63",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/manifests/pr_smoke.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/manifests/pr_smoke.yaml",
+      "sha256": "02bb62801670d5104aa44a304bafa4d2469a6c66191deb3e872424df89453fce",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/manifests/published_v1_crosscheck.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/manifests/published_v1_crosscheck.yaml",
+      "sha256": "37200bf8c8496ed48cfdeea415f9bbab1bfcf697806ca7b638341350ce8efa7b",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/run.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/run.py",
+      "sha256": "54dd3c7848c5a874e39f24700764d9862561c813fc1b906aff060f13339d2a47",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/schema.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/schema.py",
+      "sha256": "0ac886c870f3b05e4a062c5556d1694fdb53b42f53fdef290885f50d13324102",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/summarize.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/summarize.py",
+      "sha256": "e705da8da26eddeb78c2cb04890747ce0ac3f72ba5bf9147243ac8a92da12bd3",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/tests/test_gates.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/tests/test_gates.py",
+      "sha256": "f4fec7a780ec838b5ad6781b693a93dab034d1a85be26208a92acf0027f5ab5b",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/tests/test_runner.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/tests/test_runner.py",
+      "sha256": "87d5a54de14995fb503f1bab569b2de845ca1fd6d08faff344378617d40c3700",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/tests/test_schema.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/tests/test_schema.py",
+      "sha256": "0e9ec1c32e3ca61062687e908a95d15e3cae43856ee94fab2bfc8eb7f51a359c",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/competitiveness/tests/test_task5_contract.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/competitiveness/tests/test_task5_contract.py",
+      "sha256": "df8251eb5386bd7f7370f4b7aa2efd860006863030798befd895206ee20de00a",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/conformal_intervals.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/conformal_intervals.py",
+      "sha256": "47427b981a80cd38025113a106bf12bfaf7b31cef9441f3a7274c256806f75bb",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/curated_seed_variance.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/curated_seed_variance.py",
+      "sha256": "d87bea93432ad1a5229a5c3d49091074a539b655a78193843472203f9f487c31",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dart_policy_calibration.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dart_policy_calibration.py",
+      "sha256": "0ba467fe47758b5b6fc460e4268497cb50eedfb9e280a59aa0aae0b440a872c0",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/deep_scaling_comparison.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/deep_scaling_comparison.py",
+      "sha256": "f053ee3f180bd0665c5c2620c00539b0d016b9281171d05a76c6fefbb34bc414",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/default_quality.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/default_quality.py",
+      "sha256": "264ba4f9fa89ab63acc96c2505076a56093c863ac8605fcf11ef186d37762367",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dense_numeric/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dense_numeric/manifest.yaml",
+      "sha256": "f7aad16716f53cc2bf4bb48f7a82319d0e5920950e8265f11325c5c1840548cc",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dense_numeric/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dense_numeric/prepare.py",
+      "sha256": "be6a56afbe675e9c5beb4bf1d7a8ba17cec72a4bc23b072af3e9fb7a28f1ad2a",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dev_suite.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dev_suite.py",
+      "sha256": "277548a8579457dde810bc4112e9455450a9ffad208f06e81c577999c7e636a7",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dev_suite_manifest.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dev_suite_manifest.json",
+      "sha256": "0cb99840b2244046f17063f42dba539bb0a76c482cd05b415092961f021ca4db",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/digits_multiclass/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/digits_multiclass/manifest.yaml",
+      "sha256": "5dbedb17de0d5390b03348c4a5727bbbce2281e852224e6b96bd2e3d3306d03b",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/digits_multiclass/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/digits_multiclass/prepare.py",
+      "sha256": "896dfb21e22d8ea1d58e5637c1fdcfee073e122c744cc5fdfa74933cabadfe41",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dow_jones_financial/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dow_jones_financial/manifest.yaml",
+      "sha256": "1b8d2f13687e3df2ab9642af02cda3cd5204975c0cec6316f514c298ca1d08ab",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dow_jones_financial/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dow_jones_financial/prepare.py",
+      "sha256": "0e3bc88d83a1533f03a8e1726b848004c7c22b31d00c0a2f0a7b2861095a640b",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dro_performance.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dro_performance.py",
+      "sha256": "ea0e686aaab347cf8f4e5f223d2658c779f9a4b453d80095c3a1c4f301e6b259",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/dro_robustness.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/dro_robustness.py",
+      "sha256": "cf853cfe76dee92ac682f7bba089d6f6fb78d38b3e6c0f5a02e0784d4aefe3bf",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/fit_speed_scale.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/fit_speed_scale.py",
+      "sha256": "8da06c6114f75aa6545aecb5107710c8d926cc1661bf5c6d90672034d01832b2",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/frontier_matrix.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/frontier_matrix.py",
+      "sha256": "4cdf74ba5241a631c3b4631d3477b4b48a8ce1159833a21e0238fe501e72d8f4",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/greedy_log_sum_shapes.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/greedy_log_sum_shapes.py",
+      "sha256": "37b7fb96449ec0da72e51ad9d1c614c525cb47c4f28b372a72353a55bcf424ac",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/histogram_stress/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/histogram_stress/manifest.yaml",
+      "sha256": "d819d07dc41ae2c6b34fae65172cff78e8b2c29e09958399cf0ba1d576ec24b0",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/histogram_stress/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/histogram_stress/prepare.py",
+      "sha256": "1a3c749aa08e996fc7bc6727e31dbe3d28de2a16e8564cfdc052ae065ac8a8bb",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/joint_dro_robust_split_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/joint_dro_robust_split_benchmark.py",
+      "sha256": "3c66881b851127c43aba6d2a576671f21bae764f7cd33a1688ace229f705b4e4",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/mode_quality_gate.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/mode_quality_gate.py",
+      "sha256": "ad40b7c198e3d6f8e09c48be0e07b151f95fc4247ae7b9d45681ba59efd2eb3e",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/monotone_constraints_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/monotone_constraints_benchmark.py",
+      "sha256": "22853795fbf889f99f8e90d3ab2434e2b3f904ca486ccaf8051c9c77eb9a1247",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/morph_ablation.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/morph_ablation.py",
+      "sha256": "e54a6ed66fc8712a85dbb169f4194bd866c0cd3a9c04b905fc23598c0e369fdd",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/morph_acceptance.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/morph_acceptance.py",
+      "sha256": "80276ee3e0547e87070eff6c97180d33fa3d3136baaa0e2da053effe5dcb20ec",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/morph_perf_gate.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/morph_perf_gate.py",
+      "sha256": "29a285d4d21c02d6004c21afc6531ec4a7c43517bb37f2c91b627661547bb0b5",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/morph_report.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/morph_report.py",
+      "sha256": "c7d1d715db402fc07a9ecce2b4b4004d6f33c553c1e97d757d9b28d94ea35ed2",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/multiclass_dart_scratch_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/multiclass_dart_scratch_benchmark.py",
+      "sha256": "0a3ea253ff51ce368adcaed814dd75c4fbca0c8c21a16703355d8b9c4cf8ec97",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/multiclass_dev_suite.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/multiclass_dev_suite.py",
+      "sha256": "e3492dc879db9611eae0d59778dd93d991f6a2041c8e0e6f595249dcf50262c6",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/multiclass_parallelism_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/multiclass_parallelism_benchmark.py",
+      "sha256": "460edde84fb26ef0993a356c5c2c6fc91b1cc2a86ad42d8aeff1d6430e08206a",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/news_ranking/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/news_ranking/manifest.yaml",
+      "sha256": "1198b9d27f3693ee102c50bf2ece02058ad4336ff7f79e9bf3c9fa5917fda872",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/news_ranking/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/news_ranking/prepare.py",
+      "sha256": "8a70d3b51cd2ac6cd8ee466f24576351f72cbc69ee6869f0fb2b8f47e40062d5",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/numerai_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/numerai_benchmark.py",
+      "sha256": "1bf19cb2f8549adbd2903d0100a20fc04c8e989c0f07e6be646163f8d2ee8257",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/objective_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/objective_benchmark.py",
+      "sha256": "f0ca967db0d35a6585fb907808369979a9dc21dc4027e676650c7ae9fa7e2386",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/panel_time_series/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/panel_time_series/manifest.yaml",
+      "sha256": "9ca7603f057169c1ab372799cd9d0a71241b211cb4b7ad311c7e3e100848e79f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/panel_time_series/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/panel_time_series/prepare.py",
+      "sha256": "246ac3fa4d0d49935666e8ce5ce12cfe8af70a552aab98a417fed4f033dd0577",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/perf_at_scale.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/perf_at_scale.py",
+      "sha256": "1acec1252f8b67fdd64f40639f190a81dd839368a05fb21d845b3e5b367b3258",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/perf_regression_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/perf_regression_benchmark.py",
+      "sha256": "b44140bba89994a7075a293793f1ec962b717b73289e35ea72b7506a3a220b51",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/pl_topk_performance.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/pl_topk_performance.py",
+      "sha256": "a764ee8ea562bfa633bdec300bb75c280d9a0eba59dd42482ec650ba75141c7c",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/pl_trees_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/pl_trees_benchmark.py",
+      "sha256": "07605420de66d7c150683808e49b1b36cdb19b8068a5356633ac0a00addb7591",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/perf_final_summary.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/perf_final_summary.txt",
+      "sha256": "b1ab61c1f90962502aa5102847ea6ace10e1ddac30962ef75bcbba8b27189cbb",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/perf_phase_b.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/perf_phase_b.txt",
+      "sha256": "f67bd83ad776cc77fd78d8de061ce095260ddb6b27d384cf5123416c0c99ae45",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/perf_phase_b_comparison.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/perf_phase_b_comparison.txt",
+      "sha256": "1324adc658161ea451c860667f022b85631ae2846c125a4e9e76abcc9d93d7a8",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/perf_phase_b_final.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/perf_phase_b_final.txt",
+      "sha256": "7d78e9ff6837177d7e758958ea64d78b573b175480547d14d030df5119730046",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_baseline.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_baseline.json",
+      "sha256": "bd7a60d38396c97e893a79dfb7d9bd3e45116effba0e4f8f64e2aeaae26c756f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_calibration.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_calibration.json",
+      "sha256": "0810e00eaa4d1b3c02c7e72ffeaffc8641a464cb9c9ba2ef06a19af8eef06585",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_formula_trials.md",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_formula_trials.md",
+      "sha256": "1eade852091a2c23052916687f691f1d35b315e95e1bd6e4ce805932684d371d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_optimized_control.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_optimized_control.json",
+      "sha256": "f456c9eed915866412f848d55255a855aed34a1c55769774abc4dceb3bf1e51a",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_raw_info.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_raw_info.json",
+      "sha256": "6757cef55290b5941e9bdea3cea938817a0bba0ebc890262ed5e4e17c33d8905",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_regularized_control.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_regularized_control.json",
+      "sha256": "673c45fb787f6f9d73e202f81776c3b8dffc8c2143aea81ea6cc1a9e6917452f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_secondary.md",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_secondary.md",
+      "sha256": "658d14c6237275e34ffc262e03230463ce5aa06f72832478694d80d553d3e51c",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_simd.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_simd.txt",
+      "sha256": "caef33568751999dc0287e24b2426b727d62d1f4ffbadfc6632baf465c32206c",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr132_morph_split_baseline.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr132_morph_split_baseline.txt",
+      "sha256": "f719890cb3c1de09f4d0ce20c8ed7573912588ee88a62a33ea7ddb167d440dc4",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr135_dro_comparison.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr135_dro_comparison.json",
+      "sha256": "9acc2cca9a5d0196648cc65c0cb2dc250038e5e2e9824afe99647156b5bc94e1",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr135_dro_fit_baseline.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr135_dro_fit_baseline.json",
+      "sha256": "2986f4681da49f12ec89914f8bd2337ea1cf4c3996ca8ac6e175ae1f7ddf1d8b",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr135_dro_fit_simd.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr135_dro_fit_simd.json",
+      "sha256": "978fb64f2c595bc607ab9941957d0591b936a7bf88b6efc8062f046938f8fbb5",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr135_dro_split_baseline.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr135_dro_split_baseline.txt",
+      "sha256": "effc7340b927097abe53e48330fdeca6ec4e4c0a6442023f813aeb60b788ea7d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr135_dro_split_simd.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr135_dro_split_simd.txt",
+      "sha256": "39c3f4477c27c3ff2210a01d417a9a7aa3c07501b3952a78c00264e5d4a2cad2",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr136_pl_histogram_baseline.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr136_pl_histogram_baseline.txt",
+      "sha256": "3ebb91fb7fa7f718422ec20b805a389a9a8322633e71686e41e2a35a5dd6bff0",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr136_pl_histogram_candidate.txt",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr136_pl_histogram_candidate.txt",
+      "sha256": "70b84ffc499f3d910a8e90a0f74147f28d00f9336c74717f532d8864c897a317",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr136_pl_topk_baseline.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr136_pl_topk_baseline.json",
+      "sha256": "5ff22a7db681924bbb51e7d3e589d6bb42a23dd4e23898e73f8935d388c4034d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr136_pl_topk_candidate.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr136_pl_topk_candidate.json",
+      "sha256": "82c7fbc7cecb4104216355ad9e6330933ef374f78f75248d098f8412a98f1aa6",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr136_pl_topk_comparison.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr136_pl_topk_comparison.json",
+      "sha256": "6a0cae25a52f33f6c64b61497d56ea4f972e43c44dbb29989cc76ff3d7acb3a3",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr137_dart_policy_candidate_compat.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr137_dart_policy_candidate_compat.json",
+      "sha256": "adee02230c1170ff218ee58b8ea16c66a37e7515bfd1cc4a6e95271baf88dfac",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr137_dart_policy_comparison.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr137_dart_policy_comparison.json",
+      "sha256": "fde679682c3736b816305a171ce3bc1e85fe2f27c49e61a7f11b742d647e2205",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr137_dart_policy_matrix.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr137_dart_policy_matrix.json",
+      "sha256": "dd0d02e67c7302bfdf7dfa1ac2ae75ad2b03eff4bfae22d2540df020f2ef4339",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/results/pr137_dart_policy_production_compat.json",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/results/pr137_dart_policy_production_compat.json",
+      "sha256": "897b7660a15d9aaffe02b298891a2ff33777f1b382d96490fe1e9cdaf98113a9",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/review_guardrails.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/review_guardrails.py",
+      "sha256": "8300ffe61ed69bb9f56a80c2d6adaab437078227bc5d69bcdaa9ec3a41f3210c",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/run_model_comparison.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/run_model_comparison.py",
+      "sha256": "f9953b42320ba0667f79f22c9c0555f9538645c5f1e117b377afb1bc9c4dae35",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/sampled_prediction_delta_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/sampled_prediction_delta_benchmark.py",
+      "sha256": "9ced79fd0278105aa2204b13909fcefb0a8de5f467cb5dd354532df0fef2cb9d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/scale_comparison.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/scale_comparison.py",
+      "sha256": "e73ba37563e5d9b2297990af9c431545675edc3713234d1004367b91a5020095",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/sketchboost_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/sketchboost_benchmark.py",
+      "sha256": "c3ac7e8a554b2acfcf34423bfa27c9e76e06a4a2c35d29c0d05af9d2ee2d6dc4",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/special_modes.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/special_modes.py",
+      "sha256": "49ec6f8d76f6220b89d2815b16887c26f7d83544f7fc98724c0fbc04ad06304b",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_categorical/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_categorical/manifest.yaml",
+      "sha256": "d8dbba081cebee2ce46d150889fd00fb78d3d61f5731a57a43d395160a008db5",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_categorical/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_categorical/prepare.py",
+      "sha256": "df6b67ad849d9de584509014fd3499c50e4792ed1d8a0df3481351ea038fa4ce",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_classification/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_classification/manifest.yaml",
+      "sha256": "9d9899b2554fcdb10c720b60fbe02c60696e60fdac0f7d30585372dc5cb6b823",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_classification/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_classification/prepare.py",
+      "sha256": "944590f0b78083d99ca359dd57b608e11bed3f37ac12308b12d315929b453128",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_custom_objective/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_custom_objective/manifest.yaml",
+      "sha256": "476f31fcae3613aef6c554584223f8bbdba70ad247838dba2b9b5e8a212bab06",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_custom_objective/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_custom_objective/prepare.py",
+      "sha256": "3825532b6ba0d65803130361dd88c34616b65953a9ae34a5cc813a726a6ca22a",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_multiclass/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_multiclass/manifest.yaml",
+      "sha256": "39913cc53ca676b93fa12b9add14cfed2bf4f649d3233e31a69e9bae07edeb26",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_multiclass/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_multiclass/prepare.py",
+      "sha256": "27ab8f305d914077d6bb0cdabd49cd24237c7bed0d33856a038a108ff1c820f2",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_ranking/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_ranking/manifest.yaml",
+      "sha256": "449f60e67ce7e918cfdab56e9d257226e55224a8f5ed1fe0663557c524ca2a25",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/synthetic_ranking/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/synthetic_ranking/prepare.py",
+      "sha256": "b4683d529462bcd2eb77bd0332e3eec50b5cda0918e866c7a1154ffebb442985",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_allocation_reuse_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_allocation_reuse_benchmark.py",
+      "sha256": "165a7d63738e9ea02498d7f1484cdea4f6607b3684d299b63b1501ede5be3761",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_alloygbm_runtime_contract.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_alloygbm_runtime_contract.py",
+      "sha256": "2ec5abe4072d74eca5d2ade7d66f9cfcff896105d56a2972ebedc25000a9553e",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_architectural_backlog.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_architectural_backlog.py",
+      "sha256": "ef469c96a55b21d51cacdf63cb24d87076355023b645ac37f87a4e8954cb4519",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_auto_policy_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_auto_policy_benchmark.py",
+      "sha256": "025f842058f4fbfb03a2effab1b15c2612bd4785115eaa66c6dd975b1a0d394e",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_bin_budget_evidence.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_bin_budget_evidence.py",
+      "sha256": "cf32a4a1585a4a42c8c9acedb52ce1685de9ecd5e0c76c2e30d0d95742e60ff4",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_dart_policy_calibration.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_dart_policy_calibration.py",
+      "sha256": "a36fe182ea03727306bf9fa426fb6151665d84f35242c6d603e6ead56228c26c",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_default_quality.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_default_quality.py",
+      "sha256": "4b5553279e62bd315325ced6dffcf439eeb436ea17a03c4f510dd9ab785486d7",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_dev_suite.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_dev_suite.py",
+      "sha256": "abf9b5132e2150bf1024841d0e697a7213ccc5fc8b0f786f4d658bdd30c98988",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_dro_performance.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_dro_performance.py",
+      "sha256": "43f73907f2429862ca7f3dfe02dc1f3a29f6c720647789fc24c554e26e53c016",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_dro_robustness.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_dro_robustness.py",
+      "sha256": "bab7d3c50fe38a759c8deece0bad307076bb407e1e6056a22fb28e3bb445b8e0",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_frontier_matrix.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_frontier_matrix.py",
+      "sha256": "49d3f3560d83fc492545eea063bc134c0c6f2ea3d47f76d745cae6c4539dfe37",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_mode_quality_gate.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_mode_quality_gate.py",
+      "sha256": "65c928b73f2704dfffc46097596dbe96ade8376c6c6e2b376b5119d974d4f323",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_monotone_constraints_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_monotone_constraints_benchmark.py",
+      "sha256": "a1de70045194c922d140d6ff8e6df192ed7361520398deb506fc2771d5d8e7b2",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_morph_acceptance.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_morph_acceptance.py",
+      "sha256": "b33042c476278ff4d6062d6c62b8f0c3843ca138af19951532fc82bc2202c31d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_morph_perf_gate.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_morph_perf_gate.py",
+      "sha256": "309f7ce410e062a7abf99f957186fb35ffea68440689063248b98c225d0eb83f",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_multiclass_parallelism_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_multiclass_parallelism_benchmark.py",
+      "sha256": "a0e9b76f0dc4d23de4dad0b654b7f425ba7f6bfa72c03683170f4052e42e0c60",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_objective_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_objective_benchmark.py",
+      "sha256": "67b59090ba960658b27764eadce4e01c3bdf8eeca7c5259e224b14b75573089b",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_perf_regression_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_perf_regression_benchmark.py",
+      "sha256": "2031039b17edb0068eec4395ec39958312b1c72fe78529b6199e67929a8debb9",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_pl_topk_performance.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_pl_topk_performance.py",
+      "sha256": "588d99cab3739bbd24bcd1fee47508c7cf1d6f92bef995ff85e65a879521cb17",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_review_guardrails.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_review_guardrails.py",
+      "sha256": "ac599521e0445e5d8040a42dd96b65d9d187a5b7c70aedd766acd2d1701d6d0d",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_run_model_comparison.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_run_model_comparison.py",
+      "sha256": "2f6f77c055a69fd4ad59be3e5373b72708e66b36e4e2e38321075cd1ca0d2cab",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_sampled_prediction_delta_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_sampled_prediction_delta_benchmark.py",
+      "sha256": "b0e8638fb38157b5c8d0e4bddc95bc3ecbf3c8b72834f4e1d0df85cefd830b40",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_scale_comparison.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_scale_comparison.py",
+      "sha256": "d220a5647a88084e927fe6ab261cc235033ec76d5955403e1f94214df28474a0",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_temporal_leakage.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_temporal_leakage.py",
+      "sha256": "819a0c91d6cf3f0a1d9f2c1e33c9745d4ef6c0ee84773c2752306eca09346fb9",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/tests/test_time_holdout_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/tests/test_time_holdout_benchmark.py",
+      "sha256": "a0af7c139ce1997deb28a1ca2dc17cde467aa574ac3e61728360c576e2914410",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/time_holdout_benchmark.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/time_holdout_benchmark.py",
+      "sha256": "73fad57b16bab3160be6fd8a09a63dae853db55de12a7002379537f778e002b2",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/wine_multiclass/manifest.yaml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/wine_multiclass/manifest.yaml",
+      "sha256": "4b12dd39e1abc85bd03dc4cff8d0c364c26440e8cd27c55a7effa2c52b183714",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/wine_multiclass/prepare.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/wine_multiclass/prepare.py",
+      "sha256": "9785c4eda041064765e3970d8766d09be61db8bb798bdd0f47daad09f626ae20",
+      "action": "archived"
+    },
+    {
+      "source": "benchmarks/yetirank_comparison.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/benchmarks/yetirank_comparison.py",
+      "sha256": "b83a6679eb62beaf33c9270562ffe9e53aad399095d33c44c2a30137511aa070",
+      "action": "archived"
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/.github/workflows/ci.yml",
+      "sha256": "10fdaa8ab5f5f735959caaeef7bae1aec6accbf263400c7681b1a740433638ff",
+      "action": "copied-before-replacement"
+    },
+    {
+      "source": "bindings/python/tests/test_morph_helpers.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/bindings/python/tests/test_morph_helpers.py",
+      "sha256": "8c2a29dbc036ab0dd3c758c612c0ccd92fb9979e1619eed1ee354163b71c227c",
+      "action": "copied-before-replacement"
+    },
+    {
+      "source": "docs/user/benchmarks.md",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/docs/user/benchmarks.md",
+      "sha256": "ea06094f2f833a253892eb9a9f326d5dd69b8138658f2e4b086237fed2487e49",
+      "action": "copied-before-replacement"
+    },
+    {
+      "source": "docs/site/source/benchmarks.rst",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/docs/site/source/benchmarks.rst",
+      "sha256": "53202e915a878e51434d425e7fceaa2211926bba3d85c727fad7d5cf36e2f84c",
+      "action": "copied-before-replacement"
+    },
+    {
+      "source": "bindings/python/tests/test_dart.py",
+      "destination": "docs/archive/benchmarks/pre-tabarena-2026-10-20/bindings/python/tests/test_dart.py",
+      "sha256": "06f9f5a41088a8c32dd4016429904e855a4b5191943772e5a37a317b7a6b8a64",
+      "action": "copied-before-replacement"
+    }
+  ]
+}

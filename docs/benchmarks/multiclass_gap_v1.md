@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Multiclass gap to CatBoost (v1)
 
 **Question.** In the matched-capacity OpenML run on main 629f69f (depth 6, lr 0.05,

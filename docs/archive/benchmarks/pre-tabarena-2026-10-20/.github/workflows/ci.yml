@@ -1,0 +1,525 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+  # Only run push-triggered CI on `main`.  Feature branches rely on the
+  # `pull_request` trigger above so PR runs aren't shadowed by a
+  # duplicate push run on the same commit — that duplicate would either
+  # double CI minutes or get cancelled by the concurrency group below
+  # and show up as 8 spurious "failing" cancelled checks on the PR
+  # rollup.  Tag-triggered release pipelines live in `publish.yml`.
+  push:
+    branches:
+      - main
+
+# Cancel older runs for the same branch when a new commit lands, so
+# force-pushes to a feature branch don't leave a half-finished prior
+# run consuming runners.  `main` is exempt so release pipelines stay
+# deterministic.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+
+      # `cache-bin: false` keeps `~/.cargo/bin` out of the cache.  On macOS
+      # the default (`cache-bin: true`) occasionally restores a stale
+      # hardlink that makes `cargo` resolve to the `rustup-init` bootstrap
+      # binary, producing "unexpected argument 'check' found" failures —
+      # reproduced multiple times on PR #12 and confirmed by the run log
+      # trace.  We still cache the workspace `target/` and the cargo
+      # registry (the expensive parts), so build times are unaffected.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Cargo check
+        run: cargo check --workspace --exclude alloygbm-python
+
+      - name: Cargo doc
+        run: cargo doc --workspace --no-deps --exclude alloygbm-python
+
+      - name: Cargo fmt
+        run: cargo fmt -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace --exclude alloygbm-python --all-targets -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --workspace --exclude alloygbm-python
+
+  python-smoke:
+    name: Python smoke (${{ matrix.os }} / py${{ matrix.python-version }})
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+
+      - name: Select toolchain
+        run: rustup default 1.92.0
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Build wheel
+        run: maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python --out dist
+
+      - name: Install wheel
+        run: python -m pip install --force-reinstall dist/*.whl
+
+      - name: Attest installed AlloyGBM runtime
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          python benchmarks/allocation_reuse_benchmark.py \
+            --write-runtime-manifest /tmp/alloygbm-candidate-runtime.json \
+            --runtime-name candidate \
+            --runtime-python "$(python -c 'import sys; print(sys.executable)')" \
+            --runtime-workdir "$GITHUB_WORKSPACE"
+
+      - name: Install test dependencies
+        run: python -m pip install pytest pytest-subtests numpy "scikit-learn>=1.9,<1.10" pandas
+
+      - name: Install competitiveness dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pip install pyyaml
+
+      - name: Fetch historical harness commits for contracts
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        # Fetched by tag rather than by raw SHA. These revisions are ancestors
+        # of the feature branch that introduced the harness and of nothing
+        # else, so once that branch is squash-merged and deleted the commits
+        # become unreachable and are eventually collected -- which would break
+        # both this step and the harness-provenance contract test that digests
+        # their trees. The tags keep them reachable under any merge strategy;
+        # see `git show harness-baseline/pr-smoke` for the rationale.
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            +refs/tags/harness-baseline/pr-smoke:refs/tags/harness-baseline/pr-smoke \
+            +refs/tags/harness-baseline/v1-crosscheck:refs/tags/harness-baseline/v1-crosscheck
+
+      - name: Run competitiveness contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/competitiveness/tests/ -q
+
+      - name: Run AlloyGBM competitiveness smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          smoke_dir="$RUNNER_TEMP/alloygbm-competitiveness-smoke"
+          python -m benchmarks.competitiveness.run \
+            --manifest benchmarks/competitiveness/manifests/pr_smoke.yaml \
+            --output-dir "$smoke_dir" \
+            --smoke --libraries alloygbm --threads 1 --repetitions 1 --warmups 0
+          python - "$smoke_dir" <<'PY'
+          import sys
+          from pathlib import Path
+          from benchmarks.competitiveness.schema import load_run_bundle
+
+          candidates = list(Path(sys.argv[1]).glob("*/raw.jsonl"))
+          if len(candidates) != 1:
+              raise SystemExit(f"expected exactly one raw JSONL, found {len(candidates)}")
+          metadata, records = load_run_bundle(candidates[0])
+          scenarios = {record.scenario for record in records}
+          if len(records) != 6 or len(scenarios) != 6:
+              raise SystemExit(f"expected six Alloy records/scenarios, got {len(records)}/{len(scenarios)}")
+          if {record.library for record in records} != {"alloygbm"}:
+              raise SystemExit("smoke output contained a non-Alloy library")
+          if {record.repetition for record in records} != {0}:
+              raise SystemExit("smoke output did not contain repetition 0 only")
+          if metadata.run_id != records[0].run_id or metadata.raw_record_count != 6:
+              raise SystemExit("smoke metadata does not bind to the raw records")
+          print(f"validated {len(records)} AlloyGBM smoke records from {candidates[0]}")
+          PY
+
+      - name: Run pytest suite
+        run: python -m pytest bindings/python/tests/ -q
+
+      - name: Frontier matrix contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_frontier_matrix.py benchmarks/tests/test_dev_suite.py -q
+
+      - name: Frontier matrix AlloyGBM smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          python benchmarks/frontier_matrix.py run --tier smoke --arms alloy --threads 1 \
+            --output "$RUNNER_TEMP/frontier-smoke.json"
+          python - "$RUNNER_TEMP/frontier-smoke.json" <<'PY'
+          import json, sys
+          result = json.load(open(sys.argv[1]))
+          errors = [(r["dataset"], r["error"]) for r in result["records"] if r["error"]]
+          if errors or len(result["records"]) != 8:
+              raise SystemExit(f"frontier smoke failed: {len(result['records'])} records, errors {errors}")
+          print(f"validated {len(result['records'])} frontier smoke records")
+          PY
+
+      - name: Review benchmark contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_review_guardrails.py -q
+
+      - name: Review benchmark quality gates
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/review_guardrails.py --quick --gate
+
+      - name: Mode quality gate contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_mode_quality_gate.py -q
+
+      - name: Per-mode quality gates
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/mode_quality_gate.py --quick --gate
+
+      - name: Auto-policy benchmark contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_auto_policy_benchmark.py -q
+
+      - name: Auto-policy benchmark sentinel gates
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/auto_policy_benchmark.py --quick --gate
+
+      - name: Test monotone benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_monotone_constraints_benchmark.py -q
+
+      - name: Run compact monotone acceptance gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/monotone_constraints_benchmark.py --quick --gate
+
+      - name: Test multiclass parallelism benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_multiclass_parallelism_benchmark.py -q
+
+      - name: Run compact multiclass parallelism gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/multiclass_parallelism_benchmark.py --quick --gate
+
+      - name: Test allocation reuse benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_allocation_reuse_benchmark.py -q
+
+      - name: Run compact allocation reuse gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/allocation_reuse_benchmark.py --quick --candidate-manifest /tmp/alloygbm-candidate-runtime.json --gate
+
+      - name: Test perf regression benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_perf_regression_benchmark.py -q
+
+      - name: Perf regression benchmark gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/perf_regression_benchmark.py --quick --gate
+
+      - name: Import smoke
+        run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
+
+      - name: Python regressor contract smoke
+        run: |
+          python - <<'PY'
+          from alloygbm import GBMRegressor
+
+          model = GBMRegressor(
+              learning_rate=0.2,
+              max_depth=4,
+              seed=1,
+              deterministic=True,
+          )
+          params = model.get_params()
+          assert params["learning_rate"] == 0.2
+          assert params["max_depth"] == 4
+
+          # Invalid parameter values are validated at fit() (not
+          # construction/set_params) so cloning and parameter-search
+          # workflows follow the scikit-learn estimator contract.
+          model.set_params(learning_rate=0.0)
+          try:
+              model.fit([[0.0], [1.0], [2.0], [3.0]], [0.0, 1.0, 2.0, 3.0])
+          except ValueError:
+              pass
+          else:
+              raise AssertionError(
+                  "expected ValueError for invalid learning_rate at fit()"
+              )
+
+          print("GBMRegressor contract smoke ok")
+          PY
+
+      - name: Python classifier smoke
+        run: |
+          python - <<'PY'
+          from alloygbm import GBMClassifier, accuracy
+
+          model = GBMClassifier(
+              learning_rate=0.2,
+              max_depth=4,
+              n_estimators=20,
+              seed=1,
+              deterministic=True,
+          )
+          X = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+          y = [0, 0, 1, 1]
+          model.fit(X, y)
+
+          labels = model.predict(X)
+          assert all(l in (0, 1) for l in labels), f"unexpected labels: {labels}"
+
+          probas = model.predict_proba(X)
+          assert probas.shape == (4, 2), f"unexpected shape: {probas.shape}"
+
+          print("GBMClassifier smoke ok")
+          PY
+
+      - name: Python multi-class classifier smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMClassifier
+
+          X = np.random.RandomState(42).randn(150, 4).astype(np.float32)
+          y = np.repeat([0, 1, 2], 50).astype(np.float32)
+
+          model = GBMClassifier(n_estimators=20, seed=1)
+          model.fit(X, y)
+
+          assert model.n_classes_ == 3, f"expected 3 classes, got {model.n_classes_}"
+          assert np.array_equal(model.classes_, [0, 1, 2])
+
+          probas = model.predict_proba(X)
+          assert probas.shape == (150, 3), f"unexpected shape: {probas.shape}"
+          assert np.allclose(probas.sum(axis=1), 1.0, atol=1e-5), "probabilities don't sum to 1"
+
+          preds = model.predict(X)
+          assert all(p in (0, 1, 2) for p in preds), f"unexpected labels: {set(preds)}"
+
+          print("GBMClassifier multi-class smoke ok")
+          PY
+
+      - name: Python ranker smoke
+        run: |
+          python - <<'PY'
+          from alloygbm import GBMRanker
+
+          model = GBMRanker(
+              ranking_objective="rank:ndcg",
+              learning_rate=0.2,
+              max_depth=4,
+              n_estimators=20,
+              seed=1,
+              deterministic=True,
+          )
+          X = [[0.1], [0.2], [0.3], [0.4], [0.5], [0.6]]
+          y = [0, 1, 2, 0, 1, 2]
+          group = [0, 0, 0, 1, 1, 1]
+          model.fit(X, y, group=group)
+
+          scores = model.predict(X)
+          assert len(scores) == 6, f"unexpected length: {len(scores)}"
+
+          print("GBMRanker smoke ok")
+          PY
+
+      - name: Python custom objective smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          def custom_mse(y_true, y_pred):
+              grad = y_pred - y_true
+              hess = np.ones_like(y_true)
+              return grad, hess
+
+          X = np.random.RandomState(42).randn(100, 5).astype(np.float32)
+          y = X[:, 0] * 2 + X[:, 1] + np.random.RandomState(42).randn(100).astype(np.float32) * 0.1
+
+          model = GBMRegressor(objective=custom_mse, n_estimators=20, seed=1, deterministic=True)
+          model.fit(X, y)
+          preds = model.predict(X)
+          assert len(preds) == 100
+          print("Custom objective smoke ok")
+          PY
+
+      - name: Python custom metric smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          def custom_rmse(y_true, y_pred):
+              return ("custom_rmse", float(np.sqrt(np.mean((y_true - y_pred) ** 2))), False)
+
+          X = np.random.RandomState(42).randn(100, 5).astype(np.float32)
+          y = X[:, 0] * 2 + np.random.RandomState(42).randn(100).astype(np.float32) * 0.1
+          X_val = np.random.RandomState(7).randn(50, 5).astype(np.float32)
+          y_val = X_val[:, 0] * 2 + np.random.RandomState(7).randn(50).astype(np.float32) * 0.1
+
+          model = GBMRegressor(n_estimators=50, early_stopping_rounds=5, seed=1, deterministic=True)
+          model.fit(X, y, eval_set=(X_val, y_val), eval_metric=custom_rmse)
+          assert model.evals_result_ is not None
+          assert "custom_rmse" in model.evals_result_["validation"]
+          print("Custom metric smoke ok")
+          PY
+
+      - name: Python native categorical split smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          X = np.column_stack([np.arange(100) % 5, np.random.RandomState(42).randn(100)]).astype(np.float32)
+          y = np.array([1.0 if i % 5 < 2 else 3.0 for i in range(100)], dtype=np.float32)
+          cats = [["cat_a", "cat_b", "cat_c", "cat_d", "cat_e"][i % 5] for i in range(100)]
+
+          model = GBMRegressor(n_estimators=10, max_cat_threshold=64, categorical_feature_indices=[0])
+          model.fit(X, y, categorical_feature_values_list=[cats])
+          preds = model.predict(X)
+          assert len(preds) == 100
+          assert model._native_cat_mappings_ is not None
+          assert 0 in model._native_cat_mappings_
+          print("Native categorical split smoke ok")
+          PY
+
+  sklearn-conformance:
+    name: sklearn ${{ matrix.sklearn-minor }} conformance
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sklearn-minor: "1.8"
+            sklearn-constraint: "scikit-learn>=1.8,<1.9"
+          - sklearn-minor: "1.9"
+            sklearn-constraint: "scikit-learn>=1.9,<1.10"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python --out dist
+
+      - name: Install conformance environment
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install pytest pytest-subtests numpy pandas "${{ matrix.sklearn-constraint }}"
+
+      - name: Run sklearn conformance suites
+        run: |
+          python -m pytest \
+            bindings/python/tests/test_sklearn_conformance.py \
+            bindings/python/tests/test_regressor_contract.py \
+            bindings/python/tests/test_classifier_and_metrics.py \
+            bindings/python/tests/test_ranker.py -q
+
+  competitiveness-comparator:
+    name: Competitiveness comparator (observational)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python --out dist
+
+      - name: Install comparator dependencies
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install pyyaml numpy pandas scipy "scikit-learn>=1.9,<1.10" \
+            "lightgbm==4.6.0" "xgboost==3.2.0" "catboost==1.2.10"
+
+      - name: Run observational comparator
+        run: |
+          comparator_dir="$RUNNER_TEMP/alloygbm-competitiveness-comparator"
+          python -m benchmarks.competitiveness.run \
+            --manifest benchmarks/competitiveness/manifests/pr_smoke.yaml \
+            --output-dir "$comparator_dir" \
+            --libraries alloygbm lightgbm xgboost catboost \
+            --threads 1 --repetitions 3 --warmups 1
+          raw_path=$(find "$comparator_dir" -name raw.jsonl -type f -print -quit)
+          test -n "$raw_path"
+          python -m benchmarks.competitiveness.summarize "$raw_path" \
+            --minimum-repetitions 3 \
+            --json-output "$comparator_dir/summary.json" \
+            --markdown-output "$comparator_dir/summary.md"
+          python - "$raw_path" "$comparator_dir/summary.json" <<'PY'
+          import json
+          import sys
+          from benchmarks.competitiveness.schema import load_run_bundle
+
+          metadata, records = load_run_bundle(
+              sys.argv[1], sys.argv[1].replace("raw.jsonl", "run-metadata.json")
+          )
+          summary = json.loads(open(sys.argv[2]).read())
+          if len(records) != 72:
+              raise SystemExit(f"expected 72 comparator records, got {len(records)}")
+          if len(summary.get("summaries", [])) != 24:
+              raise SystemExit("comparator summary did not contain 24 rows")
+          if {record.repetition for record in records} != {0, 1, 2}:
+              raise SystemExit("comparator repetitions were not 0, 1, 2")
+          if metadata.run_id != records[0].run_id or metadata.raw_record_count != len(records):
+              raise SystemExit("comparator metadata does not bind to raw records")
+          print("validated comparator raw and summary artifacts; no timing gate applied")
+          PY
+
+      - name: Upload comparator artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: alloygbm-competitiveness-comparator-${{ github.run_id }}
+          path: ${{ runner.temp }}/alloygbm-competitiveness-comparator/**
+          if-no-files-found: error

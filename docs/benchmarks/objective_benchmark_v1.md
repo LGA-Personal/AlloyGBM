@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Objective Benchmark Pack
 
 Deterministic, offline validation for the reviewed large-query LambdaMART and

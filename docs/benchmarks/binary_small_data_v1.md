@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Binary Small-Data Defaults v1: Leaf L2 and Multi-Step Newton Leaves
 
 - Harness: `benchmarks/binary_dev_suite.py` (test log loss, paired splits,

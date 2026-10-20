@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Latest-periods holdout for automatic rounds (v1)
 
 Date: 2026-10-17. Commit: 10198b1 on `claude/time-decay-83g1z4`. Machine:

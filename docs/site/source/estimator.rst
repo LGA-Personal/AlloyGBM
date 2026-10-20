@@ -14,11 +14,14 @@ Core parameters
 ---------------
 
 - ``learning_rate: float | "auto" = "auto"``
+
   - additive update step size; ``"auto"`` is ``0.05`` when the round count is
     chosen automatically and ``0.1`` otherwise
 - ``max_depth: int = 6``
+
   - maximum tree depth
 - ``n_estimators: int | "auto" = "auto"``
+
   - boosting rounds; ``"auto"`` chooses the count by early stopping on
     ``eval_set`` or, without one, on a seeded 10% holdout (stratified for
     classifiers, whole groups for rankers) followed by a refit on every row.
@@ -28,8 +31,10 @@ Core parameters
     objectives and fits under 50 rows keep the fixed 100 rounds at ``0.1``.
     See ``docs/benchmarks/auto_rounds_v1.md``.
 - ``row_subsample: float = 1.0``
+
   - per-round row sampling fraction; ignored when ``boosting_mode="goss"`` (GOSS uses gradient-based sampling instead).
 - ``col_subsample: float = 1.0``
+
   - per-round feature sampling fraction
 - ``colsample_bynode: float = 1.0`` -- fraction of features considered as split
   candidates at each individual tree node, composing multiplicatively with
@@ -93,6 +98,7 @@ Core parameters
   from the full-precision gradients. Not with DRO leaves, linear leaves,
   MorphBoost, ``split_penalty`` neutralization or joint multi-label mode.
 - ``quantile_alpha: float = 0.5``
+
   - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 
 Boosting mode

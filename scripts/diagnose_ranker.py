@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Diagnostic for GBMRanker zero-tree / bit-identical-NDCG bug.
 
-Builds synthetic ranking data matching benchmarks/synthetic_ranking/prepare.py
+Builds synthetic ranking data matching the historical synthetic-ranking fixture (see docs/archive/benchmarks/)
 (200 queries × 25 docs = 5000 rows, 16 features) and fits two GBMRanker models:
 
   1. Auto policy (as used by the benchmark).

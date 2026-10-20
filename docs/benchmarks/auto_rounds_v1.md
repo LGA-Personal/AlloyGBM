@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Auto Rounds v1: Round Count and Learning Rate by Early Stopping
 
 - Harness: `benchmarks/default_quality.py` (every library at its own defaults,

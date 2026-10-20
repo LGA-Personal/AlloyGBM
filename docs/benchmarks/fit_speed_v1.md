@@ -1,3 +1,5 @@
+> Historical bespoke-benchmark evidence. The harness is [archived](../archive/benchmarks/pre-tabarena-2026-10-20/README.md); these are not standard TabArena results.
+
 # Fit Speed v1: Split-Scan Pruning and Relative Early Stopping
 
 - Harness: `benchmarks/default_quality.py` (19 datasets, 5 seeds, each
