@@ -67,6 +67,7 @@ fn train_regression_artifact_impl(
         None,  // custom_metric_fn
         0,     // max_cat_threshold
         None,  // init_continuous_feature_quantile_cuts
+        None,  // no fit deadline
     )
     .map(|result| result.artifact_bytes)
 }
@@ -765,6 +766,7 @@ fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targ
         None,
         0,
         None,
+        None, // no fit deadline
     )
     .expect("bridge training succeeds")
     .artifact_bytes;

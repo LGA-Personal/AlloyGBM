@@ -11,6 +11,7 @@ pub enum EngineError {
     BackendUnavailable(String),
     NotImplemented(String),
     Core(CoreError),
+    TimeLimitExceeded,
 }
 
 impl Display for EngineError {
@@ -20,6 +21,9 @@ impl Display for EngineError {
             Self::ContractViolation(msg) => write!(f, "contract violation: {msg}"),
             Self::BackendUnavailable(msg) => write!(f, "backend unavailable: {msg}"),
             Self::NotImplemented(msg) => write!(f, "not implemented: {msg}"),
+            Self::TimeLimitExceeded => {
+                write!(f, "fit time limit exhausted before completing a round")
+            }
             Self::Core(err) => write!(f, "core error: {err}"),
         }
     }

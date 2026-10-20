@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+from ._fit_budget import remaining_seconds, validate_time_limit
+
 import inspect as _inspect
 from typing import TYPE_CHECKING
 
@@ -108,6 +111,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         init_model: "GBMRegressor | None" = None,
         eval_metric: object | None = None,
         factor_exposures: object | None = None,
+        time_limit: float | None = None,
     ) -> "GBMClassifier":
         """Fit the classifier.
 
@@ -124,6 +128,8 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
         -------
         self
         """
+        fit_started = time.monotonic()
+        time_limit = validate_time_limit(time_limit)
         self._validate_hyperparameters()
         if self.neutralization == "pre_target":
             raise ValueError(
@@ -191,6 +197,14 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             )
             eval_set = (_eval_X, eval_float_targets)
 
+        # Label preprocessing has already changed prediction routing. An expired
+        # budget here must invalidate a prior model, just as the base fit does.
+        try:
+            remaining = remaining_seconds(time_limit, fit_started)
+        except TimeoutError:
+            self._reset_fitted_state()
+            raise
+
         # Delegate to GBMRegressor.fit which calls self._objective_name()
         super().fit(
             X,
@@ -207,6 +221,7 @@ class GBMClassifier(_ClassifierMixin, _GBMEstimatorCore):
             init_model=init_model,
             eval_metric=eval_metric,
             factor_exposures=factor_exposures,
+            time_limit=remaining,
         )
         self.classes_ = np.asarray(sorted_classes)
         self.n_classes_ = n_classes

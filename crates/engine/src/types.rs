@@ -144,6 +144,7 @@ pub enum IterationStopReason {
     MaxLeavesReached,
     ValidationLossPlateau,
     CustomMetricPlateau,
+    TimeBudgetReached,
 }
 
 #[derive(Debug, Clone, PartialEq)]

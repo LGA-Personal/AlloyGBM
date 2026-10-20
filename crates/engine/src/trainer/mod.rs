@@ -61,6 +61,7 @@ use vector_leaf_build::{
 pub struct Trainer {
     params: TrainParams,
     categorical_features: Vec<CategoricalFeatureInfo>,
+    fit_time_limit: Option<std::time::Duration>,
 }
 
 type MulticlassDartRoundBookkeeping = (Vec<Vec<usize>>, Vec<Vec<usize>>);
@@ -433,7 +434,30 @@ impl Trainer {
         Ok(Self {
             params,
             categorical_features: Vec::new(),
+            fit_time_limit: None,
         })
+    }
+
+    /// Limit a fit cooperatively at complete-round boundaries.
+    /// None preserves unrestricted, deterministic training. A single round may
+    /// overrun the deadline; callers needing a strict budget must reject that fit.
+    pub fn with_fit_time_limit_seconds(mut self, limit: Option<f64>) -> EngineResult<Self> {
+        self.fit_time_limit = match limit {
+            None => None,
+            Some(seconds) => {
+                if !seconds.is_finite() || seconds <= 0.0 {
+                    return Err(EngineError::InvalidConfig(
+                        "time_limit must be finite and positive".into(),
+                    ));
+                }
+                Some(
+                    std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
+                        EngineError::InvalidConfig("time_limit is too large".into())
+                    })?,
+                )
+            }
+        };
+        Ok(self)
     }
 
     /// Set the categorical feature metadata for native categorical splits.
@@ -1082,6 +1106,9 @@ impl Trainer {
         controls: IterationControls,
         warm_start: Option<MultiClassWarmStartState>,
     ) -> EngineResult<MultiClassIterationRunSummary> {
+        let deadline = self
+            .fit_time_limit
+            .map(|limit| (std::time::Instant::now(), limit));
         let k = objective.num_classes;
         validate_iteration_controls(controls)?;
         if controls.early_stopping_rounds.is_some() && validation.is_none() {
@@ -1404,6 +1431,13 @@ impl Trainer {
         let initial_dart_tree_weights = dart_state.tree_weights.clone();
 
         for round_index in 0..effective_round_cap {
+            if deadline.is_some_and(|(start, limit)| start.elapsed() >= limit) {
+                if rounds_completed == 0 {
+                    return Err(EngineError::TimeLimitExceeded);
+                }
+                stop_reason = IterationStopReason::TimeBudgetReached;
+                break;
+            }
             let effective_round = round_index + round_index_offset;
 
             // v0.10.1 DART: drop a random subset of previously-committed
@@ -2224,7 +2258,9 @@ impl Trainer {
         }
 
         // Truncate to best validation round if early stopping triggered
-        if stop_reason == IterationStopReason::ValidationLossPlateau
+        if (stop_reason == IterationStopReason::ValidationLossPlateau
+            || (stop_reason == IterationStopReason::TimeBudgetReached
+                && controls.early_stopping_rounds.is_some()))
             && let Some(best_round) = best_validation_round
             && best_round < rounds_completed
         {
@@ -2481,6 +2517,9 @@ impl Trainer {
         objective: &O,
         mut execution: IterationExecutionContext<'_>,
     ) -> EngineResult<IterationRunSummary> {
+        let deadline = self
+            .fit_time_limit
+            .map(|limit| (std::time::Instant::now(), limit));
         let mut controls = execution.controls;
         let validation = execution.validation;
         validate_iteration_controls(controls)?;
@@ -2869,6 +2908,13 @@ impl Trainer {
         let mut profile = RoundProfile::new();
 
         for round_index in 0..effective_round_cap {
+            if deadline.is_some_and(|(start, limit)| start.elapsed() >= limit) {
+                if rounds_completed == 0 {
+                    return Err(EngineError::TimeLimitExceeded);
+                }
+                stop_reason = IterationStopReason::TimeBudgetReached;
+                break;
+            }
             profile.note_round();
             // Offset round_index for sampling seeds and tree IDs when warm-starting
             let effective_round_index = round_index + round_index_offset;
@@ -3566,9 +3612,16 @@ impl Trainer {
         );
 
         // Determine the best round for truncation: custom metric takes priority
-        let truncation_round = if stop_reason == IterationStopReason::CustomMetricPlateau {
+        let truncation_round = if stop_reason == IterationStopReason::CustomMetricPlateau
+            || (stop_reason == IterationStopReason::TimeBudgetReached
+                && controls.early_stopping_rounds.is_some()
+                && custom_metric_callback.is_some())
+        {
             best_custom_metric_round
-        } else if stop_reason == IterationStopReason::ValidationLossPlateau {
+        } else if stop_reason == IterationStopReason::ValidationLossPlateau
+            || (stop_reason == IterationStopReason::TimeBudgetReached
+                && controls.early_stopping_rounds.is_some())
+        {
             best_validation_round
         } else {
             None
@@ -3800,5 +3853,28 @@ impl Trainer {
         objective: &O,
     ) -> EngineResult<TrainRoundSummary> {
         self.fit_one_round(dataset, binned_matrix, backend, objective)
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_fit_time_limits() {
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                Trainer::new(TrainParams::default())
+                    .unwrap()
+                    .with_fit_time_limit_seconds(Some(value))
+                    .is_err()
+            );
+        }
+        assert!(
+            Trainer::new(TrainParams::default())
+                .unwrap()
+                .with_fit_time_limit_seconds(None)
+                .is_ok()
+        );
     }
 }

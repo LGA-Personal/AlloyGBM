@@ -221,6 +221,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
     init_continuous_feature_quantile_cuts: Option<&[Vec<f32>]>,
+    max_fit_seconds: Option<f64>,
 ) -> Result<NativeTrainingResult, EngineError> {
     if !matches!(feature_bundling, "off" | "exact") {
         return Err(EngineError::InvalidConfig(format!(
@@ -571,7 +572,13 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     let poisson_max_delta_step = params.poisson_max_delta_step;
     let glm_hessian = params.glm_hessian;
     let quantile_alpha = params.quantile_alpha;
-    let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
+    let remaining = max_fit_seconds.map(|limit| limit - bridge_start.elapsed().as_secs_f64());
+    if remaining.is_some_and(|limit| limit <= 0.0) {
+        return Err(EngineError::TimeLimitExceeded);
+    }
+    let trainer = Trainer::new(params)?
+        .with_categorical_features(native_cat_infos.clone())
+        .with_fit_time_limit_seconds(remaining)?;
     let backend = CpuBackend;
     let native_start = Instant::now();
 
@@ -1171,6 +1178,7 @@ pub(crate) fn train_regression_artifact(
                 None, // custom_metric_fn
                 0,    // max_cat_threshold (disabled for non-summary paths)
                 None, // init_continuous_feature_quantile_cuts
+                None, // max_fit_seconds
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -1402,6 +1410,7 @@ pub(crate) fn train_regression_artifact_dense(
                 None, // custom_metric_fn
                 0,    // max_cat_threshold (disabled for non-summary paths)
                 None, // init_continuous_feature_quantile_cuts
+                None, // max_fit_seconds
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -1499,7 +1508,8 @@ pub(crate) fn train_regression_artifact_dense(
     grn_form="per_leaf",
     quantized_grad_bits=None::<u8>,
     multiclass_sketch="none",
-    multiclass_sketch_dim=5
+    multiclass_sketch_dim=5,
+    max_fit_seconds=None::<f64>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1594,7 +1604,9 @@ pub(crate) fn train_regression_artifact_with_summary(
     quantized_grad_bits: Option<u8>,
     multiclass_sketch: &str,
     multiclass_sketch_dim: usize,
+    max_fit_seconds: Option<f64>,
 ) -> PyResult<NativeTrainingResult> {
+    let fit_entry = Instant::now();
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1748,6 +1760,7 @@ pub(crate) fn train_regression_artifact_with_summary(
                 custom_metric_fn,
                 max_cat_threshold,
                 init_continuous_feature_quantile_cuts.as_deref(),
+                max_fit_seconds.map(|limit| limit - fit_entry.elapsed().as_secs_f64()),
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -1915,7 +1928,8 @@ mod tests {
     grn_form="per_leaf",
     quantized_grad_bits=None::<u8>,
     multiclass_sketch="none",
-    multiclass_sketch_dim=5
+    multiclass_sketch_dim=5,
+    max_fit_seconds=None::<f64>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -2013,7 +2027,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     quantized_grad_bits: Option<u8>,
     multiclass_sketch: &str,
     multiclass_sketch_dim: usize,
+    max_fit_seconds: Option<f64>,
 ) -> PyResult<NativeTrainingResult> {
+    let fit_entry = Instant::now();
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2148,6 +2164,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
                 custom_metric_fn,
                 max_cat_threshold,
                 init_continuous_feature_quantile_cuts.as_deref(),
+                max_fit_seconds.map(|limit| limit - fit_entry.elapsed().as_secs_f64()),
             )
             .map_err(engine_error_to_pyerr)
         })
@@ -2276,7 +2293,8 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     grn_form="per_leaf",
     quantized_grad_bits=None::<u8>,
     multiclass_sketch="none",
-    multiclass_sketch_dim=5
+    multiclass_sketch_dim=5,
+    max_fit_seconds=None::<f64>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -2374,7 +2392,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     quantized_grad_bits: Option<u8>,
     multiclass_sketch: &str,
     multiclass_sketch_dim: usize,
+    max_fit_seconds: Option<f64>,
 ) -> PyResult<NativeTrainingResult> {
+    let fit_entry = Instant::now();
     let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let values = dense_input_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2515,6 +2535,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
                 custom_metric_fn,
                 max_cat_threshold,
                 init_continuous_feature_quantile_cuts.as_deref(),
+                max_fit_seconds.map(|limit| limit - fit_entry.elapsed().as_secs_f64()),
             )
             .map_err(engine_error_to_pyerr)
         })

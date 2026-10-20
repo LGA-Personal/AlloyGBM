@@ -2,7 +2,7 @@ use alloygbm_engine::EngineError;
 use alloygbm_predictor::PredictorError;
 use alloygbm_shap::ShapError;
 use pyo3::PyErr;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 
 pub(crate) fn predictor_error_to_pyerr(error: PredictorError) -> PyErr {
     match error {
@@ -20,6 +20,7 @@ pub(crate) fn engine_error_to_pyerr(error: EngineError) -> PyErr {
         EngineError::BackendUnavailable(message) | EngineError::NotImplemented(message) => {
             PyRuntimeError::new_err(message)
         }
+        EngineError::TimeLimitExceeded => PyTimeoutError::new_err(error.to_string()),
         EngineError::Core(error) => PyRuntimeError::new_err(error.to_string()),
     }
 }
