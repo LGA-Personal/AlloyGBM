@@ -68,6 +68,7 @@ def process_standard_results(run_dir):
             suite="local-" + manifest["fingerprint"],
             cache_type="local",
             cache_kwargs={},
+            cache_root=ROOT / ".cache/tabarena/cache/tabarena",
             artifact_dir=None,
             config_default=defaults[0],
             verified=False,
@@ -127,6 +128,7 @@ def _write_report(run_dir, *, published_context=False):
     coverage = pd.read_csv(run_dir / "coverage.csv")
     summary = {
         "run_fingerprint": manifest["fingerprint"],
+        "report_code_sha256": file_hash(Path(__file__)),
         "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
         "profile": manifest["spec"]["profile"],
         "expected_jobs": manifest["expected_jobs"],

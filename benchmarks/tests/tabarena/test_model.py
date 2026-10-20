@@ -115,3 +115,57 @@ def test_worker_serialization_imports_only_registered_payload(tmp_path):
         cwd=tmp_path,
         check=True,
     )
+
+
+def test_unknown_and_missing_categories_survive_serialization(tmp_path):
+    train = pd.DataFrame(
+        {
+            "category": pd.Categorical(["a", "b"] * 30),
+            "number": np.arange(60, dtype=float),
+        }
+    )
+    valid = pd.DataFrame(
+        {
+            "category": pd.Categorical(["unseen", None, "a"]),
+            "number": [np.nan, 15.0, 42.0],
+        }
+    )
+    m = AlloyGBMModel(
+        path=str(tmp_path / "model"),
+        name="unknown-category",
+        problem_type="regression",
+        hyperparameters={"n_estimators": 3},
+    )
+    m.fit(
+        X=train,
+        y=train.number,
+        X_val=valid,
+        y_val=pd.Series([0.0, 15.0, 42.0]),
+        num_cpus=1,
+        num_gpus=0,
+    )
+    before = m.predict_proba(valid)
+    assert np.isfinite(before).all()
+    m.save()
+    restored = AlloyGBMModel.load(m.path)
+    np.testing.assert_array_equal(before, restored.predict_proba(valid))
+
+
+def test_missing_global_class_fails_instead_of_silently_reordering(tmp_path):
+    train = pd.DataFrame({"number": np.arange(60, dtype=float)})
+    m = AlloyGBMModel(
+        path=str(tmp_path),
+        name="missing-class",
+        problem_type="multiclass",
+        hyperparameters={"n_estimators": 3},
+    )
+    with pytest.raises(ValueError, match="missing an expected target class"):
+        m.fit(
+            X=train,
+            y=pd.Series(np.arange(60) % 2),
+            X_val=train[:6],
+            y_val=pd.Series(np.arange(6) % 2),
+            num_classes=3,
+            num_cpus=1,
+            num_gpus=0,
+        )
