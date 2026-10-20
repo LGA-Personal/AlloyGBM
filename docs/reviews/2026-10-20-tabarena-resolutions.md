@@ -92,6 +92,9 @@ after verifying the downloaded evidence.
   Python suite **1,251 passed + 64 subtests**.
 - Native fixes: Rust workspace **909 passed / 3 ignored**; integration-tree
   Python suite **1,259 passed + 64 subtests**; deadline-specific tests **27 passed**.
+- Final rebased retirement tree: **1,256 passed + 64 subtests**; Sphinx HTML
+  with warnings treated as errors passed. Three retired benchmark-gate cases
+  explain the difference from the integration tree.
 - Integration: **50** benchmark/cloud contracts (final results recorded in the
   execution evidence), plus **2** upstream registered model/warmup tests.
 - Rust formatting and Clippy with warnings denied; Python Ruff lint/format;
