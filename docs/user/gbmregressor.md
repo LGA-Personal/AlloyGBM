@@ -963,3 +963,14 @@ Scope limits in v0.11.0:
   are not supported.
 
 See [Quickstart](quickstart.md) for an end-to-end example.
+
+### Fit-time resource budget
+
+`fit(X, y, time_limit=seconds)` accepts an optional finite positive wall-clock
+budget. The default, `None`, preserves unrestricted training. The budget includes
+input preparation and both automatic-round probe/refit phases. Training checks it
+at complete-round boundaries and records `stop_reason_="TimeBudgetReached"` when
+it stops with a usable model. A round or finalization can overrun the limit; this
+is a cooperative budget, not a hard real-time deadline. If no round can complete,
+`fit` raises `TimeoutError`. When `eval_set` is supplied, automatic rounds use that
+validation set directly rather than creating another holdout.

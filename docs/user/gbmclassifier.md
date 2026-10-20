@@ -171,3 +171,13 @@ print(model.best_score_)
 
 - Binary cross-entropy and multi-class softmax objectives are supported.
 - No `scale_pos_weight` parameter (use `sample_weight` for class imbalance).
+
+### Fit-time resource budget
+
+`fit(X, y, time_limit=seconds)` supports the same cooperative budget as
+`GBMRegressor.fit`. The limit is finite and positive, or `None` for unrestricted
+training. Checks occur between complete boosting rounds, including all classes
+in a multiclass round; no partial class round is published. Inspect
+`stop_reason_` and `n_estimators_` for the retained model. An individual round can
+overrun the deadline; callers requiring a strict elapsed-time limit must reject
+such a result. An exhausted budget without a usable round raises `TimeoutError`.

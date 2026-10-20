@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .._fit_budget import fit_budget, native_budget_kwargs
+
 import contextlib
 import math
 import time
@@ -1767,6 +1769,53 @@ class _GBMEstimatorCore(
         init_model: "GBMRegressor | None" = None,
         eval_metric: object | None = None,
         factor_exposures: object | None = None,
+        time_limit: float | None = None,
+    ) -> "GBMRegressor":
+        """Fit with an optional positive wall-clock budget in seconds.
+
+        ``time_limit=None`` leaves training unrestricted. The budget includes
+        input preparation and automatic-round phases, and is checked at native
+        complete-round boundaries; an individual round can overrun it.
+        ``eval_set`` is used directly for automatic rounds when supplied.
+        """
+        with fit_budget(time_limit):
+            try:
+                return self._fit_with_auto_rounds(
+                    X, y,
+                    sample_weight=sample_weight,
+                    eval_set=eval_set,
+                    eval_sample_weight=eval_sample_weight,
+                    group=group,
+                    eval_group=eval_group,
+                    eval_time_index=eval_time_index,
+                    categorical_feature_values=categorical_feature_values,
+                    categorical_feature_values_list=categorical_feature_values_list,
+                    time_index=time_index,
+                    init_model=init_model,
+                    eval_metric=eval_metric,
+                    factor_exposures=factor_exposures
+                )
+            except TimeoutError:
+                self._reset_fitted_state()
+                raise
+
+    def _fit_with_auto_rounds(
+        self,
+        X: object,
+        y: object,
+        *,
+        sample_weight: object | None = None,
+        eval_set: tuple[object, object] | None = None,
+        eval_sample_weight: object | None = None,
+        group: object | None = None,
+        eval_group: object | None = None,
+        eval_time_index: object | None = None,
+        categorical_feature_values: object | None = None,
+        categorical_feature_values_list: object | None = None,
+        time_index: object | None = None,
+        init_model: "GBMRegressor | None" = None,
+        eval_metric: object | None = None,
+        factor_exposures: object | None = None,
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state.
 
@@ -2777,6 +2826,7 @@ class _GBMEstimatorCore(
                     ),
                     n_jobs=self.n_jobs,
                     **self._early_stopping_relative_kwargs(),
+                **native_budget_kwargs(),
                     **self._split_noise_kwargs(),
                     **self._multiclass_strategy_kwargs(),
                     **self._leaf_math_kwargs(),
@@ -2945,6 +2995,7 @@ class _GBMEstimatorCore(
                 ),
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
+                **native_budget_kwargs(),
                 **self._split_noise_kwargs(),
                 **self._multiclass_strategy_kwargs(),
                 **self._leaf_math_kwargs(),
@@ -3063,6 +3114,7 @@ class _GBMEstimatorCore(
                 ),
                 n_jobs=self.n_jobs,
                 **self._early_stopping_relative_kwargs(),
+                **native_budget_kwargs(),
                 **self._split_noise_kwargs(),
                 **self._multiclass_strategy_kwargs(),
                 **self._leaf_math_kwargs(),

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Optional fit-time `time_limit` for regression and classification. A monotonic budget includes Python/native preparation and automatic-round phases; native training stops at complete-round boundaries and reports `TimeBudgetReached`. `None` preserves unrestricted model bytes.
+
 - **Prediction intervals: `alloygbm.conformal.LoBoost` and `SplitConformal`.**
   Wrap a fitted regressor, `calibrate(X_cal, y_cal, alpha)` on held-out rows,
   then `predict_interval(X)` returns `(lower, upper)` with finite-sample
