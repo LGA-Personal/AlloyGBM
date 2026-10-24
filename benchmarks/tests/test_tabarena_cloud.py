@@ -85,7 +85,18 @@ def test_verify_requires_sidecar(tmp_path):
 
 
 @pytest.mark.parametrize("fit_exit,report_exit", [(0, 0), (124, 1), (1, 0)])
-@pytest.mark.parametrize("stage", ["smoke", "large", "lite-defaults", "lite-hpo"])
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "smoke",
+        "large",
+        "lite-defaults",
+        "lite-hpo",
+        "modes-smoke",
+        "modes-large",
+        "lite-200",
+    ],
+)
 def test_session_exports_failures_and_preserves_exit_status(
     tmp_path, fit_exit, report_exit, stage
 ):
@@ -144,7 +155,11 @@ esac
     assert "benchmarks.tabarena.cloud export" in (tmp_path / "export.log").read_text()
     bounds = (tmp_path / "timeout.log").read_text()
     assert "--models AlloyGBM" in bounds
-    assert "--profile lite-hpo" in bounds
+    assert (
+        "--profile lite-200"
+        if stage in {"modes-smoke", "modes-large", "lite-200"}
+        else "--profile lite-hpo"
+    ) in bounds
     assert "--threads 16" in bounds
     assert "--published-only" in bounds
     if stage in {"smoke", "large"}:

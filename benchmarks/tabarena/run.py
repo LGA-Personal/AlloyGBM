@@ -103,12 +103,26 @@ def write_event(run_dir, key, status, **details):
     path = run_dir / "jobs.jsonl"
     # Recover a torn final write before appending; otherwise its JSON prefix would
     # corrupt the next complete event. Complete malformed lines still fail loudly.
-    load_latest(run_dir)
     if path.exists():
         with path.open("r+b") as recovery:
-            data = recovery.read()
-            if data and not data.endswith(b"\n"):
-                recovery.truncate(data.rfind(b"\n") + 1)
+            recovery.seek(0, os.SEEK_END)
+            size = recovery.tell()
+            if size:
+                recovery.seek(size - 1)
+            if size and recovery.read(1) != b"\n":
+                # Appends do not rescan a growing 164k-job ledger. Only its torn
+                # tail needs repair; load_latest validates full lines on startup.
+                position = size
+                newline = -1
+                while position and newline < 0:
+                    start = max(0, position - 65536)
+                    recovery.seek(start)
+                    tail = recovery.read(position - start)
+                    found = tail.rfind(b"\n")
+                    if found >= 0:
+                        newline = start + found
+                    position = start
+                recovery.truncate(newline + 1)
                 recovery.flush()
                 os.fsync(recovery.fileno())
     with path.open("a") as stream:
@@ -128,17 +142,12 @@ def load_latest(run_dir):
     path = run_dir / "jobs.jsonl"
     if path.exists():
         # A process can die during a final append; only the incomplete final line is ignored.
-        lines = path.read_text().splitlines(keepends=True)
-        for i, line in enumerate(lines):
-            if i == len(lines) - 1 and not line.endswith("\n"):
-                break
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                if i == len(lines) - 1 and not line.endswith("\n"):
+        with path.open() as stream:
+            for line in stream:
+                if not line.endswith("\n"):
                     break
-                raise
-            out[row["key"]] = row
+                row = json.loads(line)
+                out[row["key"]] = row
     return out
 
 
@@ -195,6 +204,10 @@ def run_experiments(
     plan_only=False,
     stage_datasets=None,
     stage_candidates=None,
+    checkpoint_jobs=50,
+    checkpoint_seconds=900,
+    min_free_gib=20,
+    backup_max_age_seconds=0,
 ):
     from benchmarks.tabarena.prepare_upstream import UPSTREAM_REV, verify
     from benchmarks.tabarena.provenance import (
@@ -208,6 +221,8 @@ def run_experiments(
     selected = select_stage_jobs(
         resolved, dataset_names=stage_datasets, candidate_limit=stage_candidates
     )
+    if checkpoint_jobs < 1 or checkpoint_seconds < 1 or min_free_gib < 1:
+        raise ValueError("checkpoint intervals and disk reserve must be positive")
     selected_keys = {fingerprint(j.to_dict()) for j in selected}
 
     provenance = collect_provenance(ROOT, receipt_path)
@@ -275,6 +290,8 @@ def run_experiments(
         cache = CacheConfig.from_root(ROOT / ".cache/tabarena/cache")
         resolved.context.cache_config = cache
         latest = load_latest(run_dir)
+        checkpoint_at = time.monotonic()
+        since_checkpoint = 0
         metadata = resolved.context.metadata_for_jobs(resolved.jobs)
         for index, (job, meta) in enumerate(zip(resolved.jobs, metadata), 1):
             key = fingerprint(job.to_dict())
@@ -303,6 +320,26 @@ def run_experiments(
                     raise ValueError("completed result checksum differs: " + key)
                 validate_result(cacher.load_cache())
                 continue
+            import shutil
+
+            from benchmarks.tabarena.backup import require_recent_backup
+
+            require_recent_backup(run_dir, maximum_age=backup_max_age_seconds)
+
+            if shutil.disk_usage(run_dir).free < min_free_gib * 1024**3:
+                raise RuntimeError(
+                    "disk reserve reached; stop and preserve evidence before continuing"
+                )
+            if exists:
+                from benchmarks.tabarena.artifacts import result_cacher
+
+                # A killed cache writer can leave a partial pickle. Preserve it
+                # for diagnosis, but never let upstream treat it as a cache hit.
+                cache_dir = Path(result_cacher(run_dir, job, meta).cache_file).parent
+                quarantine = run_dir / "interrupted_caches" / key / str(time.time_ns())
+                quarantine.parent.mkdir(parents=True, exist_ok=True)
+                cache_dir.rename(quarantine)
+                exists = False
             print(
                 f"[{index}/{len(resolved.jobs)}] {job.task.dataset} {job.experiment.name}",
                 flush=True,
@@ -343,6 +380,11 @@ def run_experiments(
                 )
                 print(f"Failed: {exc}", file=sys.stderr, flush=True)
             else:
+                from benchmarks.tabarena.checkpoints import durable_file
+
+                for path in Path(cacher.cache_file).parent.rglob("*"):
+                    if path.is_file():
+                        durable_file(path)
                 write_event(
                     run_dir,
                     key,
@@ -352,7 +394,22 @@ def run_experiments(
                     elapsed_seconds=time.monotonic() - started,
                     cache_hit=exists,
                     result_sha256=file_hash(cacher.cache_file),
+                    cache_path=str(Path(cacher.cache_file).relative_to(run_dir)),
                 )
+            since_checkpoint += 1
+            if (
+                since_checkpoint >= checkpoint_jobs
+                or time.monotonic() - checkpoint_at >= checkpoint_seconds
+            ):
+                from benchmarks.tabarena.checkpoints import create_checkpoint
+
+                checkpoint = create_checkpoint(run_dir)
+                print(f"Durable checkpoint: {checkpoint}", flush=True)
+                since_checkpoint, checkpoint_at = 0, time.monotonic()
+        from benchmarks.tabarena.checkpoints import create_checkpoint
+
+        if (run_dir / "jobs.jsonl").exists():
+            create_checkpoint(run_dir)
         return run_dir
 
 
@@ -362,10 +419,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--profile",
-        choices=["smoke", "lite-defaults", "lite-hpo", "full"],
+        choices=["smoke", "lite-defaults", "lite-hpo", "lite-200", "full"],
         default="smoke",
     )
     parser.add_argument("--threads", type=int)
+    parser.add_argument("--search-space", choices=["v1", "modes-v2"], default="v1")
+    parser.add_argument("--checkpoint-jobs", type=int, default=50)
+    parser.add_argument("--checkpoint-seconds", type=int, default=900)
+    parser.add_argument("--min-free-gib", type=int, default=20)
+    parser.add_argument(
+        "--backup-max-age-seconds",
+        type=int,
+        default=0,
+        help="Stop before another fit if verified off-host backup is stale; 0 disables the guard",
+    )
     parser.add_argument(
         "--execution",
         choices=["local", "upstream"],
@@ -430,6 +497,7 @@ def main():
         tuple(args.datasets) if args.datasets else None,
         tuple(args.models),
         args.execution,
+        args.search_space,
     )
     directory = run_experiments(
         resolve_run(spec),
@@ -440,6 +508,10 @@ def main():
         plan_only=args.plan_only,
         stage_datasets=args.stage_datasets,
         stage_candidates=args.stage_candidates,
+        checkpoint_jobs=args.checkpoint_jobs,
+        checkpoint_seconds=args.checkpoint_seconds,
+        min_free_gib=args.min_free_gib,
+        backup_max_age_seconds=args.backup_max_age_seconds,
     )
     print(directory, flush=True)
     if any(r["status"] == "failed" for r in load_latest(directory).values()):

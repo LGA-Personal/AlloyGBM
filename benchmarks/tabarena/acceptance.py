@@ -1,4 +1,4 @@
-"""Audit full Lite evidence before merging the separate legacy-retirement PR."""
+"""Audit complete Lite or full official scope, preserving failure explanations."""
 
 from __future__ import annotations
 
@@ -15,17 +15,21 @@ def validate_scope_and_outcomes(manifest, jobs, latest, explanations):
     from benchmarks.tabarena.protocol import MODELS
 
     models = spec.get("models", [])
+    full = spec["profile"] == "full"
+    task_count = 816 if full else 51
+    candidates = 201 if full or spec["profile"] == "lite-200" else 26
     if (
-        spec["profile"] != "lite-hpo"
+        spec["profile"] not in {"lite-hpo", "lite-200", "full"}
         or spec.get("dataset_names")
         or "AlloyGBM" not in models
         or set(models) - set(MODELS)
         or len(models) != len(set(models))
-        or len(manifest["tasks"]) != 51
-        or len(jobs) != 51 * sum(1 if m == "RandomForest" else 26 for m in models)
+        or len(manifest["tasks"]) != task_count
+        or len(jobs)
+        != task_count * sum(1 if m == "RandomForest" else candidates for m in models)
     ):
         raise ValueError(
-            "acceptance requires the complete 51-dataset AlloyGBM Lite HPO run (default plus 25 samples); peers are optional"
+            "acceptance requires the complete 51-dataset AlloyGBM Lite HPO run (51 splits, default plus 25 samples) or Lite-200 (51 splits, default plus 200 samples) or full run (816 splits, default plus 200 samples); peers are optional"
         )
     from benchmarks.tabarena.resources import validate_acceptance_resources
 
@@ -91,9 +95,7 @@ def audit_acceptance(run_dir, explanations_path=None):
         )
         resolved = resolve_run(RunSpec(**manifest["spec"]))
         if [job.to_dict() for job in resolved.jobs] != jobs:
-            raise ValueError(
-                "recorded job plan differs from the pinned standard Lite plan"
-            )
+            raise ValueError("recorded job plan differs from the pinned standard plan")
         paths = completed_result_paths(run_dir, resolved)
         report = run_dir / "report-published"
         summary = json.loads((report / "summary.json").read_text())
@@ -115,6 +117,8 @@ def audit_acceptance(run_dir, explanations_path=None):
             "expected_jobs": len(jobs),
             "completed_jobs": len(paths),
             "failed_jobs": len(failures),
+            "profile": manifest["spec"]["profile"],
+            "search_space": manifest["spec"].get("search_space", "v1"),
             "failure_explanations": explanations,
             "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
             "leaderboard_sha256": file_hash(report / "tabarena_leaderboard.csv"),

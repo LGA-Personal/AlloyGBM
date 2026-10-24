@@ -7,11 +7,16 @@ hours=${2:?Specify a positive whole-number wall-clock cap in hours}
 [[ "$hours" =~ ^[1-9][0-9]*$ ]] || { echo 'MAX_HOURS must be positive' >&2; exit 1; }
 profile=lite-hpo
 stage_args=()
+search_space=v1
+backup_age=0
 case "$stage" in
   smoke) stage_args=(--stage-datasets blood-transfusion-service-center QSAR_fish_toxicity anneal --stage-candidates 1);;
   large) stage_args=(--stage-datasets APSFailure kddcup09_appetency --stage-candidates 1);;
   lite-defaults) stage_args=(--stage-candidates 0);;
   lite-hpo) ;;
+  modes-smoke) profile=lite-200; search_space=modes-v2; backup_age=3600; stage_args=(--stage-datasets blood-transfusion-service-center QSAR_fish_toxicity anneal --stage-candidates 40);;
+  modes-large) profile=lite-200; search_space=modes-v2; backup_age=3600; stage_args=(--stage-datasets APSFailure kddcup09_appetency --stage-candidates 40);;
+  lite-200) profile=lite-200; search_space=modes-v2; backup_age=3600;;
   full) profile=full;;
   *) echo 'Unknown stage' >&2; exit 1;;
 esac
@@ -19,7 +24,7 @@ python=.venv-tabarena/bin/python
 "$python" -m benchmarks.tabarena.cloud preflight > .cache/tabarena/cloud-preflight.json
 session=$(mktemp -d "${ALLOYGBM_BENCH_SESSION_ROOT:-$HOME}/alloygbm-session-XXXXXXXX")
 output_root="$PWD/benchmarks/results/tabarena/cloud-$profile"
-runner=("$python" -m benchmarks.tabarena.run --profile "$profile" --execution upstream --threads 16 --models AlloyGBM --output-root "$output_root")
+runner=("$python" -m benchmarks.tabarena.run --profile "$profile" --execution upstream --threads 16 --models AlloyGBM --search-space "$search_space" --backup-max-age-seconds "$backup_age" --output-root "$output_root")
 if [[ ${#stage_args[@]} -gt 0 ]]; then
   runner+=("${stage_args[@]}")
 fi

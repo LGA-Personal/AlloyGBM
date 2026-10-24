@@ -7,7 +7,13 @@ from dataclasses import dataclass
 SMOKE = ("blood-transfusion-service-center", "QSAR_fish_toxicity", "anneal")
 MODELS = ("AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest")
 DEFAULT_MODELS = ("AlloyGBM",)
-COUNTS = {"smoke": 1, "lite-defaults": 0, "lite-hpo": 25, "full": "all"}
+COUNTS = {
+    "smoke": 1,
+    "lite-defaults": 0,
+    "lite-hpo": 25,
+    "lite-200": 200,
+    "full": "all",
+}
 
 
 @dataclass(frozen=True)
@@ -17,8 +23,11 @@ class RunSpec:
     dataset_names: tuple[str, ...] | None = None
     models: tuple[str, ...] = DEFAULT_MODELS
     execution: str = "upstream"
+    search_space: str = "v1"
 
     def __post_init__(self):
+        if self.search_space not in ("v1", "modes-v2"):
+            raise ValueError("unknown search space")
         if self.execution not in ("local", "upstream"):
             raise ValueError("unknown execution mode")
         if self.profile not in COUNTS:
@@ -51,9 +60,16 @@ def resolve_run(spec: RunSpec) -> ResolvedRun:
 
     # No custom splitting, preprocessing, fold-fitting, stopping, or scoring settings.
     context = TabArenaContext(backend="native" if spec.execution == "local" else "ray")
+    from tabarena.models.alloygbm.hpo import gen_alloygbm_modes
+
     bundle = TabArenaV0pt1ExperimentBundle(
         models=[
-            (name, 0 if name == "RandomForest" else COUNTS[spec.profile])
+            (
+                gen_alloygbm_modes
+                if name == "AlloyGBM" and spec.search_space == "modes-v2"
+                else name,
+                0 if name == "RandomForest" else COUNTS[spec.profile],
+            )
             for name in spec.models
         ]
     )

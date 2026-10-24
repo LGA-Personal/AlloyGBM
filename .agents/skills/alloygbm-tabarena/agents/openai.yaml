@@ -1,0 +1,4 @@
+interface:
+  display_name: "AlloyGBM TabArena"
+  short_description: "Run and recover standard AlloyGBM benchmarks"
+  default_prompt: "Use $alloygbm-tabarena to run a cost-capped AlloyGBM benchmark with verified backups."

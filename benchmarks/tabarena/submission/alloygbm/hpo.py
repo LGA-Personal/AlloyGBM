@@ -44,3 +44,37 @@ def sample_alloy_configs(n: int, seed: int = 1234) -> list[dict]:
 gen_alloygbm = CustomAGConfigGenerator(
     model_cls=AlloyGBMModel, manual_configs=[{}], search_space_func=sample_alloy_configs
 )
+
+
+def sample_alloy_modes_configs(n: int, seed: int = 1234) -> list[dict]:
+    """Author space v2: v1 prefix, then six legal mode combinations.
+
+    Frozen at the user's request to evaluate special modes, after the v1 Lite
+    evaluation. This is a new search-space version, not a blind replication.
+    Separate RNGs preserve the v1 hyperparameter stream and its first 25 jobs.
+    """
+    from ConfigSpace import Categorical, ConfigurationSpace
+
+    configs = sample_alloy_configs(n, seed)
+    modes = ConfigurationSpace(
+        seed=seed,
+        space=[
+            Categorical("training_mode", ["manual", "morph"]),
+            Categorical("leaf_kind", ["constant", "dro", "linear"]),
+        ],
+    )
+    for config in configs[25:]:
+        mode = dict(modes.sample_configuration())
+        config["training_mode"] = mode["training_mode"]
+        config["leaf_model"] = "linear" if mode["leaf_kind"] == "linear" else "constant"
+        config["leaf_solver"] = "dro" if mode["leaf_kind"] == "dro" else "standard"
+        # Other mode-specific settings retain public defaults. In particular,
+        # PL uses the existing stable ridge floor when lambda_l2 is zero.
+    return configs
+
+
+gen_alloygbm_modes = CustomAGConfigGenerator(
+    model_cls=AlloyGBMModel,
+    manual_configs=[{}],
+    search_space_func=sample_alloy_modes_configs,
+)

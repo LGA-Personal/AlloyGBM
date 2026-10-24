@@ -155,10 +155,13 @@ Follow [DigitalOcean's destruction instructions](https://docs.digitalocean.com/p
 
 ## Validation boundary
 
-The archive round trip, corruption checks, resource gate and shell syntax are
-tested locally. A fresh Ubuntu installation and full Linux Ray pilot still need
-to be executed on the selected droplet before committing money to Lite HPO.
-Local macOS smoke results cannot certify that deployment or satisfy acceptance.
+The original Ubuntu deployment, official Linux Ray pilots and all 1,326 Lite
+jobs completed successfully, including 10,608 child fits, mechanical acceptance,
+resource/native-thread audits and verified off-host export. The VM was deleted
+after verification (about $1.61 allocation). Each new environment and search
+space still needs its own pilot. See [OPERATIONS.md](OPERATIONS.md) for the
+200-candidate extension, allocation deadline and incremental backup/restore workflow.
+Local macOS smoke results cannot certify a new Linux deployment.
 
 ## Cost control and parallelism
 

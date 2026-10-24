@@ -255,6 +255,12 @@ def _write_report(run_dir, *, published_context=False, published_only=False):
         "report_code_sha256": file_hash(Path(__file__)),
         "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
         "profile": manifest["spec"]["profile"],
+        "search_space": manifest["spec"].get("search_space", "v1"),
+        "search_space_note": "modes-v2 is an author-requested expansion after v1 Lite evaluation; first 25 candidates retain v1, later candidates randomly toggle six legal Morph/DRO/PL combinations. Mode-specific parameters keep public defaults. This is not a blind replication of v1.",
+        "imported_fit_count": sum(
+            bool(row.get("imported")) for row in load_latest(run_dir).values()
+        ),
+        "fit_origin_note": "Imported fits retain original extension/hardware provenance under origins; timing comparisons may span hosts. Published timings also use source hardware.",
         "sampled_candidates_per_booster": COUNTS[manifest["spec"]["profile"]],
         "expected_jobs": manifest["expected_jobs"],
         "outcomes": coverage.status.value_counts().to_dict(),
