@@ -5,7 +5,7 @@ from benchmarks.tabarena.provenance import fingerprint
 
 
 def test_smoke_is_never_lite_acceptance():
-    with pytest.raises(ValueError, match="full four-method"):
+    with pytest.raises(ValueError, match="51-dataset"):
         validate_scope_and_outcomes({"spec": {"profile": "smoke"}}, [], {}, {})
 
 
@@ -13,7 +13,7 @@ def test_all_jobs_and_failure_explanations_are_required():
     manifest = {
         "spec": {
             "profile": "lite-hpo",
-            "models": ["AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest"],
+            "models": ["AlloyGBM"],
             "execution": "upstream",
             "num_cpus": None,
         },
@@ -21,11 +21,11 @@ def test_all_jobs_and_failure_explanations_are_required():
         "runtime": {
             "platform": "Linux-test",
             "machine": "x86_64",
-            "hardware": {"effective_cpus": 16, "memory_total_bytes": 64 * 1024**3},
+            "hardware": {"effective_cpus": 16, "memory_total_bytes": 31 * 1024**3},
             "thread_environment": {},
         },
     }
-    jobs = [{"job": i} for i in range(5355)]
+    jobs = [{"job": i} for i in range(1326)]
     rows = {fingerprint(j): {"status": "completed"} for j in jobs}
     assert not validate_scope_and_outcomes(manifest, jobs, rows, {})
     key = fingerprint(jobs[0])
@@ -55,7 +55,7 @@ def test_acceptance_rejects_development_execution(override):
     runtime = {
         "platform": "Linux-test",
         "machine": "x86_64",
-        "hardware": {"effective_cpus": 16, "memory_total_bytes": 64 * 1024**3},
+        "hardware": {"effective_cpus": 16, "memory_total_bytes": 31 * 1024**3},
         "thread_environment": {},
     }
     with pytest.raises(ValueError, match="acceptance resources"):
@@ -93,9 +93,14 @@ def test_acceptance_requires_standard_context_bound_to_same_ledger():
         "run_fingerprint": "fit",
         "ledger_sha256": "ledger",
         "report_code_sha256": "processor",
-        "local_pool_calibration": "[Local] RF (default)",
+        "local_pool_calibration": None,
     }
-    sources = {**summary, "local_entrants": ["[Local] AlloyGBM"]}
+    sources = {
+        **summary,
+        "local_entrants": ["[Local] AlloyGBM"],
+        "calibration_method": "RF (default)",
+        "fillna_method": "RF (default)",
+    }
     validate_report_evidence(manifest, summary, sources, "ledger")
     with pytest.raises(ValueError, match="standard calibration"):
         validate_report_evidence(
@@ -116,7 +121,7 @@ def test_acceptance_requires_standard_context_bound_to_same_ledger():
             {**sources, "local_entrants": ["[Local] AlloyGBM", "[Local] LightGBM"]},
             "ledger",
         )
-    with pytest.raises(ValueError, match="local RF"):
+    with pytest.raises(ValueError, match="published RF"):
         validate_report_evidence(
-            manifest, {**summary, "local_pool_calibration": None}, sources, "ledger"
+            manifest, summary, {**sources, "fillna_method": None}, "ledger"
         )

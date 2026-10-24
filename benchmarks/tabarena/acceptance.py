@@ -12,16 +12,20 @@ from benchmarks.tabarena.run import exclusive_run, load_latest
 
 def validate_scope_and_outcomes(manifest, jobs, latest, explanations):
     spec = manifest["spec"]
+    from benchmarks.tabarena.protocol import MODELS
+
+    models = spec.get("models", [])
     if (
         spec["profile"] != "lite-hpo"
         or spec.get("dataset_names")
-        or set(spec["models"])
-        != {"AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest"}
+        or "AlloyGBM" not in models
+        or set(models) - set(MODELS)
+        or len(models) != len(set(models))
         or len(manifest["tasks"]) != 51
-        or len(jobs) != 5355
+        or len(jobs) != 51 * sum(1 if m == "RandomForest" else 26 for m in models)
     ):
         raise ValueError(
-            "acceptance requires the full four-method comparison plus RF calibration, 51-dataset Lite HPO run"
+            "acceptance requires the complete 51-dataset AlloyGBM Lite HPO run (default plus 25 samples); peers are optional"
         )
     from benchmarks.tabarena.resources import validate_acceptance_resources
 
@@ -48,8 +52,11 @@ def validate_report_evidence(manifest, summary, sources, ledger_hash):
         raise ValueError(
             "acceptance requires --published-context with standard calibration/fallback"
         )
-    if summary.get("local_pool_calibration") != "[Local] RF (default)":
-        raise ValueError("acceptance requires local RF calibration/fallback")
+    if (
+        sources.get("calibration_method") != "RF (default)"
+        or sources.get("fillna_method") != "RF (default)"
+    ):
+        raise ValueError("acceptance requires published RF calibration/fallback")
     if sources.get("local_entrants") != ["[Local] AlloyGBM"]:
         raise ValueError(
             "published comparison must add only AlloyGBM to the upstream pool"
@@ -88,7 +95,7 @@ def audit_acceptance(run_dir, explanations_path=None):
                 "recorded job plan differs from the pinned standard Lite plan"
             )
         paths = completed_result_paths(run_dir, resolved)
-        report = run_dir / "report-local"
+        report = run_dir / "report-published"
         summary = json.loads((report / "summary.json").read_text())
         sources = json.loads((run_dir / "report-published/sources.json").read_text())
         validate_report_evidence(
@@ -110,7 +117,7 @@ def audit_acceptance(run_dir, explanations_path=None):
             "failed_jobs": len(failures),
             "failure_explanations": explanations,
             "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
-            "leaderboard_sha256": file_hash(report / "leaderboard.csv"),
+            "leaderboard_sha256": file_hash(report / "tabarena_leaderboard.csv"),
             "published_leaderboard_sha256": file_hash(
                 run_dir / "report-published/tabarena_leaderboard.csv"
             ),

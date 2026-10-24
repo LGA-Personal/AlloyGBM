@@ -3,6 +3,67 @@ import pandas as pd
 from benchmarks.tabarena.report import write_coverage
 
 
+def test_published_only_report_keeps_failed_tasks_without_local_rf(
+    tmp_path, monkeypatch
+):
+    import json
+    from types import SimpleNamespace
+
+    from benchmarks.tabarena import protocol, report
+    from benchmarks.tabarena.run import write_event
+
+    manifest = {
+        "spec": {"profile": "lite-hpo", "execution": "local", "models": ["AlloyGBM"]},
+        "fingerprint": "fit",
+        "expected_jobs": 2,
+        "tasks": ["easy", "hard"],
+        "provenance": {"source_commit": "source"},
+        "upstream": "pin",
+    }
+    (tmp_path / "run_manifest.json").write_text(json.dumps(manifest))
+    write_event(tmp_path, "a", "completed")
+    write_event(tmp_path, "b", "failed", error="examined timeout")
+    methods = [SimpleNamespace(method="[Local] AlloyGBM")]
+    monkeypatch.setattr(report, "process_standard_results", lambda _: methods)
+    planned = object()
+    monkeypatch.setattr(
+        protocol,
+        "resolve_run",
+        lambda _: SimpleNamespace(
+            jobs=[],
+            context=SimpleNamespace(
+                task_metadata_collection=SimpleNamespace(
+                    subset_to_jobs=lambda _: planned
+                )
+            ),
+        ),
+    )
+
+    class Context:
+        calibration_method = fillna_method = "RF (default)"
+        method_metadata_collection = SimpleNamespace(method_metadata_lst=[])
+
+        def compare(self, *, output_dir):
+            output_dir.mkdir()
+            frame = pd.DataFrame({"method": ["[Local] AlloyGBM"], "elo": [1000]})
+            frame.to_csv(output_dir / "tabarena_leaderboard.csv", index=False)
+            return frame
+
+    def comparison(methods, backend, *, published=False, task_metadata=None, **kwargs):
+        assert published and task_metadata is planned
+        return Context()
+
+    monkeypatch.setattr(report, "comparison_context", comparison)
+    output = report.write_report(tmp_path, published_only=True)
+    assert output == tmp_path / "report-published"
+    assert not (tmp_path / "report-local").exists()
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["partial"] and summary["outcomes"] == {"completed": 1, "failed": 1}
+    sources = json.loads((output / "sources.json").read_text())
+    assert sources["fillna_method"] == sources["calibration_method"] == "RF (default)"
+    assert sources["local_entrants"] == ["[Local] AlloyGBM"]
+
+
 def test_comparison_uses_local_rf_and_only_adds_alloy_to_published_pool(monkeypatch):
     from types import SimpleNamespace
 

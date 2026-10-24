@@ -59,3 +59,31 @@ def test_worker_failure_retains_actual_traceback(tmp_path):
     log = (tmp_path / "job_logs/invalid.log").read_text()
     assert "JSONDecodeError" in log
     assert "attempt_started" in log
+
+
+def test_reused_upstream_context_keeps_native_logs_and_failure_traceback(tmp_path):
+    import os
+    from types import SimpleNamespace
+
+    from benchmarks.tabarena.run import execute_upstream_job
+
+    class Context:
+        calls = 0
+
+        def run_jobs(self, jobs, **kwargs):
+            self.calls += 1
+            os.write(1, b"native stdout\n")
+            os.write(2, b"native stderr\n")
+            if self.calls == 2:
+                raise RuntimeError("second-job-failure")
+            return [{}]
+
+    context = Context()
+    job = SimpleNamespace(to_dict=lambda: {"job": 1})
+    path = execute_upstream_job(context, job, tmp_path)
+    assert "native stdout" in path.read_text()
+    assert "native stderr" in path.read_text()
+    with pytest.raises(RuntimeError, match="second-job-failure"):
+        execute_upstream_job(context, job, tmp_path)
+    assert path.read_text().count("attempt_started") == 2
+    assert "second-job-failure" in path.read_text()

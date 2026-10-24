@@ -110,3 +110,40 @@ after verifying the downloaded evidence.
   Standard local and published reports were generated from caches. This reduced
   macOS run is deliberately ineligible for retirement acceptance and says nothing
   about full-suite competitive rank.
+
+## 2026-10-23: affordable AlloyGBM-only Lite execution
+
+The author approved a dedicated DigitalOcean `c-16` host (16 vCPU, 32 GB RAM,
+200 GB SSD; API quote $0.50/hour) and the official upstream seed schedule. The
+previous 64-GB gate and mandatory local peer HPO were project choices, not
+TabArena submission requirements. Acceptance now requires all 51 AlloyGBM Lite
+tasks with default + 25 sampled configurations (1,326 jobs / 10,608 children),
+standard published RF calibration/fallback, all three variants, terminal job
+coverage and examined failure explanations. The separate retirement PR remains
+gated; these preparation tests do not satisfy Lite acceptance.
+
+- Default scope is AlloyGBM only; peer reruns remain optional for matched timing.
+- Published-only reporting no longer depends on local RF success. Planned failed
+  tasks remain in the upstream comparison, and partial coverage stays explicit.
+- Linux uses the standard context in one process, reusing Ray across outer jobs.
+  Per-job native/Python diagnostics remain captured. Local/macOS diagnostics
+  retain fresh-process isolation.
+- Stage selectors execute smoke, large-data and default checks from one frozen
+  full Lite plan, so HPO reuses their completed, checksum-verified results.
+- Sessions select AlloyGBM, use the full 16-CPU budget, capture `vmstat`, preserve
+  stage logs, apply explicit time bounds, and export recoverable evidence.
+
+Validation before provisioning: Rust workspace 909 passed / 3 ignored before
+and after; library Python suite 1,259 passed + 64 subtests before and after;
+62 benchmark/cloud contracts. Ruff lint/format, shell syntax and patch whitespace
+checks pass. The pinned upstream registration/shared-code check passes.
+
+Real local checks: two configurations of the official binary smoke task fitted
+16 total children through one reused upstream Ray context. Logs recorded two
+parallel workers with one CPU each within the two-CPU diagnostic budget. A
+separate real staged CLI run recorded the full 51-task / 1,326-job plan, fitted
+only two selected jobs, and resumed with the same four-event ledger (no refits).
+Published-only reporting generated all three variants and a 108-row published
+leaderboard, retaining published RF calibration/fallback and marking 1,324 jobs
+pending. These are workflow checks, not competitive results. A fresh Linux
+bootstrap and 16-CPU smoke/large-data pilot remain required before full Lite.

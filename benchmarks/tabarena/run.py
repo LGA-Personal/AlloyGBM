@@ -6,14 +6,76 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+import traceback
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def select_stage_jobs(resolved, *, dataset_names=None, candidate_limit=None):
+    """Execute a subset of an immutable full plan so later stages reuse its caches."""
+    if candidate_limit is not None and (
+        isinstance(candidate_limit, bool)
+        or not isinstance(candidate_limit, int)
+        or candidate_limit < 0
+    ):
+        raise ValueError("stage candidate limit must be nonnegative")
+    available = {j.task.dataset for j in resolved.jobs}
+    if dataset_names and set(dataset_names) - available:
+        raise ValueError("stage dataset is outside the recorded plan")
+    jobs = []
+    for job in resolved.jobs:
+        if dataset_names and job.task.dataset not in dataset_names:
+            continue
+        if candidate_limit is not None:
+            match = re.search(r"_r(\d+)_", job.experiment.name)
+            if match and int(match[1]) > candidate_limit:
+                continue
+        jobs.append(job)
+    return jobs
+
+
+def execute_upstream_job(context, job, run_dir):
+    """Reuse Linux's Ray runtime; capture Python/native diagnostics per job."""
+    from benchmarks.tabarena.provenance import fingerprint
+
+    log = run_dir / "job_logs" / (fingerprint(job.to_dict()) + ".log")
+    log.parent.mkdir(exist_ok=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved = [os.dup(1), os.dup(2)]
+    try:
+        with log.open("a") as stream:
+            stream.write("\n" + json.dumps({"attempt_started": time.time()}) + "\n")
+            stream.flush()
+            os.dup2(stream.fileno(), 1)
+            os.dup2(stream.fileno(), 2)
+            try:
+                results = context.run_jobs(
+                    [job],
+                    expname=run_dir,
+                    register=False,
+                    debug_mode=False,
+                )
+                if not results:
+                    raise RuntimeError("upstream returned no result; see job log")
+            except BaseException:
+                traceback.print_exc(file=stream)
+                raise
+            finally:
+                sys.stdout.flush()
+                sys.stderr.flush()
+    finally:
+        for fd, original in zip((1, 2), saved):
+            os.dup2(original, fd)
+            os.close(original)
+    return log
 
 
 def apply_thread_limits(num_cpus):
@@ -131,6 +193,8 @@ def run_experiments(
     resume=None,
     retry_failed=False,
     plan_only=False,
+    stage_datasets=None,
+    stage_candidates=None,
 ):
     from benchmarks.tabarena.prepare_upstream import UPSTREAM_REV, verify
     from benchmarks.tabarena.provenance import (
@@ -140,6 +204,11 @@ def run_experiments(
     )
     from tabarena.benchmark.experiment.experiment_runner_api import job_cache_exists
     from tabarena.caching import CacheConfig
+
+    selected = select_stage_jobs(
+        resolved, dataset_names=stage_datasets, candidate_limit=stage_candidates
+    )
+    selected_keys = {fingerprint(j.to_dict()) for j in selected}
 
     provenance = collect_provenance(ROOT, receipt_path)
     registration = verify(ROOT / ".cache/tabarena/upstream")
@@ -209,6 +278,8 @@ def run_experiments(
         metadata = resolved.context.metadata_for_jobs(resolved.jobs)
         for index, (job, meta) in enumerate(zip(resolved.jobs, metadata), 1):
             key = fingerprint(job.to_dict())
+            if key not in selected_keys:
+                continue
             previous = latest.get(key, {})
             if previous.get("status") == "failed" and not retry_failed:
                 continue
@@ -249,7 +320,12 @@ def run_experiments(
                 job_file = run_dir / "job_specs" / (key + ".json")
                 job_file.parent.mkdir(exist_ok=True)
                 job_file.write_text(json.dumps(job.to_dict(), indent=2))
-                execute_worker(job_file, run_dir, resolved.spec.execution)
+                if resolved.spec.execution == "upstream" and sys.platform.startswith(
+                    "linux"
+                ):
+                    execute_upstream_job(resolved.context, job, run_dir)
+                else:
+                    execute_worker(job_file, run_dir, resolved.spec.execution)
                 from benchmarks.tabarena.artifacts import result_cacher, validate_result
 
                 cacher = result_cacher(run_dir, job, meta)
@@ -281,6 +357,8 @@ def run_experiments(
 
 
 def main():
+    from benchmarks.tabarena.protocol import DEFAULT_MODELS
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--profile",
@@ -298,7 +376,7 @@ def main():
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest"],
+        default=list(DEFAULT_MODELS),
     )
     parser.add_argument(
         "--output-root", type=Path, default=ROOT / "benchmarks/results/tabarena"
@@ -311,6 +389,16 @@ def main():
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument(
+        "--stage-datasets",
+        nargs="+",
+        help="Execute only these planned datasets; preserve full run identity",
+    )
+    parser.add_argument(
+        "--stage-candidates",
+        type=int,
+        help="Execute default plus up to N planned samples; 0 executes defaults only",
+    )
     parser.add_argument("--worker-job-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-run-dir", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -350,6 +438,8 @@ def main():
         resume=args.resume,
         retry_failed=args.retry_failed,
         plan_only=args.plan_only,
+        stage_datasets=args.stage_datasets,
+        stage_candidates=args.stage_candidates,
     )
     print(directory, flush=True)
     if any(r["status"] == "failed" for r in load_latest(directory).values()):
