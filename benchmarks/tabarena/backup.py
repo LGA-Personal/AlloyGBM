@@ -21,6 +21,25 @@ def verify_local_chain(directory, *, now=None):
         if index_path.exists()
         else {"sequence": 0, "sha256": None, "run_fingerprint": None}
     )
+    # A cached verification index must not bless a chain whose older files
+    # were subsequently moved/deleted. Check presence and receipt linkage on
+    # every acknowledgement without rehashing all archived predictions each time.
+    previous = None
+    for sequence in range(1, index["sequence"] + 1):
+        archive = directory / f"{sequence:06d}.tar.gz"
+        sidecar = Path(str(archive) + ".json")
+        if not archive.is_file() or not sidecar.is_file():
+            raise ValueError("previously verified backup segment is missing")
+        known = json.loads(sidecar.read_text())
+        if (
+            known["sequence"] != sequence
+            or known["previous_sha256"] != previous
+            or known["run_fingerprint"] != index["run_fingerprint"]
+        ):
+            raise ValueError("previously verified backup chain differs")
+        previous = known["sha256"]
+    if previous != index["sha256"]:
+        raise ValueError("previously verified backup receipt differs from index")
     for path in sorted(directory.glob("*.tar.gz")):
         sidecar = Path(str(path) + ".json")
         if not sidecar.exists():

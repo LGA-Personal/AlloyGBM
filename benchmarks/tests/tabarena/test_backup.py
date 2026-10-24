@@ -47,3 +47,18 @@ def test_corrupt_backup_never_advances_receipt(tmp_path):
     with pytest.raises(ValueError, match="checksum"):
         verify_local_chain(run / "checkpoints")
     assert not (run / "checkpoints/verified-index.json").exists()
+
+
+def test_previously_verified_backup_cannot_acknowledge_a_missing_old_segment(tmp_path):
+    from benchmarks.tabarena.backup import verify_local_chain
+    from benchmarks.tabarena.checkpoints import create_checkpoint
+
+    run = fixture_run(tmp_path)
+    complete(run, "first")
+    first = create_checkpoint(run)
+    complete(run, "second")
+    create_checkpoint(run)
+    verify_local_chain(run / "checkpoints", now=100)
+    first.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        verify_local_chain(run / "checkpoints", now=200)
