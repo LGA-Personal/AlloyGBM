@@ -7,23 +7,26 @@ creates a cloud resource or stores a DigitalOcean token.
 ## Create only when ready to run
 
 In the [DigitalOcean create panel](https://cloud.digitalocean.com/droplets/new),
-choose Ubuntu **24.04 LTS x86_64**, a **dedicated CPU General Purpose** plan with
-**16 vCPUs / 64 GB RAM**, and at least **150 GB disk** (200 GB is preferable for
-dependencies, caches and an export copy). Choose an available nearby region and
+choose Ubuntu **24.04 LTS x86_64**, the **dedicated CPU CPU-Optimized `c-16`** plan with
+**16 Intel vCPUs / 32 GB RAM / 200 GB SSD / 7 TB transfer**. On 2026-10-23, the
+provider API lists $336/month or **$0.50/hour** for this exact plan; verify again
+before provisioning. Allow disk space for dependencies, caches and an export copy. Choose an available nearby region and
 add your SSH public key. Do not enable backups, snapshots or separate volumes
 for this disposable workflow. Check the displayed current rate before creating.
 
 Record the droplet **ID, name, public IP, rate and creation time** locally. The
 project acceptance policy requires upstream Ray execution, at least 16 available
-CPUs, at least 60 GiB usable RAM on a nominal 64-GB machine, and no smaller thread
+CPUs, at least 28 GiB usable RAM on a nominal 32-GB machine, and no smaller thread
 caps. This is our reproducible development target, not a universal TabArena
 hardware rule. A dedicated VM still does not reproduce the official CPU model.
 See [plan selection](https://docs.digitalocean.com/products/droplets/concepts/choosing-a-plan/)
 and [creation instructions](https://docs.digitalocean.com/products/droplets/how-to/create/).
 
 The Codex DigitalOcean plugin's small default development image/size is not this
-benchmark target. This guide uses the provider console so the required machine
-can be selected explicitly. No cluster or GPU is needed.
+benchmark target. Use the provider console or the installed Codex DigitalOcean app with the exact
+provider-verified size slug; do not substitute the plugin’s small default size.
+Check account eligibility and available regions before creation; an active account
+and credit balance alone do not prove permission to create this size. No cluster or GPU is needed.
 
 ## Bootstrap a frozen checkout
 
@@ -69,18 +72,22 @@ bash benchmarks/tabarena/remote/run-session.sh smoke 2
 
 The script prints its session folder under `/root/alloygbm-session-*`. Follow its
 `run.log`, then inspect the individual `job_logs/`, coverage and report before
-running a larger profile. The pilot uses the three official smoke tasks, four
-boosters with default + one sample, and a default RandomForest calibrator:
-**27 outer jobs / 216 child fits**. It checks execution, not competitiveness.
+running a larger profile. The pilot uses the three official smoke tasks, **AlloyGBM only**, default + one sample:
+**6 outer jobs / 48 child fits**. The 51-dataset, 26-configuration full plan is
+recorded from the first stage so these successful fits are reused later. It checks execution, not competitiveness.
 
 After a successful pilot, choose an explicit cap using observed fit times and
 the current rate. These are examples of caps, not completion estimates:
 
 ```bash
-# Defaults only: 255 outer jobs, including 51 default RF calibration jobs.
+# Larger/feature-rich official tasks, default + first sample (4 jobs):
+bash benchmarks/tabarena/remote/run-session.sh large 2
+# All 51 default configurations (408 child fits), reusing completed defaults:
 bash benchmarks/tabarena/remote/run-session.sh lite-defaults 6
-# Standard initial HPO scope: default + 25 samples for each booster, plus RF.
-# 5,355 outer jobs / 42,840 child fits; may require many sessions/days.
+# Standard initial author scope: AlloyGBM default + 25 samples across 51 datasets.
+# 1,326 outer jobs / 10,608 child fits TOTAL, including earlier stages.
+# A 12-hour fitting cap costs at most $6 of fit time at $0.50/hour;
+# provisioning, installation, reporting, export and idle allocation also bill.
 bash benchmarks/tabarena/remote/run-session.sh lite-hpo 12
 ```
 
@@ -88,8 +95,9 @@ The session script records fit/report exit codes, keeps failed-job diagnostics,
 and attempts an evidence export on normal completion, a fit failure or expiration
 of the fit cap. If it is killed externally, runs out of disk, or export fails,
 follow the manual export below. Failures require inspection; do not report them
-as scores. With RF present, reports use upstream calibration and RF fallback.
-If RF fails a scoped task, ranking is refused until it is repaired.
+as scores. Reports use `--published-only` with upstream’s published RF calibration/fallback.
+Peer libraries are not refitted. Coverage retains every pending/failed job, and
+intermediate ranks are explicitly partial until the intended scope completes.
 
 To resume on the **same unchanged host/checkout/environment**, provide the exact
 run directory printed in the log:
@@ -151,3 +159,29 @@ The archive round trip, corruption checks, resource gate and shell syntax are
 tested locally. A fresh Ubuntu installation and full Linux Ray pilot still need
 to be executed on the selected droplet before committing money to Lite HPO.
 Local macOS smoke results cannot certify that deployment or satisfy acceptance.
+
+## Cost control and parallelism
+
+At the verified $0.50/hour rate, two hours of allocated time costs $1, 12 hours
+costs $6, and a full day costs $12 (excluding tax or separately billed services).
+These are spending examples, not completion estimates. The fit cap is **not** a
+provider billing cap: the droplet keeps billing during setup, reporting, export
+and any idle pause. Record creation/destruction timestamps and rate, track elapsed
+allocation cost, and monitor failures/completion so the VM is not left idle.
+Copy verified evidence before a significant pause and destroy the droplet. The
+user has authorized cleanup after preserving evidence; do not delete unrelated
+resources. A replacement VM has a new runtime identity and cannot silently resume
+as the old host.
+
+The runner gives the machine’s 16-CPU budget to upstream. Ray/AutoGluon schedules
+folds in parallel and budgets CPUs per child (often eight children at two CPUs,
+subject to memory). The AlloyGBM adapter passes that child budget as `n_jobs`.
+Verify the pilot’s upstream fold-strategy logs, `method_metadata.num_cpus` and
+`num_cpus_child`, plus `resources.log` (CPU utilization, memory and steal time),
+before launching the longer stages. Linux reuses its Ray runtime across jobs;
+local macOS/native diagnostics retain process isolation. Eight folds remain eight
+folds even when upstream reduces concurrency for memory.
+
+The committed source checkout, not the current PyPI release, is built in release
+mode. Record the exact source SHA and extension hash; freeze them for every stage.
+Do not change model code or its search space after inspecting outer test scores.

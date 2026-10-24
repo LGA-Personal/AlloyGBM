@@ -46,11 +46,11 @@ The `[benchmark]` dependency union includes upstream's full fitting/preprocessin
 | lite-hpo | All 51 Lite datasets, first official split | 25 |
 | full | Full official task collection | Upstream `all` (currently 200) |
 
-Every profile retains 8×1 inner bagging. The default candidate is additional to sampled candidates. Lite HPO with four methods entails **5,355 outer jobs / 42,840 child fits**, including 51 default RandomForest calibration jobs; large runs can take days or longer. `--datasets NAME ...` and `--models AlloyGBM LightGBM XGBoost CatBoost RandomForest` narrow development scope; such runs are explicitly subsets, not full Lite acceptance. `--threads` applies consistently to all entrants and numerical thread environment variables. Omitting it inherits upstream CPU allocation and records the resolved fit resources. Keep the machine otherwise idle for meaningful timing comparisons.
+Every profile retains 8×1 inner bagging. The default candidate is additional to sampled candidates. The default entrant is **AlloyGBM only**. Its defaults require **51 jobs / 408 child fits**; Lite HPO requires **1,326 jobs / 10,608 child fits**, including those defaults. Existing competitors come from published TabArena artifacts. Peer reruns are optional via `--models AlloyGBM LightGBM XGBoost CatBoost RandomForest` (5,355 jobs); they are useful for matched hardware timing, not required for Lite acceptance. `--datasets NAME ...` narrows the immutable scope and is not full Lite acceptance. `--threads` applies consistently to all entrants and numerical thread environment variables. Omitting it inherits upstream CPU allocation and records the resolved fit resources. Keep the machine otherwise idle for meaningful timing comparisons.
 
-The default is `--execution upstream`. Acceptance requires Linux x86_64, at least 16 available CPUs, at least 60 GiB usable RAM (nominal 64 GB), no numerical thread caps below 16, and upstream Ray execution. This is the project’s compute policy based on the upstream CPU partition, not a claim that TabArena forbids other hardware.
+The default is `--execution upstream`. Acceptance requires Linux x86_64, at least 16 available CPUs, at least 28 GiB usable RAM (nominal 32 GB), no numerical thread caps below 16, and upstream Ray execution. This is the project’s compute policy for the selected DigitalOcean CPU-optimized host, not a claim that TabArena forbids other hardware.
 
-`--execution local` is an explicit development option and uses upstream's native backend and documented debug/quickstart execution with sequential local fold fitting. Each *outer job* executes in a fresh process: macOS crashes when these particular AlloyGBM/LightGBM OpenMP warmups share process state. Dataset loading, preprocessing, warmup, eight folds, fit limits, predictions and scoring remain upstream code. `--execution upstream` uses upstream Ray execution and defaults. Sequential one-thread runs can complete fewer rounds or time out differently under the fixed one-hour budget; their accuracy and timings are evidence for those recorded resources only; official maintainers can require a full Ray/cluster rerun on their hardware.
+`--execution local` is an explicit development option and uses upstream's native backend and documented debug/quickstart execution with sequential local fold fitting. For local/macOS diagnostics, each *outer job* executes in a fresh process: macOS crashes when these particular AlloyGBM/LightGBM OpenMP warmups share process state. Dataset loading, preprocessing, warmup, eight folds, fit limits, predictions and scoring remain upstream code. On Linux, `--execution upstream` reuses one upstream context and Ray runtime across outer jobs, while preserving per-job logs; it uses upstream parallel fold scheduling and defaults. The framework divides the whole-machine CPU budget among children and can reduce concurrency for memory. It does not allocate 16 CPUs to each of eight concurrent children. Outer jobs run one at a time to keep each configuration’s resource budget intact. Sequential one-thread runs can complete fewer rounds or time out differently under the fixed one-hour budget; their accuracy and timings are evidence for those recorded resources only; official maintainers can require a full Ray/cluster rerun on their hardware.
 
 The runner stores immutable configs, tasks, serialized jobs, code/build/dependency identity and an fsynced job ledger. Worker stdout/stderr, including crash tracebacks and separate retry-attempt markers, persists in `job_logs/<job-key>.log`. Completion requires a cache with eight fitted children, enforced standard protocol, finite aligned predictions and disjoint training/OOF and test rows. Failures are recorded, never converted to scores. Interrupts leave an interrupted `started` entry; resume reruns it through upstream's cache path. Torn final ledger writes are recoverable. Concurrent drivers for one run directory are rejected.
 
@@ -66,24 +66,26 @@ Supply the same profile/scope/resources/execution on resume. Changed source, ext
 
 ```bash
 .venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/run/directory
-# Optional broader context; downloads published upstream artifacts:
+# Recommended comparison; downloads published upstream artifacts without fitting peers:
+.venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/run/directory --published-only
+# Optional matched local pool plus published context (requires suitable local coverage):
 .venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/run/directory --published-context
 ```
 
 Reporting never fits models. The local artifact root is carried explicitly in method metadata so Ray workers and the driver write to the same cache. Reports record their processor code hash as well as the original run identity. Only ledger-completed, conformant caches enter upstream `EndToEnd` processing. Normal outputs include per-split results, leaderboard, method info, win-rate/Pareto plots, and default/tuned/tuned + ensemble variants; configuration and variant CSVs are exported beside `coverage.csv`. Tuned and ensemble weight CSVs replay upstream selection from cached predictions using each variant's recorded settings; their scores must match the standard output. This diagnostic never replaces the upstream scores. The one-candidate smoke is a workflow check, not competitive evidence. A zero-candidate profile has no actual tuning, even if upstream emits the variant names.
 
-The matched local pool includes the four boosters and a **default-only RandomForest** fitted on the same host/scope. Its upstream context uses `[Local] RF (default)` for calibration and failure fallback. RF must complete every scoped task before local ranking is allowed. A deliberately narrowed run without RF can generate a diagnostic ranking only with complete coverage; failures cannot silently disappear. Entirely unsuccessful entrants block local ranking. Coverage retains the actual failures even when upstream ranking imputes RF scores. Local Elo remains pool-relative.
+An optional matched local pool can include the four boosters and a **default-only RandomForest** fitted on the same host/scope. Its upstream context uses `[Local] RF (default)` for calibration and failure fallback. RF must complete every scoped task before local ranking is allowed. A deliberately narrowed run without RF can generate a diagnostic ranking only with complete coverage; failures cannot silently disappear. Entirely unsuccessful entrants block local ranking. Coverage retains the actual failures even when upstream ranking imputes RF scores. Local Elo remains pool-relative.
 
-The optional published context adds **only AlloyGBM** to the published entrants. Local LightGBM/XGBoost/CatBoost/RF reruns remain in the matched local pool. Published comparisons retain upstream default RF calibration/fallback and record source metadata and artifact hashes. Lite AlloyGBM has **25 sampled candidates plus default**, while published tuned baselines generally use **200**; this budget difference belongs beside tuned-variant claims. Published timings mix hardware and versions and cannot establish matched local speedups. No command uploads results or marks them verified. The current wrapper deliberately fails closed when a training partition lacks a global class, instead of silently changing prediction columns; inspect such failures. A static memory estimator remains a future profiling task permitted by upstream’s submission guidance.
+The recommended `--published-only` context adds **only AlloyGBM** to the published entrants and does not require local RF or other peer fits. `--published-context` additionally produces the optional local pool. Local LightGBM/XGBoost/CatBoost/RF reruns remain in the matched local pool. Published comparisons retain upstream default RF calibration/fallback and record source metadata and artifact hashes. Lite AlloyGBM has **25 sampled candidates plus default**, while published tuned baselines generally use **200**; this budget difference belongs beside tuned-variant claims. Published timings mix hardware and versions and cannot establish matched local speedups. No command uploads results or marks them verified. The current wrapper deliberately fails closed when a training partition lacks a global class, instead of silently changing prediction columns; inspect such failures. A static memory estimator remains a future profiling task permitted by upstream’s submission guidance.
 
 ## Migration gate
 
-The old harness remains active until standard Lite acceptance: all expected jobs (including default RF) have recorded terminal outcomes on the required execution/resources, all booster variants and RF’s default process, failures have explanations, resume does not refit completed jobs, and cached report regeneration works. The retirement PR is separate and must not merge before that evidence exists. Preserve library correctness tests when retiring benchmark-only assertions. Full-suite completion must never be inferred from smoke success.
+The old harness remains active until standard Lite acceptance: all 1,326 expected AlloyGBM jobs have recorded terminal outcomes on the required execution/resources, all three AlloyGBM variants process against the published pool with standard published RF calibration/fallback, failures have explanations, resume does not refit completed jobs, and cached report regeneration works. The retirement PR is separate and must not merge before that evidence exists. Preserve library correctness tests when retiring benchmark-only assertions. Full-suite completion must never be inferred from smoke success.
 
 After the full Lite run, regenerate the standard published-context comparison before acceptance (the local diagnostic pool alone cannot satisfy the gate):
 
 ```bash
-.venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/lite-hpo/run --published-context
+.venv-tabarena/bin/python -m benchmarks.tabarena.report /absolute/lite-hpo/run --published-only
 .venv-tabarena/bin/python -m benchmarks.tabarena.acceptance /absolute/lite-hpo/run
 # If there were failures, supply a JSON object mapping each failed ledger key to
 # an examined explanation. Adapter/protocol defects must be fixed and rerun.
@@ -93,3 +95,36 @@ After the full Lite run, regenerate the standard published-context comparison be
 Archive the resulting `acceptance.json` and provenance with development evidence before merging the retirement PR. This mechanical audit does not approve failure explanations or establish official submission eligibility.
 
 Review follow-up and validation: [2026-10-20 resolutions](../../docs/reviews/2026-10-20-tabarena-resolutions.md).
+
+## Staged execution and metrics
+
+`--stage-datasets NAME ...` and `--stage-candidates N` select work from a full,
+immutable plan without changing its identity, splits, candidate parameters or
+seeds. A limit of 0 executes only the default; 1 executes default plus the first
+sample. Keep `--profile lite-hpo`, the output root, source and resources unchanged
+between stages. Completed, checksum-verified fits are reused; only pending work
+runs. Do not confuse these execution selectors with `--datasets`, which changes
+the benchmark scope. Coverage and summaries mark the unfinished full plan partial.
+The droplet session script uses these selectors for smoke, large-data, default
+and HPO stages, sharing one cache. Reporting/ensembling uses saved predictions and
+never refits configurations.
+
+The official Lite protocol is the first official outer split for each of 51
+datasets, with eight inner folds and one bagging set. It is not an arbitrary
+multi-seed mean. Upstream varies model seeds across folds and configurations;
+we preserve that schedule (default base 0, first sampled base 8, then disjoint
+8-seed blocks). Search-space sampling uses 1234. No blanket seed of 42 is imposed.
+The full official collection has additional outer splits; Lite is the standard
+initial author evaluation, not the final verified hosted entry.
+
+The upstream published-context report produces Elo, ranks, normalized error,
+improvability, win-rate comparisons, training/inference timing and Pareto plots,
+plus per-dataset/split scores and the default/tuned/tuned+ensemble variants.
+Retain `coverage.csv`, per-config/variant CSVs, selection weights, raw validation
+and test predictions, manifests, dependency/build identity and published source
+hashes. Local tuning has 25 sampled candidates plus default; published methods
+usually have 200. Elo is relative to the recorded comparison pool; timing against
+published methods mixes hardware and versions. Failed/pending work is visible,
+never silently omitted or treated as a measured score. The published RF fallback
+is applied by upstream; acceptance still requires every job to reach a terminal
+outcome and every failure to have an examined explanation.
