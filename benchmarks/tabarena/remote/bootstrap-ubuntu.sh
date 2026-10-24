@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run on a fresh Ubuntu 24.04 x86_64 droplet, in a checkout at an exact commit.
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
 cd "$(dirname "$0")/../../.."
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { echo 'Requires Linux x86_64' >&2; exit 1; }
 sudo_cmd=()
