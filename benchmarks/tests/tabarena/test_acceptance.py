@@ -125,3 +125,31 @@ def test_acceptance_requires_standard_context_bound_to_same_ledger():
         validate_report_evidence(
             manifest, summary, {**sources, "fillna_method": None}, "ledger"
         )
+
+
+def test_full_acceptance_requires_every_official_split_and_200_samples():
+    from benchmarks.tabarena.protocol import RunSpec, resolve_run
+
+    resolved = resolve_run(
+        RunSpec(profile="full", num_cpus=16, search_space="modes-v2")
+    )
+    jobs = [j.to_dict() for j in resolved.jobs]
+    from dataclasses import asdict
+
+    manifest = {
+        "spec": asdict(resolved.spec),
+        "tasks": resolved.tasks,
+        "runtime": {
+            "platform": "Linux-test",
+            "machine": "x86_64",
+            "hardware": {"effective_cpus": 16, "memory_total_bytes": 31 * 1024**3},
+            "thread_environment": {},
+        },
+    }
+    latest = {fingerprint(j): {"status": "completed"} for j in jobs}
+    assert not validate_scope_and_outcomes(manifest, jobs, latest, {})
+    with pytest.raises(ValueError):
+        validate_scope_and_outcomes(manifest, jobs[:-1], latest, {})
+    latest.pop(next(iter(latest)))
+    with pytest.raises(ValueError, match="terminal"):
+        validate_scope_and_outcomes(manifest, jobs, latest, {})
