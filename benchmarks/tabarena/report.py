@@ -208,7 +208,7 @@ def process_standard_results(run_dir):
     return results.to_method_metadata_lst(new_result_prefix="[Local] ")
 
 
-def _write_report(run_dir, *, published_context=False):
+def _write_report(run_dir, *, published_context=False, published_only=False):
     import pandas as pd
 
     from benchmarks.tabarena.protocol import COUNTS, RunSpec, resolve_run
@@ -220,7 +220,12 @@ def _write_report(run_dir, *, published_context=False):
     methods = process_standard_results(run_dir)
     manifest = json.loads((run_dir / "run_manifest.json").read_text())
     backend = "native" if manifest["spec"]["execution"] == "local" else "ray"
-    calibrated = validate_local_coverage(manifest, load_latest(run_dir))
+    published_context = published_context or published_only
+    calibrated = (
+        validate_local_coverage(manifest, load_latest(run_dir))
+        if not published_only
+        else False
+    )
     missing = {"[Local] " + name for name in manifest["spec"]["models"]} - {
         m.method for m in methods
     }
@@ -235,12 +240,15 @@ def _write_report(run_dir, *, published_context=False):
     )
     # Scope by planned tasks, never only successful AlloyGBM tasks: otherwise
     # failures on entire datasets could disappear before upstream RF imputation.
-    context = comparison_context(
-        methods, backend, calibrated=calibrated, task_metadata=planned_tasks
-    )
-    output = run_dir / "report-local"
-    leaderboard = context.compare(output_dir=output)
-    leaderboard.to_csv(output / "leaderboard.csv", index=False)
+    context = None
+    output = run_dir / ("report-published" if published_only else "report-local")
+    if not published_only:
+        context = comparison_context(
+            methods, backend, calibrated=calibrated, task_metadata=planned_tasks
+        )
+        output = run_dir / "report-local"
+        leaderboard = context.compare(output_dir=output)
+        leaderboard.to_csv(output / "leaderboard.csv", index=False)
     coverage = pd.read_csv(run_dir / "coverage.csv")
     summary = {
         "run_fingerprint": manifest["fingerprint"],
@@ -253,7 +261,7 @@ def _write_report(run_dir, *, published_context=False):
         "partial": not coverage.status.eq("completed").all(),
         "protocol": "TabArena-v0.1 8x1",
         "execution": manifest["spec"]["execution"],
-        "local_pool_calibration": context.calibration_method,
+        "local_pool_calibration": context.calibration_method if context else None,
         "public_defaults": "current constructor parameters with framework-supplied validation and stopping metric",
         "alloygbm_stopping_policy": {
             "binary_and_regression": "metric callback uses absolute improvement and configured patience; public relative-improvement tolerance is not applied",
@@ -265,15 +273,6 @@ def _write_report(run_dir, *, published_context=False):
         "official_submission_verified": False,
         "published_context": published_context,
     }
-    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    (output / "summary.md").write_text(
-        "# Local standard TabArena results\n\n"
-        + "Protocol: official TabArena-v0.1, 8 folds × 1 set. Local entrant pool; calibration/fallback recorded below.\n\n"
-        + "Scope and missing outcomes must be read alongside ranks. These are not official leaderboard placements.\n\n"
-        + "```json\n"
-        + json.dumps(summary, indent=2)
-        + "\n```\n"
-    )
     if published_context:
         published = comparison_context(
             methods, backend, published=True, task_metadata=planned_tasks
@@ -297,6 +296,8 @@ def _write_report(run_dir, *, published_context=False):
                     "run_fingerprint": manifest["fingerprint"],
                     "ledger_sha256": file_hash(run_dir / "jobs.jsonl"),
                     "report_code_sha256": file_hash(Path(__file__)),
+                    "calibration_method": published.calibration_method,
+                    "fillna_method": published.fillna_method,
                     "local_entrants": [
                         m.method for m in methods if m.method == "[Local] AlloyGBM"
                     ],
@@ -314,24 +315,50 @@ def _write_report(run_dir, *, published_context=False):
         (run_dir / "report-published" / "SOURCE_NOTE.md").write_text(
             "Published results use their source hardware/library versions and candidate budgets; local results use this run manifest. "
             "The published Pareto/timing outputs are mixed-hardware context, not local speedup evidence. "
-            "See report-local for the matched local entrant pool.\n"
+            "A matched local pool is optional and is generated only when requested.\n"
             "Only AlloyGBM is added to the published pool. "
             f"Local sampled candidates per booster: {COUNTS[manifest['spec']['profile']]} (additional to default); published tuned baselines generally use 200.\n"
         )
+    if published_context:
+        (run_dir / "report-published/summary.json").write_text(
+            json.dumps(summary, indent=2) + "\n"
+        )
+    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (output / "summary.md").write_text(
+        "# Local standard TabArena results\n\n"
+        + "Protocol: official TabArena-v0.1, 8 folds × 1 set. Entrant pool and calibration/fallback are recorded in sources.json for published comparisons.\n\n"
+        + "Scope and missing outcomes must be read alongside ranks. These are not official leaderboard placements.\n\n"
+        + "```json\n"
+        + json.dumps(summary, indent=2)
+        + "\n```\n"
+    )
     return output
 
 
-def write_report(run_dir, *, published_context=False):
+def write_report(run_dir, *, published_context=False, published_only=False):
     from benchmarks.tabarena.run import exclusive_run
 
     run_dir = Path(run_dir).resolve()
     with exclusive_run(run_dir):
-        return _write_report(run_dir, published_context=published_context)
+        return _write_report(
+            run_dir, published_context=published_context, published_only=published_only
+        )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--published-context", action="store_true")
+    parser.add_argument(
+        "--published-only",
+        action="store_true",
+        help="Use published baselines and RF calibration without requiring local peer fits",
+    )
     args = parser.parse_args()
-    print(write_report(args.run_dir, published_context=args.published_context))
+    print(
+        write_report(
+            args.run_dir,
+            published_context=args.published_context,
+            published_only=args.published_only,
+        )
+    )

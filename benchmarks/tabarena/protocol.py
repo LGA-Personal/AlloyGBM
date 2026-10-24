@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 SMOKE = ("blood-transfusion-service-center", "QSAR_fish_toxicity", "anneal")
 MODELS = ("AlloyGBM", "LightGBM", "XGBoost", "CatBoost", "RandomForest")
+DEFAULT_MODELS = ("AlloyGBM",)
 COUNTS = {"smoke": 1, "lite-defaults": 0, "lite-hpo": 25, "full": "all"}
 
 
@@ -14,7 +15,7 @@ class RunSpec:
     profile: str = "smoke"
     num_cpus: int | None = None
     dataset_names: tuple[str, ...] | None = None
-    models: tuple[str, ...] = MODELS
+    models: tuple[str, ...] = DEFAULT_MODELS
     execution: str = "upstream"
 
     def __post_init__(self):

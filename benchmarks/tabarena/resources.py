@@ -1,8 +1,8 @@
 """Project acceptance policy, stricter than TabArena's hardware portability rules."""
 
 MIN_CPUS = 16
-# A nominal 64 GB VM exposes slightly less memory to the OS.
-MIN_MEMORY_BYTES = 60 * 1024**3
+# The selected nominal 32 GB droplet exposes slightly less memory to the OS.
+MIN_MEMORY_BYTES = 28 * 1024**3
 
 
 def validate_acceptance_resources(spec, runtime):
@@ -26,6 +26,6 @@ def validate_acceptance_resources(spec, runtime):
         raise ValueError(
             "acceptance resources require upstream Ray execution on Linux x86_64, "
             "at least 16 available CPUs, a CPU budget >=16 within that allocation, "
-            "60 GiB usable RAM, and no smaller numerical thread caps; "
+            "28 GiB usable RAM (nominal 32 GB), and no smaller numerical thread caps; "
             "reduced runs remain development diagnostics"
         )
